@@ -1,0 +1,6 @@
+module libzstd {
+    textual header "zstd.h"
+    textual header "zstd_errors.h"
+    textual header "zdict.h"
+    export *
+}

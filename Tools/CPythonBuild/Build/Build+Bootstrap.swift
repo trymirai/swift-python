@@ -1,0 +1,124 @@
+//
+//  Created by Anton Spivak
+//
+
+import Subprocess
+import SystemPackage
+
+extension Build {
+    func buildFreezer() async throws -> FilePath {
+        let source = workspace.sourceDirectory
+        // Host compilation must not inherit SwiftBuild's destination SDK/deployment
+        // variables: a Linux/iOS build still needs a runnable host C freezer.
+        let hostEnvironment = Environment.custom([
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LC_ALL": "C",
+            "PYTHON_FOR_REGEN": "false",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "CONFIG_SITE": "/dev/null",
+            "CC": "/usr/bin/cc",
+            "CXX": "/usr/bin/c++",
+            "AR": "/usr/bin/ar",
+            "RANLIB": "/usr/bin/ranlib",
+            "PKG_CONFIG": "/usr/bin/false",
+        ])
+
+        let bootstrap = workspace.outputDirectory.appending("Bootstrap")
+        try await workspace.fileSystem.createDirectory(
+            at: bootstrap,
+            withIntermediateDirectories: true,
+        )
+        // A build-tool process can run under Rosetta while its compiler targets arm64.
+        let compilerTarget = try await workspace.run(
+            "/usr/bin/cc",
+            ["-dumpmachine"],
+            in: bootstrap,
+            stage: "Read host compiler target",
+            environment: hostEnvironment,
+            output: .string(limit: 1 << 20),
+        )
+        guard let triple = compilerTarget.split(whereSeparator: \.isWhitespace).first else {
+            throw Failure("Missing host compiler target.")
+        }
+
+        let target = try await workspace.run(
+            source.appending("config.sub"),
+            [String(triple)],
+            in: bootstrap,
+            stage: "Resolve CPython host target",
+            environment: hostEnvironment,
+            output: .string(limit: 1 << 20),
+        )
+        guard let host = target.split(whereSeparator: \.isWhitespace).first else {
+            throw Failure("Missing CPython host target.")
+        }
+
+        let makefile = bootstrap.appending("Makefile")
+        let configuration = if try await workspace.fileSystem.info(forFileAt: makefile) != nil {
+            try await workspace.read(textFrom: makefile)
+        } else {
+            ""
+        }
+
+        let hostKey = "HOST_GNU_TYPE="
+        let configuredHost = configuration.split(separator: "\n")
+            .first { $0.hasPrefix(hostKey) }?
+            .dropFirst(hostKey.count)
+            .split(whereSeparator: \.isWhitespace)
+            .first
+
+        if configuredHost != host {
+            workspace.logger.info("Configuring the CPython host freezer")
+            let result = try await Subprocess::run(
+                .path(.init(source.appending("configure").string)),
+                arguments: [
+                    "--quiet",
+                    "--build=\(host)",
+                    "--host=\(host)",
+                    "--without-ensurepip",
+                    "--without-mimalloc",
+                    "--disable-test-modules",
+                    "--disable-shared",
+                    "--with-pkg-config=no",
+                ],
+                environment: hostEnvironment,
+                workingDirectory: .init(bootstrap.string),
+                output: .currentStandardOutput,
+                error: .string(limit: 1 << 20),
+            )
+            guard result.terminationStatus == .exited(0) else {
+                throw Failure(
+                    "Configure host freezer failed (\(result.terminationStatus)).\n\(result.standardError)",
+                )
+            }
+
+            // configure probes optional Python modules even when bootstrapping _freeze_module.
+            // This step skips pkg-config because SwiftPM selects libraries for the final runtime.
+            for line in result.standardError.split(whereSeparator: \.isNewline) {
+                switch line {
+                case "configure: WARNING: no system libmpdec found; falling back to pure-Python version for the decimal module",
+                     "configure: WARNING: pkg-config is missing. Some dependencies may not be detected correctly.":
+                    workspace.logger.debug("\(line)")
+                default:
+                    workspace.logger.warning("\(line)")
+                }
+            }
+        }
+
+        try await workspace.run(
+            "/usr/bin/make",
+            [
+                "-s",
+                "-j\(jobs)",
+                "Programs/_freeze_module",
+                "Python/frozen.o",
+                "Python/frozen_modules/getpath.h",
+            ],
+            in: bootstrap,
+            stage: "Build host freezer",
+            environment: hostEnvironment,
+        )
+
+        return bootstrap.appending("Programs/_freeze_module")
+    }
+}

@@ -1,0 +1,24 @@
+[submodule "Submodules/cpython"]
+	path = Submodules/cpython
+	url = https://github.com/python/cpython.git
+[submodule "Submodules/cpython-apple-source-deps"]
+	path = Submodules/cpython-apple-source-deps
+	url = https://github.com/beeware/cpython-apple-source-deps.git
+[submodule "Submodules/openssl"]
+	path = Submodules/openssl
+	url = https://github.com/openssl/openssl.git
+[submodule "Submodules/xz"]
+	path = Submodules/xz
+	url = https://github.com/tukaani-project/xz.git
+[submodule "Submodules/zstd"]
+	path = Submodules/zstd
+	url = https://github.com/facebook/zstd.git
+[submodule "Submodules/libffi"]
+	path = Submodules/libffi
+	url = https://github.com/libffi/libffi.git
+[submodule "Submodules/sqlite"]
+	path = Submodules/sqlite
+	url = https://github.com/sqlite/sqlite.git
+[submodule "Submodules/ncurses"]
+	path = Submodules/ncurses
+	url = https://github.com/ThomasDickey/ncurses-snapshots.git

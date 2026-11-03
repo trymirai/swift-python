@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/tinfo/read_entry.c

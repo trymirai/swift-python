@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/tinfo/write_entry.c

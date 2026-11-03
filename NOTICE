@@ -1,0 +1,98 @@
+The swift-python Project
+========================
+
+This notice identifies the third-party software included in swift-python.
+
+-------------------------------------------------------------------------------
+
+This product contains CPython 3.16.0a1.
+
+  * SOURCE
+    * https://github.com/python/cpython/tree/22d79d9840a275ed6ed36cd590dc74edc61765fb
+  * LICENSES AND NOTICES
+    * Sources/libcpython/LICENSE (PSF and historical licenses)
+    * Sources/libcpython/LICENSE.CPython-Incorporated.rst (incorporated software)
+    * Sources/libcpython/LICENSE.Expat (Expat)
+    * Sources/libcpython/LICENSE.HACL (HACL* and KaRaMeL)
+
+CPython changes
+
+SwiftPM builds selected CPython modules with platform configurations and
+embedding and system trust adapters. A package importer loads the embedded
+standard-library bytecode and resources.
+
+-------------------------------------------------------------------------------
+
+This product contains OpenSSL 3.5.9.
+
+  * SOURCE
+    * https://github.com/openssl/openssl/tree/45e844fa2a14ec92d146bd8f5778ac130b6625fb
+  * LICENSE (Apache 2.0)
+    * Sources/libopenssl/LICENSE
+
+-------------------------------------------------------------------------------
+
+This product contains mpdecimal 4.0.1.
+
+  * SOURCE
+    * https://www.bytereef.org/software/mpdecimal/releases/mpdecimal-4.0.1.tar.gz
+    * SHA-256 96d33abb4bb0070c7be0fed4246cd38416188325f820468214471938545b1ac8
+  * LICENSE (BSD)
+    * Sources/libmpdec/LICENSE
+
+-------------------------------------------------------------------------------
+
+This product contains libffi 3.8.0.
+
+  * SOURCE
+    * https://github.com/libffi/libffi/tree/12ffd1f9dc56fcea79d2f742f424301ae668d663
+  * LICENSE (MIT)
+    * Sources/libffi/LICENSE
+
+-------------------------------------------------------------------------------
+
+This product contains liblzma from XZ Utils 5.8.4.
+
+  * SOURCE
+    * https://github.com/tukaani-project/xz/tree/d3e650e63c110e830fd5391e7f8b45df0b91d3da
+  * LICENSE (0BSD)
+    * Sources/liblzma/LICENSE
+
+-------------------------------------------------------------------------------
+
+This product contains Zstandard 1.5.7, including xxHash.
+xxHash copyright (c) Yann Collet - Meta Platforms, Inc.
+
+  * SOURCE
+    * https://github.com/facebook/zstd/tree/f8745da6ff1ad1e7bab384bd1f9d742439278e99
+  * LICENSE (BSD)
+    * Sources/libzstd/LICENSE
+
+-------------------------------------------------------------------------------
+
+This product contains SQLite 3.53.4.
+
+  * SOURCE
+    * https://github.com/sqlite/sqlite/tree/b09c88c14082339b66c7b7158d609a771e64ca69
+  * PUBLIC-DOMAIN DEDICATION
+    * Sources/libsqlite/LICENSE.md
+
+-------------------------------------------------------------------------------
+
+This product contains ncurses 6.6-20261031 on Linux.
+
+  * SOURCE
+    * https://github.com/ThomasDickey/ncurses-snapshots/tree/26ceb3cbd343d2e503ca21d90077143a12727c22
+  * LICENSE
+    * Sources/libncurses/LICENSE
+
+-------------------------------------------------------------------------------
+
+This product contains libedit 20260512-3.1 on Linux.
+
+  * SOURCE
+    * https://thrysoee.dk/editline/libedit-20260512-3.1.tar.gz
+    * SHA-256 432d5e7ea8b0116dd39f2eca7bc11d0eed77faa6b77ea526ace89907c23ea4a0
+  * LICENSES AND NOTICES
+    * Sources/libedit/LICENSE (BSD)
+    * Individual files in Submodules/libedit/src/ carry additional notices.

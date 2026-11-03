@@ -1,0 +1,1 @@
+../../Generated/ncurses/comp_captab.c

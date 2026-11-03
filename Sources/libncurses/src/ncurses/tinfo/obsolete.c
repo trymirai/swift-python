@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/tinfo/obsolete.c

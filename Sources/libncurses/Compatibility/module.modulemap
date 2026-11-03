@@ -1,0 +1,10 @@
+module libncurses {
+    textual header "curses.h"
+    textual header "ncurses.h"
+    textual header "term.h"
+    textual header "termcap.h"
+    textual header "unctrl.h"
+    textual header "ncurses_dll.h"
+    textual header "panel.h"
+    export *
+}

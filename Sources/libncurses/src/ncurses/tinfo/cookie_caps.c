@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/tinfo/cookie_caps.c

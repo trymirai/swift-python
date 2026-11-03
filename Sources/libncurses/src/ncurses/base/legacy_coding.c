@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/base/legacy_coding.c

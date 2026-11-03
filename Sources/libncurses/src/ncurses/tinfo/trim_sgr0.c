@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/tinfo/trim_sgr0.c

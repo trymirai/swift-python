@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/tinfo/strings.c

@@ -1,0 +1,5 @@
+module libedit {
+    textual header "histedit.h"
+    textual header "editline/readline.h"
+    export *
+}

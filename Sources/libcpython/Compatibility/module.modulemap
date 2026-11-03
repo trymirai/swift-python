@@ -1,0 +1,5 @@
+module libcpython {
+    header "Python.h"
+    header "embedded.h"
+    export *
+}

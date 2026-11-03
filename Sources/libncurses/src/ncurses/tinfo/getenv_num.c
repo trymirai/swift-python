@@ -1,0 +1,1 @@
+../../../../../Submodules/ncurses/ncurses/tinfo/getenv_num.c
