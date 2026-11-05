@@ -20,7 +20,7 @@ extension CPythonBuild {
         var packageDirectory: FilePath?
 
         @Option(help: "Parallel compiler jobs.")
-        var jobs = 6
+        var jobs: Int = 6
 
         func validate() throws {
             if let packageDirectory, !packageDirectory.isAbsolute {
@@ -43,7 +43,7 @@ extension CPythonBuild {
 
             try await fileSystem.createDirectory(at: build, withIntermediateDirectories: true)
             try await fileSystem.withTemporaryDirectory(prefix: build) { _, directory in
-                let workspace = Workspace(
+                let workspace = BuildWorkspace(
                     packageDirectory: package,
                     outputDirectory: directory,
                     logger: parent.makeLogger(),

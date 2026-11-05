@@ -22,6 +22,7 @@ typedef struct {
 
 extern const CPythonEmbeddedModule CPythonEmbeddedModules[];
 extern const size_t CPythonEmbeddedModuleCount;
+
 extern const CPythonEmbeddedResource CPythonEmbeddedResources[];
 extern const size_t CPythonEmbeddedResourceCount;
 

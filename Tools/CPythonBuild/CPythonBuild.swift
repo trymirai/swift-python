@@ -33,7 +33,3 @@ extension CPythonBuild {
         return logger
     }
 }
-
-// MARK: - Logger.Level + @retroactive ExpressibleByArgument
-
-extension Logger.Level: @retroactive ExpressibleByArgument {}

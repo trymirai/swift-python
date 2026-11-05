@@ -30,7 +30,8 @@ SWIFT_PYTHON_LINK_LIBRARY("lzma")
 SWIFT_PYTHON_LINK_LIBRARY("zstd")
 #endif
 
-#if !defined(SWIFT_PYTHON_BUNDLED_SQLITE) && !(defined(__linux__) && __has_include(<swift_python_default_libraries.h>))
+#if !defined(SWIFT_PYTHON_BUNDLED_SQLITE) &&                                                       \
+    !(defined(__linux__) && __has_include(<swift_python_default_libraries.h>))
 SWIFT_PYTHON_LINK_LIBRARY("sqlite3")
 #endif
 

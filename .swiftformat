@@ -1,0 +1,88 @@
+# SwiftFormat 0.63.0 and Swift 6.4.
+--min-version 0.63.0
+--swift-version 6.4
+--language-mode 6
+--conflict-markers reject
+--exclude .build,DerivedData,build,Submodules
+
+# Explicit audited allow-list. New SwiftFormat defaults do not join implicitly.
+--disable all
+--enable anyObjectProtocol,assertionFailures,blankLineAfterImports,blankLinesAroundMark,blankLinesAtEndOfScope,blankLinesAtStartOfScope,blankLinesBetweenImports,blankLinesBetweenScopes,blockComments,braces,conditionalAssignment,consecutiveBlankLines,consecutiveSpaces,consistentSwitchCaseSpacing,docCommentsBeforeModifiers,duplicateImports,elseOnSameLine,emptyBraces,extensionAccessControl,fileHeader,hoistPatternLet,indent,leadingDelimiters,linebreakAtEndOfFile,linebreaks,markTypes,modifierOrder,modifiersOnSameLine,numberFormatting,propertyTypes,redundantBackticks,redundantBreak,redundantClosure,redundantExtensionACL,redundantGet,redundantInit,redundantInternal,redundantLet,redundantLetError,redundantNilInit,redundantOptionalBinding,redundantParens,redundantPattern,redundantRawValues,redundantReturn,redundantStaticSelf,redundantSwiftTestingSuite,redundantTypedThrows,redundantVariable,redundantVoidReturnType,semicolons,simplifyGenericConstraints,singlePropertyPerLine,sortImports,spaceAroundBraces,spaceAroundBrackets,spaceAroundComments,spaceAroundGenerics,spaceAroundOperators,spaceAroundParens,spaceInsideBraces,spaceInsideBrackets,spaceInsideComments,spaceInsideGenerics,spaceInsideParens,trailingCommas,trailingSpace,typeSugar,unusedArguments,void,wrap,wrapArguments,wrapAttributes,wrapCaseBodies,wrapEnumCases,wrapFunctionBodies,wrapGuardStatementBodies,wrapIfExpressionBodies,wrapIfStatementBodies,wrapLoopBodies,wrapMultilineFunctionChains,wrapMultilineStatementBraces,wrapPropertyBodies
+
+# Lexical style
+--indent 4
+--indent-case false
+--indent-strings false
+--smart-tabs enabled
+--tab-width unspecified
+--linebreaks lf
+--trim-whitespace always
+--max-width 100
+--allman false
+--empty-braces no-space
+--semicolons never
+--ranges spaced
+--operator-func spaced
+--type-delimiter space-after
+--closure-void remove
+--void-type Void
+
+# Literals
+--binary-grouping 4,8
+--decimal-grouping 3,6
+--hex-grouping 4,8
+--hex-literal-case uppercase
+--octal-grouping 4,8
+--exponent-case lowercase
+--exponent-grouping disabled
+--fraction-grouping disabled
+
+# Declarations
+--header "//\n//  Created by Anton Spivak\n//"
+--import-grouping alpha
+--extension-acl on-extension
+--ifdef no-indent
+--nil-init remove
+--pattern-let hoist
+--property-types infer-locals-only
+--inferred-types always
+--short-optionals always
+--strip-unused-args closure-only
+--modifier-order
+--complex-attributes prev-line
+--computed-var-attributes prev-line
+--func-attributes prev-line
+--stored-var-attributes prev-line
+--type-attributes prev-line
+--type-blank-lines remove
+--type-body-marks preserve
+
+# MARK comments identify top-level types and extensions, not member categories.
+--mark-categories false
+--mark-extensions always
+--mark-types always
+--type-mark "MARK: - %t"
+--extension-mark "MARK: - %t + %c"
+--grouped-extension "MARK: %c"
+--line-after-marks true
+
+# Wrapping
+--allow-partial-wrapping false
+--call-site-paren balanced
+--closing-paren balanced
+--conditional-assignment after-property
+--else-position same-line
+--guard-else auto
+--wrap-arguments before-first
+--wrap-collections before-first
+--wrap-conditions before-first
+--wrap-effects preserve
+--wrap-enum-cases always
+--wrap-parameters before-first
+--wrap-return-type preserve
+--wrap-ternary default
+--wrap-type-aliases preserve
+
+# Preserve authored Swift Testing names.
+--suite-name-format preserve
+--test-case-name-format preserve

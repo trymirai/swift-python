@@ -1,5 +1,7 @@
 module libcpython {
     header "Python.h"
     header "embedded.h"
+    header "interpreter.h"
+    header "thread.h"
     export *
 }

@@ -25,7 +25,7 @@ extension CPythonBuild {
         var outputDirectory: FilePath
 
         @Option(help: "Parallel compiler jobs.")
-        var jobs = 6
+        var jobs: Int = 6
 
         func validate() throws {
             guard packageDirectory.isAbsolute, outputDirectory.isAbsolute else {
@@ -37,13 +37,13 @@ extension CPythonBuild {
         }
 
         func run() async throws {
-            let workspace = Workspace(
+            let workspace = BuildWorkspace(
                 packageDirectory: packageDirectory,
                 outputDirectory: outputDirectory,
                 logger: parent.makeLogger(),
             )
 
-            let build = Build(workspace: workspace, jobs: jobs)
+            let build = StandardLibraryBuilder(workspace: workspace, jobCount: jobs)
             try await build.run()
         }
     }

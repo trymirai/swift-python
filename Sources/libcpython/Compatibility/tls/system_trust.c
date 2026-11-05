@@ -1,10 +1,10 @@
 #ifdef __APPLE__
 #include "system_trust.h"
 
-#include <stdbool.h>
-#include <stdlib.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 // Encode directly into CF-owned storage; no temporary DER buffer crosses the FFI boundary.
 static SecCertificateRef
@@ -126,7 +126,8 @@ CPython_VerifySystemTrust(X509_STORE_CTX *context, void *argument)
         return 0;
     }
 
-    // Verification must not introduce hidden network requests. The peer chain and system cache suffice.
+    // Verification must not introduce hidden network requests. The peer chain and system cache
+    // suffice.
     OSStatus status = SecTrustSetNetworkFetchAllowed(trust, false);
     X509_VERIFY_PARAM *parameters = X509_STORE_CTX_get0_param(context);
     if (status == errSecSuccess &&

@@ -1,5 +1,6 @@
 // swift-tools-version: 6.4;(experimentalCGen)
 
+import CompilerPluginSupport
 import PackageDescription
 
 let package = Package(
@@ -67,6 +68,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio", from: "2.103.0"),
         .package(url: "https://github.com/apple/swift-system", from: "1.8.1"),
         .package(url: "https://github.com/swiftlang/swift-subprocess", exact: "1.0.0", traits: []),
+        .package(url: "https://github.com/swiftlang/swift-syntax", exact: "603.0.1"),
     ],
     targets: [
         // Plugins
@@ -84,15 +86,33 @@ let package = Package(
         .target(
             name: "Python",
             dependencies: [
+                .product(name: "SystemPackage", package: "swift-system"),
+                .product(name: "_NIOFileSystem", package: "swift-nio"),
+
                 .byName(name: "libcpython"),
+                .byName(name: "PythonMacros"),
             ],
             swiftSettings: .default,
+        ),
+        .macro(
+            name: "PythonMacros",
+            dependencies: [
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxBuilder", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+            ],
         ),
         .testTarget(
             name: "PythonTests",
             dependencies: [
+                .product(name: "SystemPackage", package: "swift-system"),
+                .product(name: "_NIOFileSystem", package: "swift-nio"),
+
+                .byName(name: "Python"),
                 .byName(name: "libpythontestsupport"),
             ],
+            path: "Tests/Python",
             swiftSettings: .default,
         ),
 
@@ -178,7 +198,7 @@ let package = Package(
                 "LICENSE.Expat",
                 "LICENSE.HACL",
 
-                "Compatibility/Importer.py",
+                "Compatibility/Python",
                 "Compatibility/module.modulemap",
 
                 "src/Modules/cjkcodecs/README",
@@ -769,12 +789,6 @@ private extension Target {
             ],
             path: "Tests/libpythontestsupport",
             sources: ["src"],
-            linkerSettings: [
-                .linkedLibrary(
-                    "pthread",
-                    .when(platforms: [.linux]),
-                ),
-            ],
         )
     }
 }

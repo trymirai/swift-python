@@ -8,7 +8,7 @@ import SystemPackage
 
 extension CPythonBuild.Generate {
     static func generateOpenSSL(
-        in workspace: borrowing Workspace,
+        in workspace: borrowing BuildWorkspace,
         jobs: Int,
     ) async throws {
         let package = workspace.packageDirectory
@@ -32,7 +32,7 @@ extension CPythonBuild.Generate {
             output: .string(limit: 1 << 20),
         )
         guard checkout.isEmpty else {
-            throw Failure("Use a clean OpenSSL checkout before generating its sources.")
+            throw BuildError("Use a clean OpenSSL checkout before generating its sources.")
         }
 
         let head = try await workspace.run(
@@ -44,7 +44,7 @@ extension CPythonBuild.Generate {
             output: .string(limit: 1 << 20),
         )
         guard let revision = head.split(whereSeparator: \.isNewline).first else {
-            throw Failure("Missing OpenSSL revision.")
+            throw BuildError("Missing OpenSSL revision.")
         }
 
         workspace.logger.info("Generating OpenSSL \(revision)")
@@ -80,7 +80,7 @@ extension CPythonBuild.Generate {
             output: .string(limit: 1 << 20),
         )
 
-        var units = Set<String>()
+        var translationUnits = Set<String>()
         var links = Set<String>()
 
         var generated = Set<String>()
@@ -88,7 +88,7 @@ extension CPythonBuild.Generate {
         for line in plan.split(whereSeparator: \.isNewline) {
             let fields = line.split(separator: "\t", maxSplits: 1)
             guard fields.count == 2 else {
-                throw Failure("Unexpected entry in the OpenSSL source graph.")
+                throw BuildError("Unexpected entry in the OpenSSL source graph.")
             }
 
             let name = String(fields[1])
@@ -96,25 +96,26 @@ extension CPythonBuild.Generate {
             case "prefix":
                 sourcePrefix = name
             case "source":
-                units.insert(name)
+                translationUnits.insert(name)
                 links.insert(name)
             case "generated-source":
-                units.insert(name)
+                translationUnits.insert(name)
                 generated.insert(name)
             case "generated-header":
                 generated.insert(name)
             case "header":
                 links.insert(name)
             default:
-                throw Failure("Unknown entry in the OpenSSL source graph.")
+                throw BuildError("Unknown entry in the OpenSSL source graph.")
             }
         }
 
-        guard !sourcePrefix.isEmpty, !units.isEmpty, !generated.isEmpty,
-              links.union(generated).allSatisfy({ Self.isRelativeSourcePath(FilePath($0)) }),
-              links.isDisjoint(with: generated)
+        guard
+            !sourcePrefix.isEmpty, !translationUnits.isEmpty, !generated.isEmpty,
+            links.union(generated).allSatisfy({ Self.isRelativeSourcePath(FilePath($0)) }),
+            links.isDisjoint(with: generated)
         else {
-            throw Failure("Invalid paths in the OpenSSL source graph.")
+            throw BuildError("Invalid paths in the OpenSSL source graph.")
         }
 
         // This header holds our build description. Configure's version describes its host compiler.
@@ -127,8 +128,8 @@ extension CPythonBuild.Generate {
             environment: environment,
         )
 
-        // Included C fragments must remain next to their callers without becoming SwiftPM units.
-        var pending = units.sorted()
+        // Included C fragments stay next to their callers without becoming separate translation units.
+        var pending = translationUnits.sorted()
         var index = 0
         while index < pending.count {
             let name = pending[index]
@@ -144,11 +145,13 @@ extension CPythonBuild.Generate {
                     .lexicallyNormalized()
 
                 guard Self.isRelativeSourcePath(fragment) else {
-                    throw Failure("Invalid included C fragment in \(name).")
+                    throw BuildError("Invalid included C fragment in \(name).")
                 }
 
-                if !units.contains(fragment.string), !generated.contains(fragment.string),
-                   links.insert(fragment.string).inserted
+                if
+                    !translationUnits.contains(fragment.string),
+                    !generated.contains(fragment.string),
+                    links.insert(fragment.string).inserted
                 {
                     pending.append(fragment.string)
                 }
@@ -187,7 +190,7 @@ extension CPythonBuild.Generate {
                 destination = FilePath(String(repeating: "../", count: depth) + "Generated/" + name)
             } else {
                 guard try await fileSystem.info(forFileAt: source.appending(name)) != nil else {
-                    throw Failure("Missing OpenSSL source \(name).")
+                    throw BuildError("Missing OpenSSL source \(name).")
                 }
                 destination = FilePath(
                     String(repeating: "../", count: depth + 2) + "Submodules/openssl/" + name,
@@ -205,7 +208,7 @@ extension CPythonBuild.Generate {
         let headers = paths
             .filter { $0.hasPrefix("include/openssl/") && $0.hasSuffix(".h") }
 
-        let modulemap =
+        let moduleMap =
             [
                 "// OpenSSL \(revision). Generated by CPythonBuild generate.",
                 "module libopenssl {",
@@ -214,12 +217,12 @@ extension CPythonBuild.Generate {
             + ["    export *", "}", ""]
 
         try await workspace.write(
-            modulemap.joined(separator: "\n"),
+            moduleMap.joined(separator: "\n"),
             to: generatedFiles.appending("module.modulemap"),
         )
 
         let exclusions = paths.filter {
-            $0.hasSuffix(".inc") || ($0.hasSuffix(".c") && !units.contains($0))
+            $0.hasSuffix(".inc") || ($0.hasSuffix(".c") && !translationUnits.contains($0))
         }
 
         let manifest = package.appending("Package.swift")
@@ -228,7 +231,7 @@ extension CPythonBuild.Generate {
         // Keep the LICENSE exclusion in Package.swift when replacing the src/ exclusions.
         let pattern = #/(?m)^[ \t]*name: "libopenssl",\n([ \t]*)exclude: \[\n(?:[ \t]*"(?!src\/)[^"\n]+",\n)*((?:[ \t]*"src\/[^"\n]+",\n|[ \t]*\n)*)[ \t]*\],/#
         guard let list = original.firstMatch(of: pattern) else {
-            throw Failure("Missing the libopenssl exclude list in Package.swift.")
+            throw BuildError("Missing the libopenssl exclude list in Package.swift.")
         }
 
         let entries = list.2
@@ -250,7 +253,8 @@ extension CPythonBuild.Generate {
             contents: updated,
         )
 
-        workspace.logger.info("Updated the layout for \(units.count) OpenSSL translation units.")
+        workspace.logger
+            .info("Updated the layout for \(translationUnits.count) OpenSSL translation units.")
     }
 
     private static func isRelativeSourcePath(_ path: FilePath) -> Bool {
@@ -259,7 +263,7 @@ extension CPythonBuild.Generate {
             && path.components.allSatisfy { $0.kind == .regular }
     }
 
-    private static let generatedDirectories = ["Generated", "src"]
+    private static let generatedDirectories: [String] = ["Generated", "src"]
 
     private static func publish(
         _ candidate: FilePath,

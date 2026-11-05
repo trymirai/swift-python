@@ -96,3 +96,35 @@ This product contains libedit 20260512-3.1 on Linux.
   * LICENSES AND NOTICES
     * Sources/libedit/LICENSE (BSD)
     * Individual files in Submodules/libedit/src/ carry additional notices.
+
+-------------------------------------------------------------------------------
+
+This product contains packaging 26.3 for its package installer.
+
+  * SOURCE
+    * https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl
+    * SHA-256 d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+  * LICENSES
+    * Submodules/python-packages/LICENSES/packaging-LICENSE
+    * Submodules/python-packages/LICENSES/packaging-LICENSE.APACHE
+    * Submodules/python-packages/LICENSES/packaging-LICENSE.BSD
+
+-------------------------------------------------------------------------------
+
+This product contains resolvelib 1.2.1 for its package installer.
+
+  * SOURCE
+    * https://files.pythonhosted.org/packages/e2/23/c941a0d0353681ca138489983c4309e0f5095dfd902e1357004f2357ddf2/resolvelib-1.2.1-py3-none-any.whl
+    * SHA-256 fb06b66c8da04172d9e72a21d7d06186d8919e32ae5ab5cdf5b9d920be805ac2
+  * LICENSES
+    * Submodules/python-packages/LICENSES/resolvelib-LICENSE
+
+-------------------------------------------------------------------------------
+
+This product contains installer 1.1.0 for its package installer.
+
+  * SOURCE
+    * https://files.pythonhosted.org/packages/d7/7a/63547a792a12148882205d79e07644091d5b7690f40c2bb9d41452a8bdc2/installer-1.1.0-py3-none-any.whl
+    * SHA-256 f55f5728ff61d3dd54dbc5a397cf3f7307cb64b180c20b72afbebf01c9e2c8a0
+  * LICENSES
+    * Submodules/python-packages/LICENSES/installer-LICENSE
