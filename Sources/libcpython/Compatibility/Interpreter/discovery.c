@@ -1,4 +1,5 @@
 #include "../interpreter.h"
+
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -30,6 +31,7 @@ CPython_RegisterExport(CPython_ExportRegistration registration)
         abort();
     }
     node->registration = registration;
+
     pthread_mutex_lock(&export_lock);
     node->next = exports;
     exports = node;
@@ -45,29 +47,44 @@ CPython_RegisterExport(CPython_ExportRegistration registration)
 // images must remain loaded for the lifetime of the sessions using their code.
 static pthread_once_t discovery_once = PTHREAD_ONCE_INIT;
 
-static void
-discover_image(const struct mach_header *header, intptr_t slide)
+typedef struct {
+    const CPython_ExportRegistration *records;
+    size_t count;
+} ExportSection;
+
+static ExportSection
+export_section(const struct mach_header *header)
 {
-    (void)slide;
     if (header == NULL || header->magic != MH_MAGIC_64) {
-        return;
+        return (ExportSection){0};
     }
+
     unsigned long size = 0;
     const CPython_ExportRegistration *records = (const void *)getsectiondata(
         (const struct mach_header_64 *)header, "__DATA", "__pyexports", &size);
     if (records == NULL || size % sizeof(*records) != 0 ||
         (uintptr_t)records % _Alignof(CPython_ExportRegistration) != 0) {
-        return;
+        return (ExportSection){0};
     }
-    for (size_t i = 0; i < size / sizeof(*records); ++i) {
+    return (ExportSection){.records = records, .count = size / sizeof(*records)};
+}
+
+static void
+discover_image(const struct mach_header *header, intptr_t slide)
+{
+    (void)slide;
+    ExportSection section = export_section(header);
+
+    for (size_t i = 0; i < section.count; ++i) {
+        const CPython_ExportRegistration *record = &section.records[i];
 #if SWIFT_PYTHON_ASAN
         // ASan inserts redzones between section globals. Those bytes are not records.
-        if (__asan_region_is_poisoned((void *)&records[i], sizeof(records[i])) != NULL) {
+        if (__asan_region_is_poisoned((void *)record, sizeof(*record)) != NULL) {
             continue;
         }
 #endif
-        if (records[i] != NULL) {
-            CPython_RegisterExport(records[i]);
+        if (*record != NULL) {
+            CPython_RegisterExport(*record);
         }
     }
 }
@@ -79,12 +96,9 @@ initialize_discovery(void)
 }
 #endif
 
-void
-CPython_DiscoverExports(void *collector, CPython_ExportConsumer consume)
+static CPython_ExportRegistration *
+snapshot_exports(size_t *snapshot_count)
 {
-#if defined(__APPLE__) && defined(__MACH__)
-    pthread_once(&discovery_once, initialize_discovery);
-#endif
     pthread_mutex_lock(&export_lock);
     size_t count = 0;
     for (ExportNode *node = exports; node != NULL; node = node->next) {
@@ -93,17 +107,33 @@ CPython_DiscoverExports(void *collector, CPython_ExportConsumer consume)
         }
         count++;
     }
+
     CPython_ExportRegistration *snapshot = count == 0 ? NULL : malloc(count * sizeof(*snapshot));
     if (count != 0 && snapshot == NULL) {
         abort();
     }
+
     size_t index = 0;
     for (ExportNode *node = exports; node != NULL; node = node->next) {
         snapshot[index++] = node->registration;
     }
+
     pthread_mutex_unlock(&export_lock);
+
+    *snapshot_count = count;
+    return snapshot;
+}
+
+void
+CPython_DiscoverExports(void *collector, CPython_ExportConsumer consume)
+{
+#if defined(__APPLE__) && defined(__MACH__)
+    pthread_once(&discovery_once, initialize_discovery);
+#endif
     // Swift metadata access and user definitions happen outside loader callbacks
     // and outside the registry mutex.
+    size_t count;
+    CPython_ExportRegistration *snapshot = snapshot_exports(&count);
     for (size_t i = 0; i < count; ++i) {
         snapshot[i](collector, consume);
     }

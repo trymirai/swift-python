@@ -16,6 +16,10 @@ from _frozen_importlib_external import SourceLoader, spec_from_file_location
 _ROOT = "embedded:/stdlib"
 
 
+def _is_embedded_path(path) -> bool:
+    return isinstance(path, str) and (path == _ROOT or path.startswith(_ROOT + "/"))
+
+
 class _Resource:
     """A read-only Traversable over the embedded resource catalog."""
 
@@ -58,7 +62,7 @@ class _Resource:
         if mode not in ("r", "rt", "rb"):
             raise ValueError("Embedded resources are read-only")
 
-        stream = io.BytesIO(_swift_python.read(self._path))
+        stream = io.BytesIO(self.read_bytes())
         return stream if mode == "rb" else io.TextIOWrapper(stream, *args, **kwargs)
 
     def read_bytes(self) -> bytes:
@@ -155,7 +159,7 @@ class _PathFinder:
             if child == "__init__.py":
                 continue
 
-            name = child[:-3] if child.endswith(".py") else child
+            name = child.removesuffix(".py")
             fullname = parent + "." + name if parent else name
             info = _swift_python.module(fullname)
             if info is not None:
@@ -163,7 +167,7 @@ class _PathFinder:
 
 
 def _path_hook(path: str) -> _PathFinder:
-    if isinstance(path, str) and (path == _ROOT or path.startswith(_ROOT + "/")):
+    if _is_embedded_path(path):
         return _PathFinder(path)
 
     raise ImportError
@@ -176,34 +180,33 @@ def _fix_functions(values, module_name: str, filename: str) -> None:
     # Imports required during Py_Initialize ran before our loader was installed.
     # Give their existing code objects the same virtual filename as later imports.
     for value in values:
+        if type(value) is not _FUNCTION_TYPE:
+            if isinstance(value, (staticmethod, classmethod)):
+                value = value.__func__
+            elif isinstance(value, property):
+                _fix_functions((value.fget, value.fset, value.fdel), module_name, filename)
+                continue
+
         if type(value) is _FUNCTION_TYPE and value.__module__ == module_name:
             _imp._fix_co_filename(value.__code__, filename)
-        elif isinstance(value, (staticmethod, classmethod)):
-            function = value.__func__
-            if type(function) is _FUNCTION_TYPE and function.__module__ == module_name:
-                _imp._fix_co_filename(function.__code__, filename)
-        elif isinstance(value, property):
-            _fix_functions((value.fget, value.fset, value.fdel), module_name, filename)
 
 
-def install() -> None:
-    """Install idempotently while holding this interpreter's thread state.
+def _rebind_module(name: str, module, spec) -> None:
+    module.__loader__ = spec.loader
+    module.__spec__ = spec
+    module.__file__ = spec.origin
 
-    Bootstrap modules are already alive, so their existing functions also need
-    virtual filenames for inspect and tracebacks. Aliases retain their import identity.
-    """
-    if _path_hook in sys.path_hooks:
-        return
+    values = tuple(vars(module).values())
+    _fix_functions(values, name, spec.origin)
+    for value in values:
+        if isinstance(value, type) and value.__module__ == name:
+            _fix_functions(tuple(vars(value).values()), name, spec.origin)
 
-    # site makes relative search entries absolute before our path hook is available.
-    normalized_root = os.path.abspath(_ROOT)
-    sys.path[:] = [_ROOT if path == normalized_root else path for path in sys.path]
-    sys.path_hooks.insert(0, _path_hook)
+    if spec.submodule_search_locations is not None:
+        module.__path__ = spec.submodule_search_locations
 
-    # Frozen modules bootstrap Python. After startup they belong to the embedded sys.path entry.
-    if FrozenImporter in sys.meta_path:
-        sys.meta_path.remove(FrozenImporter)
 
+def _rebind_bootstrap_modules() -> None:
     for name, module in tuple(sys.modules.items()):
         if getattr(module, "__loader__", None) is not FrozenImporter:
             continue
@@ -213,26 +216,28 @@ def install() -> None:
             continue
 
         info = _swift_python.module(name)
-        if info is None:
-            continue
+        if info is not None:
+            _rebind_module(name, module, _spec(name, *info))
 
-        spec = _spec(name, *info)
-        module.__loader__ = spec.loader
-        module.__spec__ = spec
-        module.__file__ = spec.origin
 
-        values = tuple(vars(module).values())
-        _fix_functions(values, name, spec.origin)
+def install() -> None:
+    """Install idempotently while holding this interpreter's thread state."""
+    if _path_hook in sys.path_hooks:
+        return
 
-        for value in values:
-            if isinstance(value, type) and value.__module__ == name:
-                _fix_functions(tuple(vars(value).values()), name, spec.origin)
+    # site makes relative search entries absolute before our path hook is available.
+    normalized_root = os.path.abspath(_ROOT)
+    sys.path[:] = [_ROOT if path == normalized_root else path for path in sys.path]
+    sys.path_hooks.insert(0, _path_hook)
 
-        if spec.submodule_search_locations is not None:
-            module.__path__ = spec.submodule_search_locations
+    # Bootstrap modules now belong to the embedded sys.path entry.
+    if FrozenImporter in sys.meta_path:
+        sys.meta_path.remove(FrozenImporter)
+
+    _rebind_bootstrap_modules()
 
     for path in tuple(sys.path_importer_cache):
-        if isinstance(path, str) and (path == _ROOT or path.startswith(_ROOT + "/")):
+        if _is_embedded_path(path):
             del sys.path_importer_cache[path]
 
 

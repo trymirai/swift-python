@@ -2,16 +2,16 @@
 //  Created by Anton Spivak
 //
 
+public import SystemPackage
+
 /// A handle to the process-wide embedded Python runtime.
 public struct Runtime: Sendable {
-    private static let startup: Task<Void, any Swift.Error> = .detached {
+    private static let startup: Task<Void, any Swift::Error> = .detached {
         let session = try Session(directory: nil, importPaths: [], modules: [])
         try await session.initializeRuntime()
     }
 
-    let packageService: PackageService
-    let packageConfiguration: PackageConfiguration
-    let packages: [PackageSource]
+    let packaging: Environment.Service.Lazy
 
     /// Creates a runtime with immutable application packages and a shared wheel cache.
     public init(
@@ -20,24 +20,19 @@ public struct Runtime: Sendable {
         packageIndex: String = "https://pypi.org/simple/",
     ) async throws {
         try await Self.startup.value
-        _ = try Self.paths(directory: cacheDirectory, imports: packages.compactMap { source in
-            switch source {
-            case let .directory(path), let .archive(path):
-                path
-            case .embedded:
-                nil
-            }
-        })
-        let service = try PackageService()
-        self.packageConfiguration = try await service.open(
+        let packages = try packages.map { try $0.resolved() }
+        let cache = try cacheDirectory.map(Path.init)
+        let packaging = Environment.Service.Lazy(
             packages: packages,
-            configuration: ServiceConfiguration(
-                cacheDirectory: cacheDirectory,
+            options: .init(
+                cacheDirectory: cache,
                 packageIndex: packageIndex,
             ),
         )
-        self.packageService = service
-        self.packages = packages
+        if !packages.isEmpty || packageIndex != "https://pypi.org/simple/" {
+            _ = try await packaging.open()
+        }
+        self.packaging = packaging
     }
 
     /// Prepares dependencies and initializes a persistent interactive namespace.
@@ -46,13 +41,15 @@ public struct Runtime: Sendable {
     /// The environment directory holds this session's local packages; pass a stable
     /// location to reuse them after closing the session. File APIs that use the OS
     /// working directory still observe the process-wide directory.
+    /// The `redirecting` paths apply only to the initial execution of `startup`.
     public func session(
         _ startup: Session.Startup = .source(""),
         directory: String? = nil,
         environmentDirectory: String? = nil,
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
-        startupIO: StandardIO = .init(),
+        redirecting redirects: [Session.Stream: FilePath] = [:],
+        delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
         try await session(
             startup,
@@ -61,7 +58,8 @@ public struct Runtime: Sendable {
             importPaths: importPaths,
             modules: modules,
             moduleDefinitions: [],
-            startupIO: startupIO,
+            redirecting: redirects,
+            delegate: delegate,
         )
     }
 
@@ -72,21 +70,21 @@ public struct Runtime: Sendable {
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
         moduleDefinitions: [Module],
-        startupIO: StandardIO = .init(),
+        redirecting redirects: [Session.Stream: FilePath] = [:],
+        delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
-        let definitions = try ExportCatalog.resolve(modules, definitions: moduleDefinitions)
+        let definitions = try Module.Catalog.resolve(modules, definitions: moduleDefinitions)
         let session = try Session(
-            directory: directory,
-            importPaths: importPaths,
+            directory: directory.map(Path.init),
+            importPaths: importPaths.map(Path.init),
             modules: definitions,
-            packages: packages,
             startup: startup,
-            packageService: packageService,
-            packageConfiguration: packageConfiguration,
-            environmentDirectory: environmentDirectory,
+            packaging: packaging,
+            environmentDirectory: environmentDirectory.map(Path.init),
+            delegate: delegate,
         )
         do {
-            try await session.prepare(standardIO: startupIO)
+            try await session.prepare(redirecting: redirects)
             return session
         } catch {
             await session.close()
@@ -101,25 +99,41 @@ public struct Runtime: Sendable {
         module: String? = nil,
         to output: String,
     ) async throws {
-        _ = try Self.paths(directory: directory, imports: [output])
-        let execution = try ExecutionControl(timeout: nil, onOutput: nil)
-        try await execution.withCancellation {
-            defer { _ = execution.finish() }
-            try await packageService.bundle(
-                project: directory,
+        let project = try Path(directory)
+        let destination = try Path(output)
+        try await withPackageService { service, configuration, execution in
+            try await service.bundle(
+                project: project,
                 module: module,
-                output: output,
-                configuration: packageConfiguration,
+                output: destination,
+                configuration: configuration,
                 execution: execution,
             )
         }
     }
 
-    static func paths(directory: String?, imports: [String]) throws -> [String] {
-        let paths = (directory.map { [$0] } ?? []) + imports
-        for path in paths where !path.hasPrefix("/") || path.utf8.contains(0) {
-            throw RuntimeFailure("Expected an absolute Python path without NUL characters: \(path)")
+    func withPackageService<Result>(
+        _ operation: (
+            Environment.Service,
+            Environment.Configuration,
+            Session.Control,
+        ) async throws -> Result,
+    ) async throws -> Result {
+        let execution = try Session.Control(timeout: nil)
+        return try await execution.withCancellation {
+            defer { _ = execution.finish() }
+            let (service, configuration) = try await packaging.open()
+            return try await operation(service, configuration, execution)
         }
-        return paths
+    }
+
+    /// Clears cached wheels and unpacked packages after all users of the cache have stopped.
+    /// Keep persistent environments and application packages in separate directories.
+    public static func clearPackageCache(at directory: String) async throws {
+        let cache = try Path(directory).file
+        guard !cache.lexicallyNormalized().components.isEmpty else {
+            throw Failure("Expected a dedicated package cache directory.")
+        }
+        try await Environment.clearCache(at: cache)
     }
 }

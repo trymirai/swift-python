@@ -9,9 +9,10 @@ import SwiftSyntaxMacros
 struct PropertyDeclaration {
     let variable: VariableDeclSyntax
     let binding: PatternBindingSyntax
+    let owner: ExportScope.Owner
+
     let name: String
     let swiftSpelling: String
-    let owner: ExportScope.Owner
 
     init(_ declaration: some DeclSyntaxProtocol, in context: some MacroExpansionContext) throws {
         let scope = ExportScope(context)
@@ -22,9 +23,9 @@ struct PropertyDeclaration {
             variable.bindings.count == 1,
             let binding = variable.bindings.first,
             let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier,
-            !variable.modifiers.contains(where: { ["static", "class"].contains($0.name.text) }),
+            !variable.modifiers.declaresStaticMember,
             let owner = scope.owner,
-            owner.isPythonClass || owner.isExtension
+            owner.hasClassMacro || owner.isExtension
         else {
             throw MacroExpansionErrorMessage(
                 "Python properties require a single instance property of a PythonClass.",
@@ -33,12 +34,13 @@ struct PropertyDeclaration {
 
         self.variable = variable
         self.binding = binding
+        self.owner = owner
+
         self.name = identifier.identifier?.name ?? identifier.text
         self.swiftSpelling = identifier.trimmedDescription
-        self.owner = owner
     }
 
-    static func usesPythonStorage(_ variable: VariableDeclSyntax) -> Bool {
+    static func usesPStorage(_ variable: VariableDeclSyntax) -> Bool {
         guard variable.bindingSpecifier.text == "var" else {
             return false
         }
@@ -55,7 +57,11 @@ struct PropertyDeclaration {
         }
     }
 
-    func storageType() throws -> String {
+    var swiftSetterName: String {
+        "$" + name
+    }
+
+    func storageSource() throws -> (type: String, field: String) {
         guard
             variable.bindingSpecifier.text == "var",
             let type = binding.typeAnnotation?.type,
@@ -71,14 +77,10 @@ struct PropertyDeclaration {
                 """,
             )
         }
-        return type.concreteSpelling(owner: owner.name)
-    }
 
-    var swiftSetterName: String {
-        "$" + name
-    }
-
-    var storageKey: String {
-        "Swift::String(reflecting: \(owner.name).self) + \(String(reflecting: "." + swiftSpelling))"
+        let typeSource = type.concreteSpelling(owner: owner.name)
+        let key = "Swift::String(reflecting: \(owner.name).self) + \(String(reflecting: "." + swiftSpelling))"
+        let field = "Python::Object.Property<(\(typeSource))>(\(key))"
+        return (typeSource, field)
     }
 }

@@ -7,6 +7,20 @@ from .archive import Archive, Reader
 from .finder import MetadataFinder, PathFinder
 
 
+def _archive_hook(archives, *, at_root: bool = False):
+    def find(path: str) -> PathFinder:
+        for archive in archives:
+            if not archive.contains_path(path):
+                continue
+
+            relative = "" if at_root else path[len(archive.root) :].strip("/")
+            return PathFinder(archive, relative)
+
+        raise ImportError
+
+    return find
+
+
 def install(sources: list[dict], read, unused=None) -> list[str]:
     """Install one session's explicitly selected application package sources."""
     archives = []
@@ -26,16 +40,7 @@ def install(sources: list[dict], read, unused=None) -> list[str]:
         archives.append(Archive(root, reader))
         paths.append(root)
 
-    def path_hook(path: str) -> PathFinder:
-        for archive in archives:
-            if path == archive.root or path.startswith(archive.root + "/"):
-                finder = PathFinder(archive)
-                finder.path = path[len(archive.root) :].strip("/")
-                return finder
-
-        raise ImportError
-
-    sys.path_hooks.insert(0, path_hook)
+    sys.path_hooks.insert(0, _archive_hook(archives))
     sys.meta_path.append(MetadataFinder(archives))
 
     for path in paths:
@@ -58,13 +63,7 @@ def installation_tools() -> None:
         root = "embedded:/installer/" + name
         archive = Archive(root, io.BytesIO(data))
 
-        def hook(path: str, archive: Archive = archive) -> PathFinder:
-            if path == archive.root or path.startswith(archive.root + "/"):
-                return PathFinder(archive)
-
-            raise ImportError
-
-        sys.path_hooks.insert(0, hook)
+        sys.path_hooks.insert(0, _archive_hook((archive,), at_root=True))
         paths.append(root)
 
     sys.path[:0] = paths

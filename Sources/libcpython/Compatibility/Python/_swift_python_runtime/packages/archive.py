@@ -6,11 +6,18 @@ import zipfile
 from .resources import Distribution
 
 
+def distribution_metadata_paths(paths):
+    for path in paths:
+        if path.endswith(".dist-info/METADATA") and path.count("/") == 1:
+            yield path
+
+
 class Reader(io.RawIOBase):
     def __init__(self, size: int, read) -> None:
         self.size = size
-        self.position = 0
         self._read = read
+
+        self.position = 0
 
     def readable(self) -> bool:
         return True
@@ -40,7 +47,7 @@ class Reader(io.RawIOBase):
         if self.position >= self.size:
             return b""
 
-        count = max(0, self.size - self.position)
+        count = self.size - self.position
         if size >= 0:
             count = min(count, size)
 
@@ -61,14 +68,25 @@ class Archive:
         if any(name.endswith((".so", ".dylib", ".pyd", ".dll")) for name in self.names):
             raise ImportError("Embedded archives support Python code and resources only")
 
+    def contains_path(self, path: str) -> bool:
+        return path == self.root or path.startswith(self.root + "/")
+
+    def has_member_with_prefix(self, prefix: str) -> bool:
+        return any(name.startswith(prefix) for name in self.names)
+
     def distributions(self, name: str | None = None):
-        for path in sorted(self.names):
-            if path.endswith(".dist-info/METADATA") and path.count("/") == 1:
-                distribution = Distribution(self, path.rpartition("/")[0])
-                if name is None or normalize_name(distribution.metadata["Name"]) == normalize_name(
-                    name
-                ):
-                    yield distribution
+        paths = sorted(distribution_metadata_paths(self.names))
+        if not paths:
+            return
+
+        expected_name = normalize_name(name) if name is not None else None
+        for path in paths:
+            distribution = Distribution(self, path.rpartition("/")[0])
+            if (
+                expected_name is None
+                or normalize_name(distribution.metadata["Name"]) == expected_name
+            ):
+                yield distribution
 
 
 def normalize_name(name: str) -> str:

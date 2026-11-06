@@ -15,12 +15,12 @@ struct PythonPropertyMacro: PeerMacro {
         in context: some MacroExpansionContext,
     ) throws -> [DeclSyntax] {
         let property = try PropertyDeclaration(declaration, in: context)
-        if PropertyDeclaration.usesPythonStorage(property.variable) {
+        if PropertyDeclaration.usesPStorage(property.variable) {
             return try storedPeers(of: property, attribute: attribute, in: context)
         }
 
-        let pythonName = attribute.argument() ?? String(reflecting: property.name)
-        let documentation = attribute.argument(named: "documentation") ?? "nil"
+        let pName = attribute.nameSource(default: property.name)
+        let documentation = attribute.documentationSource
 
         let setter = try projectedSetter(
             for: property,
@@ -28,7 +28,7 @@ struct PythonPropertyMacro: PeerMacro {
         )
 
         let definition = """
-        collector.addProperty(\(property.owner.name).self, name: \(pythonName), documentation: \(documentation),
+        collector.addProperty(\(property.owner.name).self, name: \(pName), documentation: \(documentation),
             getter: { instance, _, encoder in try encoder.encode(instance.\(property.swiftSpelling)) }, setter: \(setter))
         """
         return [ExportRegistration(name: property.name, definition: definition, in: context)
@@ -45,6 +45,7 @@ struct PythonPropertyMacro: PeerMacro {
         if accessors.contains(where: { $0.effectSpecifiers?.asyncSpecifier != nil }) {
             throw MacroExpansionErrorMessage("Python properties must have synchronous accessors.")
         }
+
         let hasPrivateSetter = property.variable.modifiers.contains {
             $0.detail?.detail.text == "set"
                 && ["private", "fileprivate"].contains($0.name.text)
@@ -69,8 +70,8 @@ struct PythonPropertyMacro: PeerMacro {
         guard !property.owner.isExtension else {
             throw MacroExpansionErrorMessage("Declare Python-stored properties in the class body.")
         }
-        let type = try property.storageType()
-        let key = property.storageKey
+
+        let (type, field) = try property.storageSource()
         let access = property.variable
             .modifiers
             .first {
@@ -86,12 +87,38 @@ struct PythonPropertyMacro: PeerMacro {
             }?.name
             .text
 
-        let accessPrefix = access.map { $0 + " " } ?? ""
+        let writeMethods = writeMethods(for: property, type: type, field: field, access: access)
+        if access == "private" || access == "fileprivate" {
+            return writeMethods
+        }
 
+        let name = attribute.nameSource(default: property.name)
+        let documentation = attribute.documentationSource
+        let readOnly = attribute.argument(named: "isReadOnly") ?? "false"
+        let definition = """
+        collector.addStoredProperty(\(property.owner.name).self, name: \(name), property: \(field),
+            documentation: \(documentation), isReadOnly: \(readOnly))
+        """
+        let registration = ExportRegistration(
+            name: property.name,
+            definition: definition,
+            in: context,
+        )
+        return writeMethods + [registration.declaration]
+    }
+
+    private static func writeMethods(
+        for property: PropertyDeclaration,
+        type: String,
+        field: String,
+        access: String?,
+    ) -> [DeclSyntax] {
+        let accessPrefix = access.map { $0 + " " } ?? ""
         let setterName = property.swiftSetterName
+
         let setter = DeclSyntax(stringLiteral: """
         \(accessPrefix)func \(setterName)(_ newValue: borrowing \(type)) throws {
-            try self._pythonSetProperty(newValue, forKey: \(key))
+            try self._pSetProperty(newValue, for: \(field))
         }
         """)
 
@@ -103,23 +130,7 @@ struct PythonPropertyMacro: PeerMacro {
         }
         """)
 
-        let writeMethods = [setter, updater]
-        if access == "private" || access == "fileprivate" {
-            return writeMethods
-        }
-
-        let name = attribute.argument() ?? String(reflecting: property.name)
-        let documentation = attribute.argument(named: "documentation") ?? "nil"
-
-        let readOnly = attribute.argument(named: "isReadOnly") ?? "false"
-        let definition = """
-        collector.addStoredProperty(\(property.owner.name).self, name: \(name), key: \(key),
-            documentation: \(documentation), as: (\(type)).self, isReadOnly: \(readOnly))
-        """
-        return writeMethods + [
-            ExportRegistration(name: property.name, definition: definition, in: context)
-                .declaration,
-        ]
+        return [setter, updater]
     }
 }
 
@@ -132,11 +143,11 @@ struct PythonStoredPropertyMacro: AccessorMacro {
         in context: some MacroExpansionContext,
     ) throws -> [AccessorDeclSyntax] {
         let property = try PropertyDeclaration(declaration, in: context)
-        let type = try property.storageType()
+        let field = try property.storageSource().field
         return [
             AccessorDeclSyntax(stringLiteral: """
             get throws {
-                try self._pythonGetProperty(\(property.storageKey), as: (\(type)).self)
+                try self._pGetProperty(\(field))
             }
             """),
         ]

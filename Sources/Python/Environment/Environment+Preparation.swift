@@ -1,0 +1,141 @@
+//
+//  Created by Anton Spivak
+//
+
+// MARK: - Environment.Change
+
+extension Environment {
+    enum Change: Sendable {
+        case resolve
+        case update
+        case install([String])
+        case uninstall([String])
+
+        var updatesInstalledVersions: Bool {
+            if case .update = self {
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+extension Environment {
+    func apply(
+        _ change: Change,
+        canReplacePackages: Bool,
+        execution: Session.Control,
+    ) async throws -> Session.Packages.Change {
+        if case .resolve = change, !needsPreparation, manifest == nil {
+            return .applied
+        }
+
+        let (service, configuration) = try await packaging.open()
+        try await open(using: service, configuration: configuration)
+
+        let previous = manifest ?? Manifest(abi: configuration.abi)
+
+        let project: [String] = if let projectDirectory {
+            try await service.projectRequirements(at: projectDirectory, execution: execution)
+        } else {
+            []
+        }
+        let local = try await localRequirements(
+            after: change,
+            manifest: previous,
+            configuration: configuration,
+            using: service,
+            execution: execution,
+        )
+
+        let request = Service.Request.prepare(
+            requirements: project + requirements + local.ordered,
+            installed: previous.packages,
+            fingerprint: previous.fingerprint,
+            update: change.updatesInstalledVersions,
+            replaceFiles: canReplacePackages,
+        )
+        let preparation = try await service.request(request, execution: execution)
+        try execution.checkInterruption()
+
+        var next = previous
+        next.local = local.byName
+        let resolution: Preparation.Resolution?
+        switch preparation {
+        case .unchanged:
+            resolution = nil
+        case .requiresReset:
+            return .requiresReset
+        case let .resolved(resolved):
+            resolution = resolved
+            next.fingerprint = resolved.fingerprint
+            next.packages = resolved.distributions.mapValues(\.record)
+        }
+
+        let replacesFiles = !next.hasSameWheels(as: previous)
+        if !replacesFiles, let resolution {
+            try Self.validateBaseFiles(resolution, against: configuration.baseFiles)
+        }
+
+        guard next != previous else {
+            return .applied
+        }
+        try await save(
+            next,
+            replacingFiles: replacesFiles ? resolution : nil,
+            using: service,
+            configuration: configuration,
+            execution: execution,
+        )
+        return .applied
+    }
+
+    private func localRequirements(
+        after change: Change,
+        manifest: Manifest,
+        configuration: Configuration,
+        using service: Service,
+        execution: Session.Control,
+    ) async throws -> (byName: [String: String], ordered: [String]) {
+        var byName = manifest.local
+        var order = byName.keys.sorted()
+
+        switch change {
+        case let .install(requirements):
+            let additions = try await service.request(
+                .normalize(requirements),
+                execution: execution,
+            )
+            for requirement in additions {
+                if byName.updateValue(requirement.declaration, forKey: requirement.name) == nil {
+                    order.append(requirement.name)
+                }
+            }
+        case let .uninstall(packages):
+            let names = try await service.request(
+                .names(packages),
+                execution: execution,
+            )
+            for name in names {
+                guard configuration.baseVersions[name] == nil else {
+                    throw Exception(
+                        name: "ValueError",
+                        message: "Application package '\(name)' cannot be uninstalled locally",
+                    )
+                }
+                guard byName.removeValue(forKey: name) != nil else {
+                    throw Exception(
+                        name: "ValueError",
+                        message: "Package '\(name)' is required by the project or another package",
+                    )
+                }
+            }
+        case .resolve, .update:
+            break
+        }
+
+        // Among local requirements, saved names precede newly added names.
+        return (byName, order.compactMap { byName[$0] })
+    }
+}

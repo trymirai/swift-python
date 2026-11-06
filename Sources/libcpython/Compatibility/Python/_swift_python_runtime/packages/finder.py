@@ -32,8 +32,9 @@ class Loader(SourceLoader):
 
 
 class PathFinder:
-    def __init__(self, archive: Archive) -> None:
+    def __init__(self, archive: Archive, path: str = "") -> None:
         self.archive = archive
+        self.path = path
 
     def find_spec(self, fullname: str, target=None) -> ModuleSpec | None:
         path = fullname.replace(".", "/")
@@ -43,7 +44,8 @@ class PathFinder:
                 loader = Loader(self.archive, candidate)
                 return spec_from_file_location(fullname, loader=loader)
 
-        if any(name.startswith(path + "/") for name in self.archive.names):
+        directory = path + "/"
+        if self.archive.has_member_with_prefix(directory):
             spec = ModuleSpec(fullname, loader=None, is_package=True)
             spec.submodule_search_locations = [self.archive.root + "/" + path]
             return spec
@@ -51,18 +53,17 @@ class PathFinder:
         return None
 
     def iter_modules(self, prefix: str = ""):
-        # The path hook constructs a finder at the requested package directory.
-        path = getattr(self, "path", "")
-        resource = Resource(self.archive, path)
+        resource = Resource(self.archive, self.path)
 
         for entry in resource.iterdir():
-            if entry.name == "__init__.py" or entry.name.endswith(".dist-info"):
+            name = entry.name
+            if name == "__init__.py" or name.endswith(".dist-info"):
                 continue
 
-            if entry.name.endswith(".py"):
-                yield prefix + entry.name[:-3], False
+            if name.endswith(".py"):
+                yield prefix + name.removesuffix(".py"), False
             elif entry.is_dir():
-                yield prefix + entry.name, True
+                yield prefix + name, True
 
 
 class MetadataFinder:

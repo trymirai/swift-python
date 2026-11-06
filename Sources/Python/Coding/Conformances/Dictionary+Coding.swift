@@ -14,9 +14,6 @@ extension Dictionary: Encodable where Key == String, Value: Encodable {
 
 extension Dictionary: Decodable where Key == String, Value: Decodable {
     public init(from decoder: borrowing Decoder) throws {
-        self.init()
-        for key in try decoder.keys() {
-            self[key] = try decoder.decode(Value.self, forKey: key)
-        }
+        self = try decoder.dictionary(of: Value.self)
     }
 }

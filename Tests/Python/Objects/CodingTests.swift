@@ -32,6 +32,7 @@ private struct CodingPoint: Python::Encodable, Python::Decodable, Sendable, Equa
 
 private struct CodingPacket: ~Copyable, Sendable, Python::Encodable, Python::Decodable {
     let count: Int
+
     init(count: Int) {
         self.count = count
     }
@@ -180,7 +181,7 @@ func typedNamesFollowTheSessionLifecycle() async throws {
     #expect(reset.name == "NameError")
 
     await session.close()
-    await #expect(throws: Python::SessionError.self) {
+    await #expect(throws: Python::Session.Error.self) {
         try await session.set(3, forKey: "closed")
     }
 }
@@ -200,6 +201,14 @@ func pythonReferencesAreInterpreterBound() async throws {
         let object = try context.object("thing")
         return try Python::WeakReference(object, in: context)
     }
+
+    func isAlive() async throws -> Bool {
+        try await session.enqueue { context in
+            let value = try context.object(weak)
+            return value != nil
+        }
+    }
+
     do {
         let root = try await session.enqueue { context in
             try context.object("thing").retain(in: context)
@@ -208,22 +217,16 @@ func pythonReferencesAreInterpreterBound() async throws {
         _ = try await session.evaluate("assert thing is alias")
         try await session.remove("thing")
         try await session.remove("alias")
-        let isAlive = try await session.enqueue { context in
-            let value = try context.object(weak)
-            return value != nil
-        }
-        #expect(isAlive)
-        await #expect(throws: (any Swift.Error).self) { try await other.set(root, forKey: "x") }
+        #expect(try await isAlive())
+        await #expect(throws: (any Swift::Error).self) { try await other.set(root, forKey: "x") }
     }
+
     _ = try await session.evaluate("import gc; gc.collect(); assert weak() is None")
-    let isReleased = try await session.enqueue { context in
-        let value = try context.object(weak)
-        return value == nil
-    }
-    #expect(isReleased)
+    #expect(try await !isAlive())
+
     let root: Python::Reference = try await session.get("weak")
     try await session.reset()
-    await #expect(throws: (any Swift.Error).self) { try await session.set(root, forKey: "old") }
+    await #expect(throws: (any Swift::Error).self) { try await session.set(root, forKey: "old") }
     await session.close()
     await other.close()
 }
@@ -231,7 +234,15 @@ func pythonReferencesAreInterpreterBound() async throws {
 @Test(.timeLimit(.minutes(1)))
 func asynchronousContextOperationsUseSeparateQueueTurns() async throws {
     let runtime = try await Python::Runtime()
-    let session = try await runtime.session()
+    let starts = Mutex(0)
+    let initialize = Python::Module.Function("initialize", synchronous: { _ in
+        starts.withLock { $0 += 1 }
+        return .none
+    })
+    let session = try await runtime.session(
+        .source("import startup_probe; startup_probe.initialize()"),
+        moduleDefinitions: [.init("startup_probe", functions: [initialize])],
+    )
 
     let value: Int = try await session.enqueue { context in
         await Task.yield()
@@ -267,28 +278,88 @@ func asynchronousContextOperationsUseSeparateQueueTurns() async throws {
         try await pending.value
     }
     #expect(expired.name == "ReferenceError")
+    #expect(starts.withLock { $0 } == 1)
+    try await session.set(3, forKey: "fresh")
+    #expect(starts.withLock { $0 } == 2)
     await session.close()
 }
 
-// MARK: - CodingDefaults
+@Test
+func dictionaryKeyCollisionsThrow() async throws {
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(.source(#"data = {'\u00e9': None, 'e\u0301': 2}"#))
+    let typed = try await #require(throws: Python::Exception.self) {
+        try await session.get("data", as: [String: Int?].self)
+    }
+    #expect(typed.name == "ValueError")
+    let dynamic = try await #require(throws: Python::Exception.self) {
+        try await session.get("data", as: Python::Value.self)
+    }
+    #expect(dynamic.name == "ValueError")
+    await session.close()
+}
 
-private final class CodingDefaults: Sendable {
-    let next: Mutex = .init(0)
+// MARK: - RecoveringEncoding
+
+private struct RecoveringEncoding: Python::Encodable {
+    let tuple: Python::Reference
+
+    func encode(to encoder: inout Python::Encoder) throws {
+        try tuple.encode(to: &encoder)
+        do {
+            try encoder.encode(12, at: 0)
+            Issue.record("Expected encoding into a tuple to fail.")
+        } catch let error as Python::Exception {
+            #expect(error.name == "TypeError")
+        }
+        try encoder.encode(42)
+    }
+}
+
+@Test
+func encoderCanRecoverFromAnInvalidContainerShape() async throws {
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(.source("pair = (0, 1)"))
+    try await session.enqueue { context in
+        let tuple = try context.object("pair").retain(in: context)
+        try context.set(RecoveringEncoding(tuple: tuple), forKey: "result")
+        #expect(try context.get("result", as: Int.self) == 42)
+    }
+    await session.close()
 }
 
 @Test
 func typedExportedFunctions() async throws {
-    let defaults = CodingDefaults()
+    let module = makeTypedModule()
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(moduleDefinitions: [module])
+
+    try await withSession(session) { session in
+        _ = try await session.evaluate("""
+        import typed
+        assert typed.next() == 1
+        assert typed.next() == 2
+        assert typed.next(value=40) == 40
+        assert await typed.point({'x': 41, 'labels': ['a']}) == {'x': 42, 'labels': ['a']}
+        typed.injected(42)
+        assert injected_value == 42
+        """)
+    }
+}
+
+private func makeTypedModule() -> Python::Module {
+    let defaults = Mutex(0)
     let next = Python::Module.Function("next", parameters: [
         .init("value", as: Int.self, hasDefaultValue: true),
     ], call: { arguments, _, encoder in
         try arguments.withArgument(Int.self, parameter: 0, default: {
-            defaults.next.withLock { value in
+            defaults.withLock { value in
                 value += 1
                 return value
             }
         }) { value in try encoder.encode(value) }
     })
+
     let point = Python::Module.Function("point", parameters: [
         .init("value", as: CodingPoint.self),
     ], start: { arguments, _ in
@@ -298,6 +369,7 @@ func typedExportedFunctions() async throws {
             return CodingPoint(x: value.x + 1, labels: value.labels)
         }
     })
+
     let injected = Python::Module.Function("injected", parameters: [
         .init("context", as: Python::Context.self),
         .init("value", as: Int.self),
@@ -306,19 +378,6 @@ func typedExportedFunctions() async throws {
         try context.set(value, forKey: "injected_value")
         try encoder.encodeNil()
     })
-    let runtime = try await Python::Runtime()
-    let session = try await runtime.session(moduleDefinitions: [.init(
-        "typed",
-        functions: [next, point, injected],
-    )])
-    _ = try await session.evaluate("""
-    import typed
-    assert typed.next() == 1
-    assert typed.next() == 2
-    assert typed.next(value=40) == 40
-    assert await typed.point({'x': 41, 'labels': ['a']}) == {'x': 42, 'labels': ['a']}
-    typed.injected(42)
-    assert injected_value == 42
-    """)
-    await session.close()
+
+    return Python::Module("typed", functions: [next, point, injected])
 }

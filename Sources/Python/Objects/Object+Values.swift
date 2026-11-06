@@ -6,22 +6,26 @@ internal import libcpython
 
 extension Object {
     @_lifetime(borrow attachment)
-    init(bytes: Span<UInt8>, in attachment: borrowing ThreadState.Attachment) throws {
+    init(bytes: Span<UInt8>, in attachment: borrowing PThread.Attachment) throws {
+        self = unsafe try Self.take(Self.copyBytes(bytes), in: attachment)
+    }
+
+    @unsafe
+    static func copyBytes(_ bytes: Span<UInt8>) -> UnsafeMutablePointer<PyObject>? {
         // CPython copies the range synchronously; the Swift storage stays borrowed.
-        let pointer = bytes.withUnsafeBytes { buffer in
+        bytes.withUnsafeBytes { buffer in
             unsafe PyBytes_FromStringAndSize(
                 buffer.baseAddress?.assumingMemoryBound(to: CChar.self),
                 buffer.count,
             )
         }
-        self = unsafe try Self.take(pointer, in: attachment)
     }
 
     borrowing func value() throws -> Value {
         try value(depth: 0)
     }
 
-    private borrowing func value(depth: Int) throws -> Value {
+    borrowing func value(depth: Int) throws -> Value {
         guard depth < 64 else {
             throw Exception(
                 name: "ValueError",
@@ -36,25 +40,19 @@ extension Object {
             return .bool(unsafe PyObject_IsTrue(pointer) == 1)
         case CPython_ValueInteger:
             let value = unsafe PyLong_AsLongLong(pointer)
-            if unsafe PyErr_Occurred() != nil {
-                throw Self.failure("A Swift integer argument exceeds Int64.")
-            }
+            try Self.checkError("A Swift integer argument exceeds Int64.")
             return .integer(value)
         case CPython_ValueFloat:
             return .float(unsafe PyFloat_AsDouble(pointer))
         case CPython_ValueString:
             return .string(try string())
         case CPython_ValueBytes:
-            let span = try bytes()
-            return .bytes(Array(capacity: span.count) { output in
-                for index in span.indices {
-                    output.append(span[index])
-                }
-            })
+            return .bytes(try copiedBytes())
         case CPython_ValueSequence:
             return .list(try sequenceValues(depth: depth + 1))
         case CPython_ValueDictionary:
-            return .dictionary(try dictionaryValues(depth: depth + 1))
+            let decoder = unsafe Decoder(pointer, depth: depth, in: self)
+            return .dictionary(try decoder.dictionary(of: Value.self))
         default:
             throw Exception(
                 name: "TypeError",
@@ -63,11 +61,21 @@ extension Object {
         }
     }
 
+    private borrowing func copiedBytes() throws -> [UInt8] {
+        let span = try bytes()
+        return Array(capacity: span.count) { output in
+            for index in span.indices {
+                output.append(span[index])
+            }
+        }
+    }
+
     private borrowing func sequenceValues(depth: Int) throws -> [Value] {
         let count = unsafe PySequence_Size(pointer)
         guard count >= 0 else {
             throw Self.failure("Unable to read a Python sequence.")
         }
+
         var values = [Value]()
         values.reserveCapacity(count)
         for index in 0 ..< count {
@@ -77,39 +85,30 @@ extension Object {
         return values
     }
 
-    private borrowing func dictionaryValues(depth: Int) throws -> [String: Value] {
-        var position = 0
-        var key: UnsafeMutablePointer<PyObject>?
-        var value: UnsafeMutablePointer<PyObject>?
-        var values = [String: Value]()
-        while unsafe PyDict_Next(pointer, &position, &key, &value) != 0 {
-            guard let key = unsafe key, let value = unsafe value else {
-                throw Self.failure("Unable to read a Python dictionary.")
-            }
-            // Retain borrowed entries before conversion, including error formatting.
-            unsafe Py_IncRef(key)
-            let keyObject = unsafe Object(owned: key, in: self)
-            unsafe Py_IncRef(value)
-            let valueObject = unsafe Object(owned: value, in: self)
-            values[try keyObject.string()] = try valueObject.value(depth: depth)
-        }
-        return values
-    }
-
     @_lifetime(borrow self)
     public borrowing func utf8() throws -> UTF8Span {
-        _ = try InterpreterStorage.requireCurrent()
-        var count = 0
-        guard let bytes = unsafe PyUnicode_AsUTF8AndSize(pointer, &count) else {
+        _ = try Interpreter.Storage.requireCurrent()
+
+        guard let buffer = unsafe Self.utf8Buffer(pointer) else {
             throw Self.failure("Unable to read a Python string.")
         }
-        let span = unsafe Span<UInt8>(
-            _unsafeStart: UnsafeRawPointer(bytes).assumingMemoryBound(to: UInt8.self),
+        let utf8 = unsafe UTF8Span(unchecked: buffer.span)
+        return unsafe _overrideLifetime(utf8, borrowing: self)
+    }
+
+    // CPython owns the UTF-8 bytes for as long as the Unicode object is alive.
+    @unsafe
+    static func utf8Buffer(
+        _ pointer: UnsafeMutablePointer<PyObject>,
+    ) -> UnsafeBufferPointer<UInt8>? {
+        var count = 0
+        guard let bytes = unsafe PyUnicode_AsUTF8AndSize(pointer, &count) else {
+            return nil
+        }
+        return unsafe UnsafeBufferPointer(
+            start: UnsafeRawPointer(bytes).assumingMemoryBound(to: UInt8.self),
             count: count,
         )
-        // CPython owns this valid UTF-8 buffer until this reference is released.
-        let utf8 = unsafe UTF8Span(unchecked: span)
-        return unsafe _overrideLifetime(utf8, borrowing: self)
     }
 
     @_lifetime(borrow self)

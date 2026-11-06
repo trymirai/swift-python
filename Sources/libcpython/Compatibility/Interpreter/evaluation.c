@@ -7,6 +7,11 @@ typedef struct {
     bool (*interrupt)(void *context);
 } Evaluation;
 
+typedef struct {
+    Py_tracefunc function;
+    PyObject *object;
+} SavedTrace;
+
 static const char evaluation_name[] = "swift-python.evaluation";
 
 static void
@@ -23,15 +28,36 @@ trace_evaluation(PyObject *capsule, PyFrameObject *frame, int event, PyObject *a
     if (event != PyTrace_CALL && event != PyTrace_LINE) {
         return 0;
     }
+
     Evaluation *evaluation = PyCapsule_GetPointer(capsule, evaluation_name);
     if (evaluation == NULL) {
         return -1;
     }
     if (evaluation->context != NULL && evaluation->interrupt(evaluation->context)) {
-        PyErr_SetNone(PyExc_KeyboardInterrupt);
+        CPython_RaiseKeyboardInterrupt();
         return -1;
     }
     return 0;
+}
+
+static bool
+install_trace(PyThreadState *state, PyObject *capsule)
+{
+    PyEval_SetTrace(trace_evaluation, capsule);
+    return state->c_tracefunc == trace_evaluation && state->c_traceobj == capsule;
+}
+
+static void
+restore_trace(SavedTrace previous, PyObject *capsule)
+{
+    // Trace restoration can run Python audit hooks that replace the pending error.
+    PyObject *error = PyErr_GetRaisedException();
+    PyEval_SetTrace(previous.function, previous.object);
+    Py_XDECREF(previous.object);
+    Py_DECREF(capsule);
+    if (error != NULL) {
+        PyErr_SetRaisedException(error);
+    }
 }
 
 PyObject *
@@ -43,6 +69,7 @@ CPython_Evaluate(PyObject *function, PyObject *source, PyObject *filename, PyObj
         return PyErr_NoMemory();
     }
     *evaluation = (Evaluation){context, interrupt};
+
     PyObject *capsule = PyCapsule_New(evaluation, evaluation_name, destroy_evaluation);
     if (capsule == NULL) {
         free(evaluation);
@@ -50,26 +77,20 @@ CPython_Evaluate(PyObject *function, PyObject *source, PyObject *filename, PyObj
     }
 
     PyThreadState *state = PyThreadState_Get();
-    Py_tracefunc previous = state->c_tracefunc;
-    PyObject *previous_object = Py_XNewRef(state->c_traceobj);
-    PyEval_SetTrace(trace_evaluation, capsule);
-    if (state->c_tracefunc != trace_evaluation || state->c_traceobj != capsule) {
+    SavedTrace previous = {.function = state->c_tracefunc, .object = Py_XNewRef(state->c_traceobj)};
+
+    if (!install_trace(state, capsule)) {
         evaluation->context = NULL;
-        Py_XDECREF(previous_object);
+        Py_XDECREF(previous.object);
         Py_DECREF(capsule);
         PyErr_SetString(PyExc_RuntimeError, "Unable to install the execution trace.");
         return NULL;
     }
+
     PyObject *result = CPython_Call3(function, source, filename, control);
 
-    /* Restoring a trace can run Python audit hooks. Preserve the block error. */
+    // Python can retain the trace capsule through sys.gettrace().
     evaluation->context = NULL;
-    PyObject *error = PyErr_GetRaisedException();
-    PyEval_SetTrace(previous, previous_object);
-    Py_XDECREF(previous_object);
-    Py_DECREF(capsule);
-    if (error != NULL) {
-        PyErr_SetRaisedException(error);
-    }
+    restore_trace(previous, capsule);
     return result;
 }

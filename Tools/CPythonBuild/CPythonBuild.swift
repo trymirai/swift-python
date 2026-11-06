@@ -24,6 +24,12 @@ struct CPythonBuild: AsyncParsableCommand {
 }
 
 extension CPythonBuild {
+    static func validateJobCount(_ jobs: Int) throws {
+        guard jobs > 0 else {
+            throw ValidationError("--jobs must be positive.")
+        }
+    }
+
     func makeLogger() -> Logger {
         var logger = Logger(
             label: "cpython-build",

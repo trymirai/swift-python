@@ -1,10 +1,13 @@
 """Swift-facing package preparation; environment transactions stay in Swift."""
 
+import json
+
 from ..packages import installation_tools
 
 # The pinned wheel libraries must be mounted before importing their consumers.
 installation_tools()
 
+from .candidate import Wheel
 from .configuration import load
 from .requirements import module_name as module_name
 from .requirements import names as names
@@ -21,9 +24,28 @@ def configure(configuration: dict, sources: list[dict], read) -> dict:
     global _configuration
     if _configuration is not None:
         raise RuntimeError("The package service is already configured")
+
     _configuration, description = load(configuration, sources, read)
     return description
 
 
 def prepare(request: dict, unused, control) -> dict:
     return prepare_distributions(request, _configuration)
+
+
+def encode_manifest(manifest: dict) -> str:
+    return json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def decode_manifest(data: bytes) -> dict:
+    manifest = json.loads(data)
+    if not isinstance(manifest, dict):
+        raise ValueError("Expected a package environment manifest")
+
+    packages = manifest.get("packages")
+    if not isinstance(packages, dict):
+        raise ValueError("Expected package records in the environment manifest")
+
+    for name, record in packages.items():
+        Wheel.from_record(name, record)
+    return manifest

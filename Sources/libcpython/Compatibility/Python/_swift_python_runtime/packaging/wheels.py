@@ -18,132 +18,133 @@ from installer.sources import WheelFile
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
-from .candidate import Candidate
-from .paths import absolute_path
+from ..packages.archive import distribution_metadata_paths
+from .candidate import Wheel
+from .paths import absolute_path, walk_files
 
 
-def _metadata(data: bytes):
-    return email.parser.BytesParser().parsebytes(data)
+def _download(wheel: Wheel, temporary: Path) -> None:
+    digest = hashlib.sha256()
+    with (
+        urllib.request.urlopen(wheel.url, timeout=30) as response,
+        temporary.open("xb") as output,
+    ):
+        size = 0
+
+        while chunk := response.read(128 * 1024):
+            size += len(chunk)
+            if size > 256 * 1024 * 1024:
+                raise ValueError(f"Wheel exceeds the download limit: {wheel.name}")
+
+            digest.update(chunk)
+            output.write(chunk)
+
+        output.flush()
+        os.fsync(output.fileno())
+
+    if digest.hexdigest() != wheel.digest:
+        raise ValueError(f"Wheel checksum mismatch: {wheel.name}")
+
+
+def _validate_archive(wheel_path: Path, wheel: Wheel) -> None:
+    with zipfile.ZipFile(wheel_path) as archive:
+        entries = archive.infolist()
+        if sum(info.file_size for info in entries) > 1024 * 1024 * 1024:
+            raise ValueError(f"Unpacked wheel exceeds the installation limit: {wheel.name}")
+
+        for info in entries:
+            path = Path(info.filename)
+            if path.is_absolute() or ".." in path.parts or "\0" in info.filename:
+                raise ValueError(f"Invalid wheel member: {info.filename!r}")
+
+
+def _install_archive(wheel_path: Path, stage: Path) -> None:
+    scheme = {
+        key: str(stage / ("site-packages" if key in ("purelib", "platlib") else key))
+        for key in ("purelib", "platlib", "scripts", "headers", "data")
+    }
+    destination = SchemeDictionaryDestination(
+        scheme,
+        interpreter=sys.executable or "python",
+        script_kind="posix",
+        bytecode_optimization_levels=(),
+    )
+    with WheelFile.open(wheel_path) as source:
+        source.validate_record(validate_contents=True)
+        install_wheel(source, destination, {"INSTALLER": b"swift-python\n"})
+
+    for path in walk_files(stage):
+        path.chmod(path.stat().st_mode & ~0o222)
+
+
+def _publish_install(stage: Path, target: Path) -> None:
+    try:
+        os.rename(stage, target)
+    except OSError as error:
+        # Another installer may have published this same digest first.
+        if error.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not target.is_dir():
+            raise
 
 
 class WheelCache:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
-    def download(self, candidate: Candidate) -> Path:
-        cache = self.directory / "wheels"
-        cache.mkdir(exist_ok=True)
-        cache = cache / candidate.digest
-        cache.mkdir(exist_ok=True)
-        destination = cache / candidate.filename
+    def download(self, wheel: Wheel) -> Path:
+        cache = self.directory / "wheels" / wheel.digest
+        cache.mkdir(parents=True, exist_ok=True)
+
+        destination = cache / wheel.filename
         if destination.is_file():
             with destination.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
-            if digest == candidate.digest:
-                return destination
 
-            raise ValueError(f"Cached wheel checksum mismatch: {candidate.name}")
+            if digest != wheel.digest:
+                raise ValueError(f"Cached wheel checksum mismatch: {wheel.name}")
+
+            return destination
 
         temporary = cache / (uuid.uuid4().hex + ".download")
 
         try:
-            digest = hashlib.sha256()
-            with (
-                urllib.request.urlopen(candidate.url, timeout=30) as response,
-                temporary.open("xb") as output,
-            ):
-                size = 0
-
-                while chunk := response.read(128 * 1024):
-                    size += len(chunk)
-                    if size > 256 * 1024 * 1024:
-                        raise ValueError(f"Wheel exceeds the download limit: {candidate.name}")
-
-                    digest.update(chunk)
-                    output.write(chunk)
-
-                output.flush()
-                os.fsync(output.fileno())
-
-            if digest.hexdigest() != candidate.digest:
-                raise ValueError(f"Wheel checksum mismatch: {candidate.name}")
-
+            _download(wheel, temporary)
             os.replace(temporary, destination)
             return destination
         finally:
             temporary.unlink(missing_ok=True)
 
-    def metadata(self, candidate: Candidate):
-        with zipfile.ZipFile(self.download(candidate)) as archive:
-            paths = [
-                name
-                for name in archive.namelist()
-                if name.endswith(".dist-info/METADATA") and name.count("/") == 1
-            ]
+    def metadata(self, wheel: Wheel):
+        with zipfile.ZipFile(self.download(wheel)) as archive:
+            paths = list(distribution_metadata_paths(archive.namelist()))
             if len(paths) != 1:
                 raise ValueError(
-                    f"Wheel must have one distribution metadata directory: {candidate.name}"
+                    f"Wheel must have one distribution metadata directory: {wheel.name}"
                 )
 
-            metadata = _metadata(archive.read(paths[0]))
+            metadata = email.parser.BytesParser().parsebytes(archive.read(paths[0]))
             if (
-                canonicalize_name(metadata["Name"]) != candidate.name
-                or Version(metadata["Version"]) != candidate.version
+                canonicalize_name(metadata["Name"]) != wheel.name
+                or Version(metadata["Version"]) != wheel.version
             ):
-                raise ValueError(
-                    f"Wheel metadata does not match its filename: {candidate.filename}"
-                )
+                raise ValueError(f"Wheel metadata does not match its filename: {wheel.filename}")
 
             return metadata
 
-    def unpack(self, candidate: Candidate) -> Path:
+    def unpack(self, wheel: Wheel) -> Path:
         parent = self.directory / "installed"
-        parent.mkdir(exist_ok=True)
-        target = parent / candidate.digest
+        parent.mkdir(parents=True, exist_ok=True)
+        target = parent / wheel.digest
         if target.is_dir():
             return target
 
         stage = Path(tempfile.mkdtemp(prefix=".install-", dir=parent))
 
         try:
-            with zipfile.ZipFile(self.download(candidate)) as archive:
-                if sum(info.file_size for info in archive.infolist()) > 1024 * 1024 * 1024:
-                    raise ValueError(
-                        f"Unpacked wheel exceeds the installation limit: {candidate.name}"
-                    )
+            wheel_path = self.download(wheel)
+            _validate_archive(wheel_path, wheel)
+            _install_archive(wheel_path, stage)
 
-                for info in archive.infolist():
-                    path = Path(info.filename)
-                    if path.is_absolute() or ".." in path.parts or "\0" in info.filename:
-                        raise ValueError(f"Invalid wheel member: {info.filename!r}")
-
-            scheme = {
-                key: str(stage / ("site-packages" if key in ("purelib", "platlib") else key))
-                for key in ("purelib", "platlib", "scripts", "headers", "data")
-            }
-            destination = SchemeDictionaryDestination(
-                scheme,
-                interpreter=sys.executable or "python",
-                script_kind="posix",
-                bytecode_optimization_levels=(),
-            )
-            # WheelFile validates RECORD hashes while the public installer writes the
-            # wheel's declared installation scheme and distribution metadata.
-            with WheelFile.open(self.download(candidate)) as wheel:
-                wheel.validate_record(validate_contents=True)
-                install_wheel(wheel, destination, {"INSTALLER": b"swift-python\n"})
-
-            for directory, _, files in os.walk(stage):
-                for file in files:
-                    path = Path(directory) / file
-                    path.chmod(path.stat().st_mode & ~0o222)
-
-            try:
-                os.rename(stage, target)
-            except OSError as error:
-                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not target.is_dir():
-                    raise
-
+            _publish_install(stage, target)
             return target
         finally:
             if stage.exists():
@@ -153,11 +154,15 @@ class WheelCache:
 def archive(request: dict, unused, control) -> None:
     source = absolute_path(request["directory"])
     destination = absolute_path(request["output"])
+
     with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for file in sorted(source.rglob("*")):
-            if file.is_file():
-                entry = zipfile.ZipInfo(file.relative_to(source).as_posix())
-                entry.compress_type = zipfile.ZIP_DEFLATED
-                entry.external_attr = (file.stat().st_mode & 0o777) << 16
-                with file.open("rb") as input, archive.open(entry, "w") as output:
-                    shutil.copyfileobj(input, output)
+            if not file.is_file():
+                continue
+
+            entry = zipfile.ZipInfo(file.relative_to(source).as_posix())
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.external_attr = (file.stat().st_mode & 0o777) << 16
+
+            with file.open("rb") as source_file, archive.open(entry, "w") as entry_stream:
+                shutil.copyfileobj(source_file, entry_stream)

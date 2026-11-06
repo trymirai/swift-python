@@ -22,6 +22,7 @@ extension CPythonBuildPlugin {
             let directories = [
                 "Sources/libcpython/Generated/Configuration",
                 "Sources/libcpython/Compatibility/Python",
+
                 "Submodules/cpython/Include",
                 "Submodules/cpython/Objects",
                 "Submodules/cpython/Parser",
@@ -29,6 +30,7 @@ extension CPythonBuildPlugin {
                 "Submodules/cpython/Modules",
                 "Submodules/cpython/Lib",
                 "Submodules/cpython/Programs",
+
                 "Submodules/python-packages",
             ]
 
@@ -78,18 +80,23 @@ extension CPythonBuildPlugin {
                 }
 
                 let childPath = path + "/" + name
-                var attributes = stat()
-
-                guard lstat(packageDirectory + "/" + childPath, &attributes) == 0 else {
-                    throw MissingInputError(path: childPath)
-                }
-
-                if attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
+                switch try fileKind(at: childPath) {
+                case mode_t(S_IFDIR):
                     try visit(childPath, into: &inputs)
-                } else if attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) {
+                case mode_t(S_IFREG):
                     inputs.append(childPath)
+                default:
+                    break
                 }
             }
+        }
+
+        private func fileKind(at path: String) throws -> mode_t {
+            var attributes = stat()
+            guard lstat(packageDirectory + "/" + path, &attributes) == 0 else {
+                throw MissingInputError(path: path)
+            }
+            return attributes.st_mode & mode_t(S_IFMT)
         }
     }
 }
@@ -99,6 +106,7 @@ private extension CPythonBuildPlugin.InputFiles {
         ".",
         "..",
         ".git",
+
         "__pycache__",
         "test",
         "tests",

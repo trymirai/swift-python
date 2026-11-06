@@ -48,8 +48,9 @@ class _Output(io.TextIOWrapper):
             return super().write(text)
 
         # Bound encoding and Swift callback copies even for a very large print().
-        for index in range(0, len(text), 16 * 1024):
-            part = text[index : index + 16 * 1024]
+        chunk_size = 16 * 1024
+        for index in range(0, len(text), chunk_size):
+            part = text[index : index + chunk_size]
             super().write(part)
             self.flush()
             if self.control is not None:
@@ -60,6 +61,7 @@ class _Output(io.TextIOWrapper):
     def result(self) -> str:
         if self.memory is None:
             return ""
+
         if not self.closed:
             self.flush()
         return self.memory.data.decode("utf-8", "replace")
@@ -90,28 +92,35 @@ class _Stream(io.TextIOBase):
         if self.target is not None:
             self.target.close()
 
-    def fileno(self) -> int:
+    def _attached_target(self):
         if self.target is None:
             raise io.UnsupportedOperation("No execution stream is attached")
 
-        return self.target.fileno()
+        return self.target
+
+    def fileno(self) -> int:
+        return self._attached_target().fileno()
 
     @property
     def buffer(self) -> io.BufferedIOBase:
-        if self.target is None:
-            raise io.UnsupportedOperation("No execution stream is attached")
-
-        return self.target.buffer
+        return self._attached_target().buffer
 
 
 _stdout = _Stream(sys.stdout)
 _stderr = _Stream(sys.stderr)
 
 
+def _input_stream(path: str | None) -> io.TextIOBase:
+    if path is None:
+        return io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+
+    return _open(path, "r", encoding="utf-8")
+
+
 def install() -> None:
     sys.stdout = sys.__stdout__ = _stdout
     sys.stderr = sys.__stderr__ = _stderr
-    sys.stdin = sys.__stdin__ = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    sys.stdin = sys.__stdin__ = _input_stream(None)
 
 
 @contextlib.contextmanager
@@ -120,37 +129,23 @@ def capture(control):
     callback = control if control("capture") else None
 
     with contextlib.ExitStack() as stack:
-        stdout = stack.enter_context(_Output(configuration["stdout"], callback, "stdout"))
-        stderr = stack.enter_context(_Output(configuration["stderr"], callback, "stderr"))
-        diagnostic_path = configuration["traceback"]
-        diagnostic = (
-            stack.enter_context(_open(diagnostic_path, "ab"))
-            if diagnostic_path is not None
-            else None
+        stdout = stack.enter_context(_Output(configuration.get("stdout"), callback, "stdout"))
+        stderr = stack.enter_context(_Output(configuration.get("stderr"), callback, "stderr"))
+        stdin = stack.enter_context(_input_stream(configuration.get("stdin")))
+
+        bindings = (
+            (sys, "stdin", stdin),
+            (sys, "__stdin__", stdin),
+            (sys, "stdout", _stdout),
+            (sys, "__stdout__", _stdout),
+            (sys, "stderr", _stderr),
+            (sys, "__stderr__", _stderr),
+            (_stdout, "target", stdout),
+            (_stderr, "target", stderr),
         )
+        for owner, attribute, value in bindings:
+            previous = getattr(owner, attribute)
+            setattr(owner, attribute, value)
+            stack.callback(setattr, owner, attribute, previous)
 
-        input_path = configuration["stdin"]
-        stdin = stack.enter_context(
-            _open(input_path, "r", encoding="utf-8")
-            if input_path is not None
-            else io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
-        )
-
-        for name, value in (
-            ("stdin", stdin),
-            ("__stdin__", stdin),
-            ("stdout", _stdout),
-            ("__stdout__", _stdout),
-            ("stderr", _stderr),
-            ("__stderr__", _stderr),
-        ):
-            previous = getattr(sys, name)
-            setattr(sys, name, value)
-            stack.callback(setattr, sys, name, previous)
-
-        previous_stdout, previous_stderr = _stdout.target, _stderr.target
-        _stdout.target, _stderr.target = stdout, stderr
-        stack.callback(setattr, _stdout, "target", previous_stdout)
-        stack.callback(setattr, _stderr, "target", previous_stderr)
-
-        yield stdout, stderr, diagnostic
+        yield stdout, stderr

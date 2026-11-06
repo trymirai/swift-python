@@ -12,4 +12,12 @@ extension AttributeSyntax {
         let value = arguments.first { $0.label?.text == label }?.expression.trimmedDescription
         return value == "nil" ? nil : value
     }
+
+    func nameSource(default name: String) -> String {
+        argument() ?? String(reflecting: name)
+    }
+
+    var documentationSource: String {
+        argument(named: "documentation") ?? "nil"
+    }
 }

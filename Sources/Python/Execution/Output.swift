@@ -3,12 +3,12 @@
 //
 
 /// The text captured in memory during one execution.
-/// Streams redirected to files through `StandardIO` have empty strings here.
+/// Streams redirected to files have empty strings here.
 public struct Output: Sendable {
     public let stdout: String
     public let stderr: String
 
-    public enum Stream: Sendable {
+    public enum Stream: String, Sendable {
         case stdout
         case stderr
     }

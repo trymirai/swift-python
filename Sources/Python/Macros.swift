@@ -3,7 +3,7 @@
 //
 
 /// Synthesizes a module from the static functions marked with `PythonFunction`.
-@attached(member, names: named(_pythonModuleName), named(_pythonModuleDocumentation))
+@attached(member, names: named(_pModuleName), named(_pModuleDocumentation))
 @attached(extension, conformances: ModuleHost)
 public macro PythonModule(_ name: String, documentation: String? = nil) = #externalMacro(
     module: "PythonMacros",
@@ -11,7 +11,7 @@ public macro PythonModule(_ name: String, documentation: String? = nil) = #exter
 )
 
 /// Exports the method as a Python function, preserving asynchronous calls.
-@attached(peer, names: prefixed(__python_))
+@attached(peer, names: prefixed(__p_))
 public macro PythonFunction(
     _ name: String? = nil,
     documentation: String? = nil,
@@ -21,13 +21,13 @@ public macro PythonFunction(
 )
 
 /// Exports a Swift class. Its base class is inferred from Swift inheritance.
-@attached(member, names: prefixed(__python_), named(__python_identity))
+@attached(member, names: prefixed(__p_), named(__p_identity))
 @attached(memberAttribute)
 @attached(
     extension,
-    conformances: _PythonClass,
-    names: named(_pythonIdentity),
-    named(_pythonContext)
+    conformances: _PClass,
+    names: named(_pIdentity),
+    named(_pContext)
 )
 public macro PythonClass(
     _ name: String? = nil,
@@ -36,14 +36,14 @@ public macro PythonClass(
 ) = #externalMacro(module: "PythonMacros", type: "PythonClassMacro")
 
 /// Selects the synchronous, non-failable initializer callable from Python.
-@attached(peer, names: prefixed(__python_))
+@attached(peer, names: prefixed(__p_))
 public macro PythonInit(documentation: String? = nil) = #externalMacro(
     module: "PythonMacros",
     type: "PythonInitMacro",
 )
 
 /// Exports a Swift property. A stored var uses the Python wrapper for its storage.
-@attached(peer, names: prefixed(__python_), prefixed(`$`))
+@attached(peer, names: prefixed(__p_), prefixed(`$`))
 public macro PythonProperty(
     _ name: String? = nil,
     isReadOnly: Bool = false,

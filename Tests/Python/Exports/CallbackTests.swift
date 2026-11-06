@@ -15,18 +15,18 @@ private enum ValueModule {
         value
     }
 
+    @MainActor
     @PythonFunction
     static func asyncEcho(_ value: Python::Value) async -> Python::Value {
         await Task.yield()
+        MainActor.preconditionIsolated()
         return value
     }
 }
 
 @Test
 func exportedValueConversions() async throws {
-    let runtime = try await Python::Runtime()
-    let session = try await runtime.session(modules: [ValueModule.self])
-    _ = try await session.evaluate(#"""
+    try await evaluateInFreshSession(#"""
     import host
 
     values = [None, True, False, -2**63, 2**63 - 1, 1.25, float('inf'),
@@ -47,8 +47,7 @@ func exportedValueConversions() async throws {
         else:
             raise AssertionError("Expected a conversion failure")
     assert host.echo("still attached") == "still attached"
-    """#)
-    await session.close()
+    """#, modules: [ValueModule.self])
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -86,43 +85,47 @@ func literalCallbackDefaults() async throws {
     await session.close()
 }
 
-// MARK: - CallbackArguments
+// MARK: - CallbackInterruption
 
-private enum CallbackArguments: CaseIterable {
-    case values
-    case scoped
+private enum CallbackInterruption: CaseIterable {
+    case stop
+    case stopBeforeSubmission
+    case cancelTask
+    case timeout
 }
 
-@Test(.timeLimit(.minutes(1)), arguments: CallbackArguments.allCases)
-private func stoppingEvaluationCancelsTheSwiftCallback(_ arguments: CallbackArguments) async throws {
+@Test(.timeLimit(.minutes(1)), arguments: CallbackInterruption.allCases)
+private func interruptedEvaluationJoinsSwiftCallbacks(
+    _ interruption: CallbackInterruption,
+) async throws {
     let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-    let completed = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     let suspended = AsyncStream<Void>.makeStream()
+
+    let lifecycle = Mutex((started: false, cancelled: false))
     let target = Mutex<Python::Session?>(nil)
     defer {
         entered.continuation.finish()
-        completed.continuation.finish()
         suspended.continuation.finish()
         target.withLock { $0 = nil }
     }
 
     let wait: @Sendable () async throws -> Python::Value = {
+        lifecycle.withLock { $0.started = true }
         entered.continuation.yield(())
+        defer { lifecycle.withLock { $0.cancelled = Task.isCancelled } }
         for await _ in suspended.stream {}
-        completed.continuation.yield(())
         try Task.checkCancellation()
         return .none
     }
-    let function: Python::Module.Function = switch arguments {
-    case .values:
-        .init("wait") { _ in try await wait() }
-    case .scoped:
+
+    let function: Python::Module.Function = if interruption == .stopBeforeSubmission {
         .init("wait", start: { _, _ in
-            // Stop before Python can install its callback cleanup handler.
             let session = try #require(target.withLock { $0 })
             #expect(session.stop())
             return Python::Module.Function.makeOperation(wait)
         })
+    } else {
+        .init("wait") { _ in try await wait() }
     }
 
     let host = Python::Module("host", functions: [function])
@@ -130,6 +133,7 @@ private func stoppingEvaluationCancelsTheSwiftCallback(_ arguments: CallbackArgu
     let session = try await runtime.session(moduleDefinitions: [host])
     target.withLock { $0 = session }
 
+    let timeout: Duration? = interruption == .timeout ? .seconds(2) : nil
     let evaluation = Task {
         try await session.evaluate("""
         import asyncio, host
@@ -139,31 +143,127 @@ private func stoppingEvaluationCancelsTheSwiftCallback(_ arguments: CallbackArgu
             lambda loop, context: callback_errors.append(context["message"])
         )
         await host.wait()
-        """)
+        """, timeout: timeout)
     }
     defer { evaluation.cancel() }
-    var starts = entered.stream.makeAsyncIterator()
-    let started: Void? = await starts.next()
-    try #require(started != nil)
-    if arguments == .values {
-        #expect(session.stop())
+
+    if interruption == .stop || interruption == .cancelTask {
+        _ = try await #require(nextSignal(from: entered.stream))
+        if interruption == .stop {
+            #expect(session.stop())
+        } else {
+            evaluation.cancel()
+        }
     }
 
-    let error = try await #require(throws: Python::ExecutionError.self) {
-        try await evaluation.value
-    }
-    guard case .stopped = error else {
-        throw error
-    }
+    let execution = try await evaluation.value
+    #expect(execution.end == (interruption == .timeout ? .timedOut : .stopped))
 
-    var completions = completed.stream.makeAsyncIterator()
-    let finished: Void? = await completions.next()
-    try #require(finished != nil)
+    let observation = lifecycle.withLock { $0 }
+    let submitted = interruption != .stopBeforeSubmission
+    #expect(observation.started == submitted)
+    #expect(observation.cancelled == submitted)
 
-    let output = try await session.evaluate("""
+    let next = try await session.evaluate("""
     assert not callback_errors, callback_errors
     42
     """)
-    #expect(output.stdout == "42\n")
+    #expect(next.output.stdout == "42\n")
+    await session.close()
+}
+
+@Test(.timeLimit(.minutes(1)))
+func cancellingOnePythonAwaitCancelsOnlyItsSwiftCallback() async throws {
+    let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    let suspended = AsyncStream<Void>.makeStream()
+    let cancelled = AsyncStream<Void>.makeStream()
+    defer {
+        entered.continuation.finish()
+        suspended.continuation.finish()
+        cancelled.continuation.finish()
+    }
+
+    let host = Python::Module("host", functions: [
+        .init("wait") { _ in
+            entered.continuation.yield(())
+            defer {
+                if Task.isCancelled {
+                    cancelled.continuation.finish()
+                }
+            }
+            for await _ in suspended.stream {}
+            try Task.checkCancellation()
+            return .none
+        },
+        .init("started") { _ in
+            _ = await nextSignal(from: entered.stream)
+            return .none
+        },
+        .init("answer_after_cancel") { _ in
+            for await _ in cancelled.stream {}
+            try Task.checkCancellation()
+            return .integer(42)
+        },
+    ])
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(moduleDefinitions: [host])
+    _ = try await session.evaluate("""
+    import asyncio, host
+    waiting = asyncio.create_task(host.wait())
+    await host.started()
+    answer = asyncio.create_task(host.answer_after_cancel())
+    waiting.cancel()
+    try:
+        await waiting
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("Expected the first callback to be cancelled")
+    assert await answer == 42
+    """, timeout: .seconds(5))
+    await session.close()
+}
+
+func nextSignal(from stream: AsyncStream<Void>) async -> Void? {
+    var iterator = stream.makeAsyncIterator()
+    return await iterator.next()
+}
+
+@Test(.timeLimit(.minutes(1)))
+func swiftCallbacksRunDuringInstallationEnqueueAndImportUpdates() async throws {
+    let host = Python::Module(
+        "host",
+        source: """
+        import asyncio
+        import sys
+
+        def read_answer():
+            return asyncio.run(answer())
+
+        startup_answer = read_answer()
+        cached_answer = None
+
+        class Finder:
+            def find_spec(self, fullname, path=None, target=None):
+                return None
+
+            def invalidate_caches(self):
+                global cached_answer
+                cached_answer = read_answer()
+
+        sys.meta_path.append(Finder())
+        """,
+        functions: [.init("answer", body: { _ in .integer(42) })],
+    )
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(moduleDefinitions: [host])
+    let value = try await session.enqueue { context in
+        let host = try context.import(module: "host")
+        let answer = try host.attribute("read_answer").call().decode(as: Int.self)
+        return try host.attribute("startup_answer").decode(as: Int.self) + answer
+    }
+    #expect(value == 84)
+    try await session.replaceImportPaths([])
+    _ = try await session.evaluate("import host; assert host.cached_answer == 42")
     await session.close()
 }

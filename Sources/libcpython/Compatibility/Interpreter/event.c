@@ -6,6 +6,8 @@
 struct CPython_ThreadEvent {
     pthread_mutex_t lock;
     pthread_cond_t condition;
+
+    // Repeated signals coalesce until the executor consumes one wakeup.
     bool pending;
 };
 
@@ -18,6 +20,7 @@ CPython_ThreadEvent_New(void)
     if (event == NULL) {
         return NULL;
     }
+
     if (pthread_mutex_init(&event->lock, NULL) != 0) {
         free(event);
         return NULL;

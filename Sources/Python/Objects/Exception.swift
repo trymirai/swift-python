@@ -2,10 +2,16 @@
 //  Created by Anton Spivak
 //
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#elseif canImport(Foundation)
+import Foundation
+#endif
+
 // MARK: - Exception
 
 /// A named Python exception from an object operation or raised by a Swift callback.
-public struct Exception: Swift.Error {
+public struct Exception: Swift::Error {
     public let name: String
     public let message: String
 
@@ -24,3 +30,15 @@ extension Exception: CustomStringConvertible {
         message
     }
 }
+
+#if canImport(FoundationEssentials) || canImport(Foundation)
+
+// MARK: LocalizedError
+
+extension Exception: LocalizedError {
+    public var errorDescription: String? {
+        description
+    }
+}
+
+#endif

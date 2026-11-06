@@ -10,6 +10,7 @@ import Testing
 
 private enum ExportDefaults {
     static let counter: Mutex = .init(0)
+
     static func next() -> Int {
         counter.withLock { value in
             value += 1
@@ -23,6 +24,7 @@ private enum ExportDefaults {
 @PythonModule("automatic")
 private enum AutomaticModule {
     private static let seed = 41
+
     @PythonFunction
     static func selfDefault(_ value: Int = Self.seed) -> Int {
         value + 1
@@ -104,9 +106,7 @@ private enum UnselectedModule {
 
 @Test
 func automaticModuleDiscovery() async throws {
-    let runtime = try await Python::Runtime()
-    let session = try await runtime.session(modules: [AutomaticModule.self])
-    _ = try await session.evaluate("""
+    try await evaluateInFreshSession("""
     import automatic, inspect, sys
 
     assert automatic.sum(40) == 42
@@ -124,6 +124,7 @@ func automaticModuleDiscovery() async throws {
     assert automatic.extended(41) == 42
     assert automatic.integer(42) == 'int:42'
     assert automatic.floating(1.5) == 'float:1.5'
+
     assert automatic.next() + 1 == automatic.next()
     assert automatic.next(99) == 99
     assert automatic.optional() == 42
@@ -131,8 +132,7 @@ func automaticModuleDiscovery() async throws {
 
     assert 'def sum(' in inspect.getsource(automatic.sum)
     assert 'unselected' not in sys.modules
-    """)
-    await session.close()
+    """, modules: [AutomaticModule.self])
 }
 
 @Test
@@ -146,6 +146,7 @@ func staticModuleDoesNotRequireAnInstance() async throws {
     assert 'async def greeting(' in inspect.getsource(configured.greeting)
     assert await configured.greeting('x', prefix='first') == 'first:x'
     """)
+
     let error = try await #require(throws: Python::Exception.self) {
         try await runtime.session(modules: [InvalidContextModule.self])
     }

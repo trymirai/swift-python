@@ -24,7 +24,7 @@ extension CPythonBuildPlugin: BuildToolPlugin {
 
         let inputs = try InputFiles(packageDirectory: packageDirectory.path).collect()
         return [try .buildCommand(
-            displayName: "Build embedded CPython standard library",
+            displayName: "Prepare embedded CPython sources",
             executable: context.tool(named: "CPythonBuild").url,
             arguments: ["prepare", packageDirectory.path, outputDirectory.path],
             environment: [
@@ -33,7 +33,7 @@ extension CPythonBuildPlugin: BuildToolPlugin {
                     .path,
             ],
             inputFiles: inputs.map { packageDirectory.appending(path: $0) },
-            outputFiles: ["Frozen.c", "Resources.c", "GetPath.c"]
+            outputFiles: ["Frozen.c", "Resources.c", "GetPath.c", "FileIO.c", "PosixModule.c"]
                 .map { outputDirectory.appending(path: $0) },
         )]
     }

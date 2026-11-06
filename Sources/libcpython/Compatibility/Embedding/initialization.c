@@ -14,6 +14,26 @@ CPython_InstallEmbeddedImporter(void)
     return 0;
 }
 
+static PyStatus
+configure_embedded_paths(PyConfig *config)
+{
+    if (config->stdlib_dir == NULL) {
+        PyStatus status = PyConfig_SetString(config, &config->stdlib_dir, embedded_stdlib_path);
+        if (PyStatus_Exception(status)) {
+            return status;
+        }
+    }
+
+    if (!config->module_search_paths_set) {
+        PyStatus status = PyWideStringList_Append(&config->module_search_paths, embedded_stdlib_path);
+        if (PyStatus_Exception(status)) {
+            return status;
+        }
+        config->module_search_paths_set = 1;
+    }
+    return PyStatus_Ok();
+}
+
 PyStatus
 CPython_Initialize(PyConfig *config)
 {
@@ -24,25 +44,17 @@ CPython_Initialize(PyConfig *config)
         return PyStatus_Error("Python is already initialized");
     }
 
-    PyStatus status;
-    if (config->stdlib_dir == NULL) {
-        status = PyConfig_SetString(config, &config->stdlib_dir, embedded_stdlib_path);
-        if (PyStatus_Exception(status)) {
-            return status;
-        }
+    PyStatus status = configure_embedded_paths(config);
+    if (PyStatus_Exception(status)) {
+        return status;
     }
-    if (!config->module_search_paths_set) {
-        status = PyWideStringList_Append(&config->module_search_paths, embedded_stdlib_path);
-        if (PyStatus_Exception(status)) {
-            return status;
-        }
-        config->module_search_paths_set = 1;
-    }
+
     PyImport_FrozenModules = CPythonEmbeddedFrozenModules;
     status = Py_InitializeFromConfig(config);
     if (PyStatus_Exception(status)) {
         return status;
     }
+
     if (CPython_InstallEmbeddedImporter() < 0) {
         return PyStatus_Error("Cannot install the embedded standard-library importer");
     }

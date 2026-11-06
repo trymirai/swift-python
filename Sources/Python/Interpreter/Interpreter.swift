@@ -4,100 +4,62 @@
 
 // MARK: - Interpreter
 
-// A session's interpreter and the code that runs while its thread state is attached.
+// A session's interpreter and the operations that require its attached thread state.
 struct Interpreter: ~Copyable {
-    private let state: ThreadState
-
-    private let exportDispatcher: ExportDispatcher
+    private let pThread: PThread
     private let packagePaths: [String]
 
+    var references: Reference.Store {
+        pThread.storage.references
+    }
+
     init(
+        execution: Session.Control,
         importPaths: [String],
         modules: [Module],
-        packages: [PackageSource] = [],
+        packages: [Runtime.PackageSource.Resolved] = [],
         scheduleRelease: @escaping @Sendable () -> Void = {},
         sessionOrigin: ObjectIdentifier? = nil,
         session: Session? = nil,
+        delegate: (any Session.Delegate)? = nil,
     ) throws {
-        let state = try ThreadState(scheduleRelease: scheduleRelease)
-        let storage = state.storage
+        let pThread = try PThread(scheduleRelease: scheduleRelease)
+        let storage = pThread.storage
 
-        let exportDispatcher = ExportDispatcher(modules)
         storage.sessionOrigin = sessionOrigin
         storage.session = session
+        storage.fileOpenDelegate = delegate
 
-        let packagePaths = try state.withAttached { attachment in
+        let packagePaths = try pThread.withAttached(execution: execution) { attachment in
             try Object.installImporter(in: attachment)
             let packagePaths = try Self.installPackages(packages, in: attachment)
+
             try Self.configureExecution(importPaths: importPaths + packagePaths, in: attachment)
 
-            let arrayModule = try Object.import(module: "array", in: attachment)
-            let arrayType = try arrayModule.attribute("array")
-            storage.arrayType = unsafe try storage.references.retain(arrayType.pointer)
-
-            try Self.installExports(
-                modules,
-                dispatcher: exportDispatcher,
-                storage: storage,
-                in: attachment,
-            )
+            try Self.cacheArrayType(in: attachment)
+            try Self.installExports(modules, in: attachment)
             return packagePaths
         }
 
-        self.state = consume state
-        self.exportDispatcher = exportDispatcher
+        self.pThread = consume pThread
         self.packagePaths = packagePaths
     }
 
     borrowing func updateImports(
         paths: [String],
         invalidatingModules modules: [String],
-        execution: ExecutionControl? = nil,
+        execution: Session.Control,
     ) throws {
-        try state.withAttached { attachment in
+        try pThread.withAttached(execution: execution) { attachment in
             let module = try Object.import(module: "_swift_python_runtime.imports", in: attachment)
             let update = try module.attribute("update_imports")
-            let change = [paths + packagePaths, modules]
-            if let execution {
-                _ = try update.evaluate(change, execution: execution, in: attachment)
-            } else {
-                _ = try update.call(Object(encoding: change, in: attachment))
-            }
-        }
-    }
-
-    borrowing func restoreImports(paths: [String], discarding: [String]) throws {
-        try state.withAttached { attachment in
-            let module = try Object.import(module: "_swift_python_runtime.imports", in: attachment)
-            let restore = try module.attribute("restore_imports")
-            _ = try restore.call(Object(
-                encoding: [paths + packagePaths, discarding],
-                in: attachment,
-            ))
-        }
-    }
-
-    borrowing func loadedModules(
-        files: [String],
-        roots: [String],
-        execution: ExecutionControl,
-    ) throws -> [String] {
-        try state.withAttached { attachment in
-            let module = try Object.import(module: "_swift_python_runtime.imports", in: attachment)
-            let inspect = try module.attribute("loaded_modules")
-            let result = try inspect.evaluate(
-                ["files": files, "roots": roots],
-                execution: execution,
-                in: attachment,
-            )
-
-            return try result.decode(as: [String].self)
+            _ = try update.call(Object(encoding: [paths + packagePaths, modules], in: attachment))
         }
     }
 
     borrowing func initialize(
         _ startup: Session.Startup,
-        execution: ExecutionControl,
+        execution: Session.Control,
     ) throws -> Output {
         let output = try execute(
             "initialize",
@@ -105,8 +67,8 @@ struct Interpreter: ~Copyable {
             filename: nil,
             execution: execution,
         )
-        let storage = state.storage
-        try state.withAttached { attachment in
+        let storage = pThread.storage
+        try pThread.withAttached(execution: execution) { attachment in
             let namespace = try Context.currentNamespace(in: attachment)
             storage.namespace = unsafe try storage.references.retain(namespace.pointer)
         }
@@ -115,27 +77,22 @@ struct Interpreter: ~Copyable {
 
     borrowing func withContext<R: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Context) throws -> R,
-        execution: ExecutionControl,
+        execution: Session.Control,
     ) throws -> R {
-        let storage = state.storage
-        return try state.withAttached { _ in
-            storage.execution = execution
-            defer {
-                storage.execution = nil
-            }
-            let context = Context(storage: storage)
+        try pThread.withAttached(execution: execution) { attachment in
+            let context = Context(storage: attachment.storage)
             return try body(context)
         }
     }
 
     borrowing func releasePendingReferences() {
-        state.withAttached { _ in state.storage.releasePendingReferences() }
+        pThread.withAttached { _ in pThread.storage.releasePendingReferences() }
     }
 
     borrowing func evaluate(
         _ source: Source,
         filename: String?,
-        execution: ExecutionControl,
+        execution: Session.Control,
     ) throws -> Output {
         switch source {
         case let .interactive(source):
@@ -155,25 +112,21 @@ struct Interpreter: ~Copyable {
         }
     }
 
+    @_lifetime(borrow owner)
+    static func executionModule<Owner: ~Copyable & ~Escapable>(
+        in owner: borrowing Owner,
+    ) throws -> Object {
+        try Object.import(module: "_swift_python_runtime.execution", in: owner)
+    }
+
     private borrowing func execute<Request: Encodable>(
         _ function: String,
         source: Request,
         filename: String?,
-        execution: ExecutionControl,
+        execution: Session.Control,
     ) throws -> Output {
-        try state.withAttached { attachment in
-            let module = try Object.import(
-                module: "_swift_python_runtime.execution",
-                in: attachment,
-            )
-            state.storage.execution = execution
-            let boundary = exportDispatcher.callBoundary
-            // A trace interrupt can arrive before Python enters its finally.
-            // Cancel this evaluation's remaining Swift work before detaching.
-            defer {
-                exportDispatcher.cancelPending(since: boundary)
-                state.storage.execution = nil
-            }
+        try pThread.withAttached(execution: execution) { attachment in
+            let module = try Self.executionModule(in: attachment)
             let evaluate = try module.attribute(function)
             let result = try evaluate.evaluate(
                 source,
@@ -182,9 +135,9 @@ struct Interpreter: ~Copyable {
                 in: attachment,
             )
 
-            let reply = try result.decode(as: ExecutionReply.self)
+            let reply = try result.decode(as: Reply.self)
             if !reply.traceback.isEmpty {
-                throw ExecutionError.exception(traceback: reply.traceback, output: reply.output)
+                throw ExecutionError(traceback: reply.traceback, output: reply.output)
             }
 
             return reply.output
@@ -194,14 +147,12 @@ struct Interpreter: ~Copyable {
 
 private extension Interpreter {
     static func installPackages(
-        _ packages: [PackageSource],
-        in attachment: borrowing ThreadState.Attachment,
+        _ packages: [Runtime.PackageSource.Resolved],
+        in attachment: borrowing PThread.Attachment,
     ) throws -> [String] {
-        let reader = try Object.makeFunction(PackageSource.Reader(packages), in: attachment)
-        let sources = try Object(
-            encoding: packages.map { PackageMetadata(value: $0) },
-            in: attachment,
-        )
+        let reader = try Object.makeFunction(Runtime.PackageSource.Reader(packages), in: attachment)
+        let sources = try Object(encoding: packages, in: attachment)
+
         let module = try Object.import(module: "_swift_python_runtime.packages", in: attachment)
         let install = try module.attribute("install")
         let installed = try install.call(
@@ -214,34 +165,41 @@ private extension Interpreter {
 
     static func configureExecution(
         importPaths: [String],
-        in attachment: borrowing ThreadState.Attachment,
+        in attachment: borrowing PThread.Attachment,
     ) throws {
-        let module = try Object.import(module: "_swift_python_runtime.execution", in: attachment)
+        let module = try executionModule(in: attachment)
         let configure = try module.attribute("configure")
         _ = try configure.call(Object(encoding: importPaths, in: attachment))
     }
 
+    static func cacheArrayType(in attachment: borrowing PThread.Attachment) throws {
+        let module = try Object.import(module: "array", in: attachment)
+        let type = try module.attribute("array")
+        let storage = attachment.storage
+        storage.arrayType = unsafe try storage.references.retain(type.pointer)
+    }
+
     static func installExports(
         _ modules: [Module],
-        dispatcher: ExportDispatcher,
-        storage: InterpreterStorage,
-        in attachment: borrowing ThreadState.Attachment,
+        in attachment: borrowing PThread.Attachment,
     ) throws {
         guard !modules.isEmpty else {
             return
         }
+
+        let storage = attachment.storage
         let registry = ClassRegistry(modules: modules)
         storage.classRegistry = registry
+
         let exports = try Object.import(module: "_swift_python_runtime.exports", in: attachment)
         let marker = try exports.attribute("_DEFAULT")
         storage.defaultArgumentMarker = unsafe UInt(bitPattern: marker.pointer)
 
         let install = try exports.attribute("install")
-        let invoke = try Object.makeFunction(dispatcher, in: attachment)
-        let metadata = try Object(
-            encoding: modules.map { ModuleMetadata(value: $0) },
-            in: attachment,
-        )
+        let plan = Module.Plan(modules)
+        let invoke = try Object.makeFunction(ExportDispatcher(plan.functions), in: attachment)
+        let metadata = try Object(encoding: plan.metadata, in: attachment)
+
         _ = try install.call(metadata, invoke)
         registry.finishInstallation()
     }
@@ -253,5 +211,53 @@ extension Interpreter {
     enum Source: Sendable {
         case interactive(String)
         case script(String, arguments: [String])
+    }
+}
+
+// MARK: Interpreter.StartupRequest
+
+private extension Interpreter {
+    struct StartupRequest: Encodable {
+        let value: Session.Startup
+
+        func encode(to encoder: inout Encoder) throws {
+            switch value {
+            case let .source(source):
+                try encoder.encode(source, forKey: "source")
+            case let .module(module), let .project(_, module):
+                try encoder.encode(module, forKey: "module")
+            }
+        }
+    }
+}
+
+// MARK: Interpreter.ScriptRequest
+
+private extension Interpreter {
+    struct ScriptRequest: Encodable {
+        let source: String
+        let arguments: [String]
+
+        func encode(to encoder: inout Encoder) throws {
+            try encoder.encode(source, forKey: "source")
+            try encoder.encode(arguments, forKey: "arguments")
+        }
+    }
+}
+
+// MARK: Interpreter.Reply
+
+private extension Interpreter {
+    struct Reply: Decodable {
+        let output: Output
+        let traceback: String
+
+        init(from decoder: borrowing Decoder) throws {
+            output = Output(
+                stdout: try decoder.decode(String.self, at: 0),
+                stderr: try decoder.decode(String.self, at: 1),
+            )
+            traceback = try decoder.decode(String.self, at: 2)
+        }
     }
 }

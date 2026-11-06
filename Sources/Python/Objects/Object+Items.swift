@@ -52,7 +52,7 @@ public extension Object {
     }
 
     @_lifetime(copy self)
-    private borrowing func object(for key: Item.Key) throws -> Object {
+    private borrowing func object(for key: Object.Item.Key) throws -> Object {
         let value = try item(key).object()
         return unsafe _overrideLifetime(consume value, copying: self)
     }
@@ -60,7 +60,7 @@ public extension Object {
 
 extension Object {
     @_lifetime(borrow self)
-    borrowing func item(_ key: Item.Key) -> Item {
-        unsafe Item(container: pointer, key: key, in: self)
+    borrowing func item(_ key: Object.Item.Key) -> Object.Item {
+        unsafe Object.Item(container: pointer, key: key, in: self)
     }
 }

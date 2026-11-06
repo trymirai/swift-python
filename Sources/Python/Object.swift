@@ -13,6 +13,7 @@ public struct Object: ~Copyable, ~Escapable {
     let pointer: UnsafeMutablePointer<PyObject>
 
     @_lifetime(borrow owner)
+    @unsafe
     init<Owner: ~Copyable & ~Escapable>(
         owned pointer: UnsafeMutablePointer<PyObject>,
         in owner: borrowing Owner,
@@ -21,13 +22,11 @@ public struct Object: ~Copyable, ~Escapable {
     }
 
     deinit {
-        unsafe InterpreterStorage.release(pointer)
+        unsafe Interpreter.Storage.release(pointer)
     }
 
-    static func installImporter(in attachment: borrowing ThreadState.Attachment) throws {
-        guard CPython_InstallEmbeddedImporter() == 0 else {
-            throw failure("Unable to install the embedded importer.")
-        }
+    static func installImporter(in attachment: borrowing PThread.Attachment) throws {
+        try check(CPython_InstallEmbeddedImporter(), "Unable to install the embedded importer.")
     }
 
     @_lifetime(borrow owner)
@@ -46,7 +45,7 @@ public struct Object: ~Copyable, ~Escapable {
 
     @_lifetime(copy self)
     public borrowing func attribute(_ name: String) throws -> Object {
-        _ = try InterpreterStorage.requireCurrent()
+        _ = try Interpreter.Storage.requireCurrent()
         let name = try Object(encoding: name, in: self)
         return unsafe try Self.take(PyObject_GetAttr(pointer, name.pointer), inheriting: self)
     }
@@ -55,12 +54,13 @@ public struct Object: ~Copyable, ~Escapable {
         _ name: String,
         to value: borrowing T,
     ) throws {
-        _ = try InterpreterStorage.requireCurrent()
+        _ = try Interpreter.Storage.requireCurrent()
         let name = try Object(encoding: name, in: self)
         let value = try Object(encoding: value, in: self)
-        guard unsafe PyObject_SetAttr(pointer, name.pointer, value.pointer) == 0 else {
-            throw Self.failure("Unable to set a Python attribute.")
-        }
+        try Self.check(
+            unsafe PyObject_SetAttr(pointer, name.pointer, value.pointer),
+            "Unable to set a Python attribute.",
+        )
     }
 
     borrowing func string() throws -> String {
@@ -68,18 +68,25 @@ public struct Object: ~Copyable, ~Escapable {
     }
 
     @_lifetime(borrow owner)
+    @unsafe
     static func take<Owner: ~Copyable & ~Escapable>(
         _ pointer: UnsafeMutablePointer<PyObject>?,
         in owner: borrowing Owner,
     ) throws -> Object {
-        guard let pointer = unsafe pointer else {
-            throw failure("A Python operation failed.")
-        }
+        unsafe try Object(owned: require(pointer, "A Python operation failed."), in: owner)
+    }
+
+    @_lifetime(borrow owner)
+    @unsafe
+    static func retaining<Owner: ~Copyable & ~Escapable>(
+        _ pointer: UnsafeMutablePointer<PyObject>,
+        in owner: borrowing Owner,
+    ) -> Object {
+        unsafe Py_IncRef(pointer)
         return unsafe Object(owned: pointer, in: owner)
     }
 
-    // Owning results inherit the source's interpreter lifetime, rather than the
-    // temporary source object itself. Borrowed spans continue to borrow self.
+    // Owned results can share the source's interpreter lifetime.
     @_lifetime(copy owner)
     @unsafe
     static func take<Owner: ~Copyable & ~Escapable>(
@@ -90,10 +97,36 @@ public struct Object: ~Copyable, ~Escapable {
         return unsafe _overrideLifetime(consume value, copying: owner)
     }
 
+    @_lifetime(copy owner)
+    @unsafe
+    static func retaining<Owner: ~Copyable & ~Escapable>(
+        _ pointer: UnsafeMutablePointer<PyObject>,
+        inheriting owner: borrowing Owner,
+    ) -> Object {
+        let value = unsafe retaining(pointer, in: owner)
+        return unsafe _overrideLifetime(consume value, copying: owner)
+    }
+
+    @unsafe
     consuming func release() -> UnsafeMutablePointer<PyObject> {
         let pointer = unsafe pointer
         discard self
         return unsafe pointer
+    }
+
+    @_lifetime(copy self)
+    borrowing func retained() -> Object {
+        unsafe Self.retaining(pointer, inheriting: self)
+    }
+
+    // The owning interpreter must be attached while the pending references are released.
+    @unsafe
+    static func decrementReferences(_ pointers: [UInt]) {
+        for bits in pointers {
+            if let pointer = unsafe UnsafeMutablePointer<PyObject>(bitPattern: bits) {
+                unsafe Py_DecRef(pointer)
+            }
+        }
     }
 }
 
@@ -106,7 +139,7 @@ extension Object {
         @_lifetime(borrow attachment)
         func call(
             _ arguments: borrowing Object,
-            in attachment: borrowing ThreadState.Attachment,
+            in attachment: borrowing PThread.Attachment,
         ) throws -> Object
     }
 }
@@ -117,9 +150,15 @@ public extension Object {
     @_lifetime(borrow self)
     borrowing func buffer<Element: BitwiseCopyable>(
         as type: Element.Type = Element.self,
-        isWritable: Bool = false,
     ) throws -> BufferLease<Element> {
-        unsafe try BufferLease(pointer, isWritable: isWritable, in: self)
+        unsafe try BufferLease(pointer, in: self)
+    }
+
+    @_lifetime(borrow self)
+    borrowing func mutableBuffer<Element: BitwiseCopyable>(
+        as type: Element.Type = Element.self,
+    ) throws -> BufferLease<Element>.Mutable {
+        unsafe try BufferLease<Element>.Mutable(pointer, in: self)
     }
 }
 

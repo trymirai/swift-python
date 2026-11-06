@@ -4,16 +4,15 @@
 
 extension Module {
     struct Class: Sendable {
-        let type: any _PythonClass.Type
+        let type: any _PClass.Type
         let module: any ModuleHost.Type
 
         let name: String
         let documentation: String?
 
-        var superclass: (any _PythonClass.Type)?
+        var superclass: (any _PClass.Type)?
 
         var initializer: Module.Function?
-
         var methods: [Module.Function] = []
         var properties: [Property] = []
 
@@ -21,21 +20,22 @@ extension Module {
             String(reflecting: type)
         }
 
-        var functions: [Module.Function] {
-            (initializer.map { [$0] } ?? [])
-                + methods
-                + properties.flatMap { [$0.getter] + ($0.setter.map { [$0] } ?? []) }
-        }
-
         mutating func validateMembers() throws {
             methods.sort { $0.name < $1.name }
             properties.sort { $0.name < $1.name }
 
             var members = Set<String>()
-            for member in methods.map(\.name) + properties.map(\.name) {
-                guard members.insert(member).inserted else {
-                    throw ExportCatalog.failure("Duplicate class member '\(member)'.")
+            func record(_ name: String) throws {
+                guard members.insert(name).inserted else {
+                    throw Module.Catalog.failure("Duplicate class member '\(name)'.")
                 }
+            }
+
+            for method in methods {
+                try record(method.name)
+            }
+            for property in properties {
+                try record(property.name)
             }
         }
     }

@@ -7,9 +7,8 @@ import SwiftSyntaxMacros
 
 struct ParameterExpansion {
     private let index: Int
-    private let typeName: String
-    private let defaultValueSource: String
-    private let parameterIndex: Int
+    private let bindingArguments: String
+
     let metadataSource: String
     let argumentSource: String
 
@@ -32,15 +31,16 @@ struct ParameterExpansion {
         }
         self.index = index
 
-        typeName = parameter.type.concreteSpelling(owner: owner)
-        defaultValueSource = parameter
+        let type = "(\(parameter.type.concreteSpelling(owner: owner))).self"
+        let defaultValueSource = parameter
             .defaultValue
             .map { ", default: { \($0.value.concreteSpelling(owner: owner)) }" } ?? ""
-        parameterIndex = index + (hasReceiver ? 1 : 0)
+        let parameterIndex = index + (hasReceiver ? 1 : 0)
+        bindingArguments = "\(type), parameter: \(parameterIndex)\(defaultValueSource)"
 
         let name = parameter.secondName?.text ?? parameter.firstName.text
-        let pythonName = name == "_" ? "arg\(index)" : name
-        metadataSource = ".init(\(String(reflecting: pythonName)), as: (\(typeName)).self, hasDefaultValue: \(parameter.defaultValue != nil))"
+        let pName = name == "_" ? "arg\(index)" : name
+        metadataSource = ".init(\(String(reflecting: pName)), as: \(type), hasDefaultValue: \(parameter.defaultValue != nil))"
 
         let label = parameter.firstName.text == "_" ? "" : "\(parameter.firstName.trimmedDescription): "
         argumentSource = "\(label)\(isMutableSpan ? "&" : "")__value\(index)"
@@ -48,14 +48,14 @@ struct ParameterExpansion {
 
     var preparationSource: String {
         """
-        var __argument\(index) = try arguments.prepare((\(typeName)).self, parameter: \(parameterIndex)\(defaultValueSource))
+        var __argument\(index) = try arguments.prepare(\(bindingArguments))
         try __argument\(index).validate()
         """
     }
 
     func wrapping(_ expression: String, isAsynchronous: Bool) -> String {
         let projection = if isAsynchronous {
-            "arguments.withArgument((\(typeName)).self, parameter: \(parameterIndex)\(defaultValueSource))"
+            "arguments.withArgument(\(bindingArguments))"
         } else {
             "__argument\(index).withValue"
         }

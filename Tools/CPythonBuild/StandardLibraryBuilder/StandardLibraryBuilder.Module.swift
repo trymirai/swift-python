@@ -27,8 +27,12 @@ extension StandardLibraryBuilder {
             name = String(path.dropLast(suffix.count)).replacing("/", with: ".")
         }
 
+        var upstreamSymbol: String {
+            "_Py_M__" + name.replacing(".", with: "_")
+        }
+
         var symbol: String {
-            "_Py_M__" + name.replacing(".", with: "_").replacing("-", with: "_")
+            upstreamSymbol.replacing("-", with: "_")
         }
     }
 }

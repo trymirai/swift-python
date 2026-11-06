@@ -2,23 +2,27 @@
 //  Created by Anton Spivak
 //
 
+public import SystemPackage
+
 public extension Session {
     /// Evaluates a complete interactive execution, including top-level await.
     /// Blocks and package operations share a FIFO queue, including time spent
     /// awaiting dependency preparation. A deadline starts when the execution runs.
+    /// An interrupted execution waits for its Swift callbacks before returning its outcome.
+    /// Redirections use absolute paths. Execution appends to redirected output files.
     nonisolated func evaluate(
         _ source: String,
         filename: String? = nil,
         timeout: Duration? = nil,
-        standardIO: StandardIO = .init(),
-        onOutput: (@Sendable (Output.Stream, String) -> Void)? = nil,
-    ) async throws -> Output {
+        redirecting redirects: [Stream: FilePath] = [:],
+        _ output: (@Sendable (Output.Stream, String) -> Void)? = nil,
+    ) async throws -> Execution {
         try await run(
             .interactive(source),
             filename: filename,
             timeout: timeout,
-            standardIO: standardIO,
-            onOutput: onOutput,
+            redirecting: redirects,
+            output: output,
         )
     }
 
@@ -27,14 +31,7 @@ public extension Session {
     nonisolated func enqueue<R: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Context) throws -> R,
     ) async throws -> R {
-        let result = try await withExecution { session, execution in
-            let value = try session.withInterpreter(execution: execution) { interpreter in
-                try interpreter.withContext(body, execution: execution)
-            }
-            try execution.checkInterruption()
-            return ValueTransfer(value)
-        }
-        return result.take()
+        try await enqueue(in: nil, body)
     }
 
     /// Runs asynchronous Swift work with a context bound to the current generation.
@@ -48,51 +45,71 @@ public extension Session {
 }
 
 extension Session {
-    func prepare(standardIO: StandardIO = .init()) async throws {
-        try await resolvePackages()
-        _ = try await run(nil, filename: nil, timeout: nil, standardIO: standardIO, onOutput: nil)
+    nonisolated func enqueue<R: Sendable & ~Copyable>(
+        in generation: Reference.Store?,
+        _ body: @Sendable (borrowing Context) throws -> R,
+    ) async throws -> R {
+        let result = try await withExecution { session, execution in
+            try session
+                .withInterpreter(execution: execution, generation: generation) { interpreter in
+                    Session.Transfer(try interpreter.withContext(body, execution: execution))
+                }
+        }
+        return result.take()
+    }
+
+    func prepare(redirecting redirects: [Stream: FilePath] = [:]) async throws {
+        if environment?.needsPreparation == true {
+            _ = try await packages.resolve()
+        }
+        try await withExecution(redirecting: redirects) { session, execution in
+            try session.withInterpreter(execution: execution) { _ in }
+        }
     }
 
     nonisolated func run(
-        _ source: Interpreter.Source?,
+        _ source: Interpreter.Source,
         filename: String?,
         timeout: Duration?,
-        standardIO: StandardIO,
-        onOutput: ExecutionControl.OutputHandler?,
-    ) async throws -> Output {
-        try await withExecution(timeout: timeout, standardIO: standardIO, onOutput: onOutput) {
-            session, execution in
-            try session.evaluate(source, filename: filename, execution: execution)
-        }
-    }
-
-    private func evaluate(
-        _ source: Interpreter.Source?,
-        filename: String?,
-        execution: ExecutionControl,
-    ) throws -> Output {
-        let timer = execution.startTimeoutTask()
-        defer { timer?.cancel() }
-        let result = Result {
-            try withInterpreter(execution: execution) { interpreter in
-                guard let source else {
-                    return startupOutput ?? .empty
-                }
-                return try interpreter.evaluate(source, filename: filename, execution: execution)
+        redirecting redirects: [Stream: FilePath],
+        output: Control.OutputHandler?,
+    ) async throws -> Execution {
+        @Sendable
+        func interrupted(
+            _ interruption: Control.Interruption,
+            _ result: Swift::Result<Execution, any Swift::Error>,
+        ) -> Execution {
+            let captured: Output = switch result {
+            case let .success(execution):
+                execution.output
+            case let .failure(error as ExecutionError):
+                error.output
+            case .failure:
+                .empty
             }
-        }
-        guard let interruption = execution.finish() else {
-            return try result.get()
+            let end: Execution.End = switch interruption {
+            case .stopped:
+                .stopped
+            case .timedOut:
+                .timedOut
+            }
+            return Execution(output: captured, end: end)
         }
 
-        switch result {
-        case let .success(output):
-            throw interruption.error(with: output)
-        case let .failure(error):
-            if case let .exception(_, output)? = error as? ExecutionError {
-                throw interruption.error(with: output)
+        return try await withExecution(
+            timeout: timeout,
+            redirecting: redirects,
+            output: output,
+            onInterruption: interrupted,
+        ) { session, execution in
+            try session.withInterpreter(execution: execution) { interpreter in
+                let captured = try interpreter.evaluate(
+                    source,
+                    filename: filename,
+                    execution: execution,
+                )
+                return Execution(output: captured, end: .finished)
             }
-            throw interruption.error()
         }
     }
 }

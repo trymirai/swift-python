@@ -7,13 +7,13 @@ internal import libcpython
 public extension Object {
     @_lifetime(copy self)
     borrowing func call() throws -> Object {
-        _ = try InterpreterStorage.requireCurrent()
+        _ = try Interpreter.Storage.requireCurrent()
         return unsafe try Self.take(PyObject_CallNoArgs(pointer), inheriting: self)
     }
 
     @_lifetime(copy self)
     borrowing func call<T: Encodable>(_ argument: T) throws -> Object {
-        _ = try InterpreterStorage.requireCurrent()
+        _ = try Interpreter.Storage.requireCurrent()
         let object = try Object(encoding: argument, in: self)
         return try call(object)
     }
@@ -22,11 +22,11 @@ public extension Object {
 extension Object {
     @_lifetime(copy self)
     borrowing func item(at index: Int) throws -> Object {
-        guard let item = unsafe PyTuple_GetItem(pointer, index) else {
-            throw Self.failure("Unable to read the Python tuple.")
-        }
-        unsafe Py_IncRef(item)
-        return unsafe try Self.take(item, inheriting: self)
+        let item = unsafe try Self.require(
+            PyTuple_GetItem(pointer, index),
+            "Unable to read the Python tuple.",
+        )
+        return unsafe Self.retaining(item, inheriting: self)
     }
 
     @_lifetime(copy self)
@@ -37,17 +37,19 @@ extension Object {
     @_lifetime(copy self)
     borrowing func call(_ first: borrowing Object, _ second: borrowing Object) throws -> Object {
         let arguments = unsafe try Self.take(PyTuple_New(2), in: self)
-        unsafe Py_IncRef(first.pointer)
-        guard unsafe PyTuple_SetItem(arguments.pointer, 0, first.pointer) == 0 else {
-            throw Self.failure("Unable to build Python call arguments.")
-        }
-        unsafe Py_IncRef(second.pointer)
-        guard unsafe PyTuple_SetItem(arguments.pointer, 1, second.pointer) == 0 else {
-            throw Self.failure("Unable to build Python call arguments.")
-        }
+        try arguments.setTupleItem(first.retained(), at: 0)
+        try arguments.setTupleItem(second.retained(), at: 1)
+
         return unsafe try Self.take(
             PyObject_CallObject(pointer, arguments.pointer),
             inheriting: self,
+        )
+    }
+
+    private borrowing func setTupleItem(_ value: consuming Object, at index: Int) throws {
+        try Self.check(
+            unsafe PyTuple_SetItem(pointer, index, value.release()),
+            "Unable to build Python call arguments.",
         )
     }
 
@@ -69,12 +71,13 @@ extension Object {
     borrowing func evaluate<Source: Encodable>(
         _ source: borrowing Source,
         filename: String? = nil,
-        execution: ExecutionControl,
-        in attachment: borrowing ThreadState.Attachment,
+        execution: Session.Control,
+        in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
         let source = try Object(encoding: source, in: attachment)
         let filename = try Object(encoding: filename, in: attachment)
         let control = try Object.makeFunction(execution, in: attachment)
+
         let context = unsafe Unmanaged.passUnretained(execution).toOpaque()
         defer {
             withExtendedLifetime(execution) {}
@@ -93,7 +96,7 @@ extension Object {
         guard let context = unsafe context else {
             return false
         }
-        return unsafe Unmanaged<ExecutionControl>.fromOpaque(context)
+        return unsafe Unmanaged<Session.Control>.fromOpaque(context)
             .takeUnretainedValue()
             .deliverInterruption()
     }

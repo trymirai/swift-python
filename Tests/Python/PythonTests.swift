@@ -51,17 +51,12 @@ func embeddedStandardLibrarySupportsSourceResourcesAndOverrides() async throws {
     assert sys.is_remote_debug_enabled() is \#(remoteDebugging)
     assert sysconfig.get_config_var("Py_REMOTE_DEBUG") == int(\#(remoteDebugging))
     """#
-    let runtime = try await Python::Runtime()
-    let session = try await runtime.session()
-    _ = try await session.evaluate(code)
-    await session.close()
+    try await evaluateInFreshSession(code)
 }
 
 @Test
 func bundledNativeModulesAreUsable() async throws {
-    let runtime = try await Python::Runtime()
-    let session = try await runtime.session()
-    _ = try await session.evaluate("""
+    try await evaluateInFreshSession("""
     import _decimal, bz2, ctypes, lzma, sqlite3, ssl, zlib
     from compression import zstd
     from xml.parsers import expat
@@ -81,7 +76,16 @@ func bundledNativeModulesAreUsable() async throws {
         assert database.serialize()
 
     """)
-    await session.close()
+}
+
+func evaluateInFreshSession(
+    _ source: String,
+    modules: [any Python::ModuleHost.Type] = [],
+) async throws {
+    let session = try await Python::Runtime().session(modules: modules)
+    try await withSession(session) { session in
+        _ = try await session.evaluate(source)
+    }
 }
 
 @Test
@@ -106,36 +110,42 @@ func interactiveSessions() async throws {
     7
     """)
 
-    let (firstOutput, secondOutput) = try await (initial, other)
-    #expect(firstOutput.stdout == "42\n")
-    #expect(firstOutput.stderr == "diagnostic\n")
-    #expect(secondOutput.stdout == "7\n")
+    let (firstExecution, secondExecution) = try await (initial, other)
+    #expect(firstExecution.end == .finished)
+    #expect(firstExecution.output.stdout == "42\n")
+    #expect(firstExecution.output.stderr == "diagnostic\n")
+    #expect(secondExecution.end == .finished)
+    #expect(secondExecution.output.stdout == "7\n")
 
-    let error = try await #require(throws: Python::ExecutionError.self) {
-        try await first.evaluate("print('before'); fail()", filename: "<failure>")
-    }
-    if case let .exception(traceback, output) = error {
-        #expect(output.stdout == "before\n")
-        #expect(traceback.contains("<failure>"))
-        #expect(traceback.contains("<initial>"))
-        #expect(traceback.contains("raise ValueError"))
-    } else {
-        Issue.record("Expected a Python traceback, got \(error)")
-    }
-    await #expect(throws: Python::ExecutionError.self) {
-        try await first.evaluate("raise SystemExit(1)")
-    }
-    #expect(try await first.evaluate("counter").stdout == "40\n")
+    try await checkInteractiveErrors(in: first)
+    #expect(try await first.evaluate("counter").output.stdout == "40\n")
 
     try await first.reset()
-    #expect(try await first.evaluate("'counter' in globals()").stdout == "False\n")
-    #expect(try await second.evaluate("_").stdout == "7\n")
+    #expect(try await first.evaluate("'counter' in globals()").output.stdout == "False\n")
+    #expect(try await second.evaluate("_").output.stdout == "7\n")
 
     await first.close()
-    await #expect(throws: Python::SessionError.self) {
+    await #expect(throws: Python::Session.Error.self) {
         try await first.evaluate("1")
     }
     await second.close()
+}
+
+private func checkInteractiveErrors(in session: Python::Session) async throws {
+    let error = try await #require(throws: Python::ExecutionError.self) {
+        try await session.evaluate("print('before'); fail()", filename: "<failure>")
+    }
+    #expect(error.output.stdout == "before\n")
+    #expect(error.output.stderr == error.traceback)
+    #expect(error.traceback.contains("<failure>"))
+    #expect(error.traceback.contains("<initial>"))
+    #expect(error.traceback.contains("raise ValueError"))
+
+    for source in ["raise SystemExit(1)", "raise KeyboardInterrupt()"] {
+        await #expect(throws: Python::ExecutionError.self) {
+            try await session.evaluate(source)
+        }
+    }
 }
 
 #if os(macOS)
@@ -151,13 +161,28 @@ func sourceInitialization() async throws {
     let session = try await runtime.session(.source("counter = 40\nprint('initialized')"))
 
     #expect(await session.startupOutput?.stdout == "initialized\n")
-    #expect(try await session.evaluate("counter += 2; counter").stdout == "42\n")
+    #expect(try await session.evaluate("counter += 2; counter").output.stdout == "42\n")
 
     try await session.reset()
-    #expect(try await session.evaluate("counter").stdout == "40\n")
+    #expect(try await session.evaluate("counter").output.stdout == "40\n")
     await session.close()
 
-    await #expect(throws: Python::ExecutionError.self) {
+    let error = try await #require(throws: Python::ExecutionError.self) {
         try await runtime.session(.source("raise ValueError('initialization failed')"))
     }
+    #expect(error.traceback.contains("ValueError: initialization failed"))
+    #expect(error.output.stderr == error.traceback)
+}
+
+func withSession(
+    _ session: Python::Session,
+    _ test: (Python::Session) async throws -> Void,
+) async rethrows {
+    do {
+        try await test(session)
+    } catch {
+        await session.close()
+        throw error
+    }
+    await session.close()
 }

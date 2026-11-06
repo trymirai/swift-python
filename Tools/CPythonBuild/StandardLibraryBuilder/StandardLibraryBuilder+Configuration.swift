@@ -8,7 +8,25 @@ extension StandardLibraryBuilder {
     func makeConfigurationModules() async throws -> [(String, String)] {
         let root = workspace.packageDirectory
         let configuration = root.appending("Sources/libcpython/Generated/Configuration")
+        let version = try await pythonVersion()
 
+        var result = [(String, String)]()
+        for header in try await workspace.entries(configuration) where header.hasSuffix(".h") {
+            guard let profile = try Profile(header: header) else {
+                continue
+            }
+
+            let text = try await workspace.read(textFrom: configuration.appending(header))
+            let defines = integerDefines(in: text)
+            result.append((
+                profile.moduleName,
+                Self.moduleSource(for: profile, version: version, defines: defines),
+            ))
+        }
+        return result
+    }
+
+    private func pythonVersion() async throws -> String {
         let versionHeader = try await workspace.read(
             textFrom: workspace.sourceDirectory.appending("Include/patchlevel.h"),
         )
@@ -21,20 +39,25 @@ extension StandardLibraryBuilder {
             throw BuildError("Missing Python version in Include/patchlevel.h")
         }
 
-        let version = "\(major).\(minor)"
-        var result = [(String, String)]()
-        for header in try await workspace.entries(configuration) where header.hasSuffix(".h") {
+        return "\(major).\(minor)"
+    }
+
+    private struct Profile {
+        let family: String
+        let platform: String
+
+        let moduleName: String
+
+        init?(header: String) throws {
             let profile = String(header.dropLast(2))
             let parts = profile.split(separator: "-").map(String.init)
             guard parts.count == 2 || (parts.count == 3 && parts[0] == "linux") else {
-                continue
+                return nil
             }
 
-            let family = parts[0]
+            family = parts[0]
             let architecture = parts[parts.count - 1]
-            let platform: String
             let abi: String
-
             switch family {
             case "linux":
                 platform = "linux"
@@ -55,71 +78,75 @@ extension StandardLibraryBuilder {
                 throw BuildError("Unsupported configuration profile: \(profile)")
             }
 
-            let multiarchitecture =
-                (family == "linux" && architecture == "arm64" ? "aarch64" : architecture) + "-" +
-                abi
-            var values = try await integerDefines(in: workspace.read(
-                textFrom: configuration.appending(header),
-            ))
-
-            let strings = [
-                "VERSION": version,
-                "LDVERSION": version,
-                "py_version_short": version,
-                "CC": "clang",
-                "CXX": "clang++",
-                "AR": "ar",
-                "RANLIB": "ranlib",
-                "CFLAGS": "",
-                "LDFLAGS": "",
-                "LDSHARED": family == "linux"
-                    ? "clang -shared"
-                    : "clang -bundle -undefined dynamic_lookup",
-                "LIBRARY": "libcpython.a",
-                "LDLIBRARY": "libcpython.a",
-                "SHLIB_SUFFIX": ".so",
-                "MACOSX_DEPLOYMENT_TARGET": family == "macos" ? "26.4" : "",
-                "IPHONEOS_DEPLOYMENT_TARGET": platform == "ios" ? "26.4" : "",
-                "srcdir": "",
-                "CONFIG_ARGS": "",
-                "prefix": "/",
-                "exec_prefix": "/",
-                "LIBDIR": "/lib",
-                "LIBPL": "/lib/python\(version)/config",
-                "INCLUDEPY": "/include/python\(version)",
-                "PYTHONFRAMEWORK": "",
-            ]
-
-            for (key, value) in strings {
-                values[key] = value.quotedSourceLiteral
-            }
-            values["Py_ENABLE_SHARED"] = "0"
-            values["Py_DEBUG"] = "0"
-            values.removeValue(forKey: "Py_REMOTE_DEBUG")
-
-            let runtime = """
-            # ABI and trait-dependent values come from the running interpreter.
-            import _imp
-            import sys
-
-            _suffix = next(iter(_imp.extension_suffixes()), "")
-            build_time_vars = {
-                "ABIFLAGS": sys.abiflags,
-                "MULTIARCH": sys.implementation._multiarch,
-                "SOABI": _suffix.removeprefix(".").removesuffix(".so"),
-                "EXT_SUFFIX": _suffix,
-                "MACHDEP": sys.platform,
-                "Py_REMOTE_DEBUG": int("_remote_debugging" in sys.builtin_module_names),
-
-            """
-
-            let body = runtime + values.sorted { $0.key < $1.key }
-                .map { "    " + $0.key.quotedSourceLiteral + ": " + $0.value + "," }
-                .joined(separator: "\n") + "\n}\n"
-
-            result.append(("_sysconfigdata__\(platform)_\(multiarchitecture)", body))
+            let cpu = family == "linux" && architecture == "arm64" ? "aarch64" : architecture
+            moduleName = "_sysconfigdata__\(platform)_\(cpu)-\(abi)"
         }
-        return result
+    }
+
+    private static func moduleSource(
+        for profile: Profile,
+        version: String,
+        defines: [String: String],
+    ) -> String {
+        var values = defines
+        let strings = [
+            "VERSION": version,
+            "LDVERSION": version,
+            "py_version_short": version,
+
+            "CC": "clang",
+            "CXX": "clang++",
+            "AR": "ar",
+            "RANLIB": "ranlib",
+            "CFLAGS": "",
+            "LDFLAGS": "",
+            "LDSHARED": profile.family == "linux"
+                ? "clang -shared"
+                : "clang -bundle -undefined dynamic_lookup",
+
+            "LIBRARY": "libcpython.a",
+            "LDLIBRARY": "libcpython.a",
+            "SHLIB_SUFFIX": ".so",
+
+            "MACOSX_DEPLOYMENT_TARGET": profile.family == "macos" ? "26.4" : "",
+            "IPHONEOS_DEPLOYMENT_TARGET": profile.platform == "ios" ? "26.4" : "",
+            "srcdir": "",
+            "CONFIG_ARGS": "",
+
+            "prefix": "/",
+            "exec_prefix": "/",
+            "LIBDIR": "/lib",
+            "LIBPL": "/lib/python\(version)/config",
+            "INCLUDEPY": "/include/python\(version)",
+            "PYTHONFRAMEWORK": "",
+        ]
+
+        for (key, value) in strings {
+            values[key] = value.quotedSourceLiteral
+        }
+        values["Py_ENABLE_SHARED"] = "0"
+        values["Py_DEBUG"] = "0"
+        values.removeValue(forKey: "Py_REMOTE_DEBUG")
+
+        let runtime = """
+        # ABI and trait-dependent values come from the running interpreter.
+        import _imp
+        import sys
+
+        _suffix = next(iter(_imp.extension_suffixes()), "")
+        build_time_vars = {
+            "ABIFLAGS": sys.abiflags,
+            "MULTIARCH": sys.implementation._multiarch,
+            "SOABI": _suffix.removeprefix(".").removesuffix(".so"),
+            "EXT_SUFFIX": _suffix,
+            "MACHDEP": sys.platform,
+            "Py_REMOTE_DEBUG": int("_remote_debugging" in sys.builtin_module_names),
+
+        """
+
+        return runtime + values.sorted { $0.key < $1.key }
+            .map { "    " + $0.key.quotedSourceLiteral + ": " + $0.value + "," }
+            .joined(separator: "\n") + "\n}\n"
     }
 
     private func integerDefines(in header: String) -> [String: String] {

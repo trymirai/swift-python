@@ -47,9 +47,7 @@ extension Value: Encodable {
 
 extension Value: Decodable {
     public init(from decoder: borrowing Decoder) throws {
-        _ = try InterpreterStorage.requireCurrent()
-        unsafe Py_IncRef(decoder.pointer)
-        let object = unsafe Object(owned: decoder.pointer, in: decoder)
-        self = try object.value()
+        let object = try decoder.object()
+        self = try object.value(depth: decoder.depth)
     }
 }

@@ -2,26 +2,36 @@
 //  Created by Anton Spivak
 //
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#elseif canImport(Foundation)
+import Foundation
+#endif
+
 // MARK: - ExecutionError
 
-/// An exception or interruption with any output captured before execution ended.
-public enum ExecutionError: Swift.Error {
-    case exception(traceback: String, output: Output)
-    case stopped(Output)
-    case timedOut(Output)
+/// An uncaught Python exception and the output captured before execution ended.
+public struct ExecutionError: Swift::Error {
+    public let traceback: String
+    public let output: Output
 }
 
 // MARK: CustomStringConvertible
 
 extension ExecutionError: CustomStringConvertible {
     public var description: String {
-        switch self {
-        case let .exception(traceback, _):
-            traceback
-        case .stopped:
-            "Stopped by user"
-        case .timedOut:
-            "Python execution timed out."
-        }
+        traceback
     }
 }
+
+#if canImport(FoundationEssentials) || canImport(Foundation)
+
+// MARK: LocalizedError
+
+extension ExecutionError: LocalizedError {
+    public var errorDescription: String? {
+        description
+    }
+}
+
+#endif

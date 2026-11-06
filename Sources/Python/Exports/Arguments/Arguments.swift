@@ -4,34 +4,36 @@
 
 internal import libcpython
 
+// MARK: - Arguments
+
 /// Python arguments borrowed for one synchronous callback.
 @safe
 public struct Arguments: ~Copyable, ~Escapable {
     let pointer: UnsafeMutablePointer<PyObject>
-    private let argumentIndices: [Int]
-    private let count: Int
+
+    private let layout: Layout
     private let defaultArgumentMarker: UInt?
 
     @_lifetime(borrow object)
-    init(
-        _ object: borrowing Object,
-        parameters: [Module.Function.Parameter],
-        argumentIndices: [Int],
-    ) throws {
+    init(_ object: borrowing Object, layout: Layout) throws {
         let count = unsafe PyTuple_Size(object.pointer)
-        let expected = parameters.count { !$0.isInjected }
-        guard count == expected else {
+        guard count >= 0 else {
+            throw Object.failure("Expected a Python argument tuple.")
+        }
+        guard count == layout.count else {
             throw Exception(name: "TypeError", message: "Invalid Swift callback arguments.")
         }
 
-        let defaultArgumentMarker = InterpreterStorage.current()?.defaultArgumentMarker
-        for (parameter, index) in zip(parameters, argumentIndices)
-            where !parameter.isInjected && !parameter.hasDefaultValue
+        let marker = Interpreter.Storage.current()?.defaultArgumentMarker
+        // Reject missing required arguments before the generated binder evaluates defaults.
+        for case let .argument(index, parameter) in layout.slots
+            where parameter.defaultValue.isRequired
         {
-            guard let value = unsafe PyTuple_GetItem(object.pointer, index) else {
-                throw Object.failure("Unable to read Python arguments.")
-            }
-            if UInt(bitPattern: value) == defaultArgumentMarker {
+            let value = unsafe try Object.require(
+                PyTuple_GetItem(object.pointer, index),
+                "Unable to read Python arguments.",
+            )
+            if UInt(bitPattern: value) == marker {
                 throw Exception(
                     name: "TypeError",
                     message: "Missing argument '\(parameter.name)'.",
@@ -39,10 +41,8 @@ public struct Arguments: ~Copyable, ~Escapable {
             }
         }
 
-        self.argumentIndices = argumentIndices
-        self.count = count
-        self.defaultArgumentMarker = defaultArgumentMarker
-
+        self.layout = layout
+        self.defaultArgumentMarker = marker
         unsafe self.pointer = object.pointer
     }
 
@@ -82,8 +82,7 @@ public struct Arguments: ~Copyable, ~Escapable {
         parameter: Int,
         _ body: (borrowing Context) throws -> Result,
     ) throws -> Result {
-        let context = try Context()
-        return try body(context)
+        try body(context(at: parameter))
     }
 
     public borrowing func withArgument<Result: ~Copyable>(
@@ -91,10 +90,7 @@ public struct Arguments: ~Copyable, ~Escapable {
         parameter: Int,
         _ body: (borrowing Object) throws -> Result,
     ) throws -> Result {
-        let value = unsafe try element(position(parameter))
-        unsafe Py_IncRef(value)
-        let object = unsafe Object(owned: value, in: self)
-        return try body(object)
+        try body(ownedArgument(at: parameter))
     }
 
     public borrowing func withArgument<Result: ~Copyable>(
@@ -102,25 +98,79 @@ public struct Arguments: ~Copyable, ~Escapable {
         parameter: Int,
         _ body: (BorrowedObject) throws -> Result,
     ) throws -> Result {
-        let object = unsafe try BorrowedObject(element(position(parameter)), in: self)
-        return try body(object)
+        try body(borrowedArgument(at: parameter))
+    }
+
+    @_lifetime(borrow self)
+    borrowing func ownedArgument(at parameter: Int) throws -> Object {
+        let value = unsafe try element(position(parameter))
+        return unsafe Object.retaining(value, in: self)
+    }
+
+    @_lifetime(borrow self)
+    borrowing func borrowedArgument(at parameter: Int) throws -> BorrowedObject {
+        unsafe try BorrowedObject(element(position(parameter)), in: self)
     }
 
     func position(_ parameter: Int) throws -> Int {
-        guard argumentIndices.indices.contains(parameter) else {
-            throw Exception(name: "TypeError", message: "Invalid Swift parameter index.")
+        guard case let .argument(index, _)? = slot(at: parameter) else {
+            throw Exception(
+                name: "TypeError",
+                message: "Expected a Python argument at Swift parameter \(parameter).",
+            )
         }
-        return argumentIndices[parameter]
+        return index
+    }
+
+    func context(at parameter: Int) throws -> Context {
+        guard case .context? = slot(at: parameter) else {
+            throw Exception(name: "TypeError", message: "Expected an injected Python context.")
+        }
+        return try Context()
+    }
+
+    private func slot(at parameter: Int) -> Layout.Slot? {
+        layout.slots.indices.contains(parameter) ? layout.slots[parameter] : nil
     }
 
     @unsafe
     borrowing func element(_ index: Int) throws -> UnsafeMutablePointer<PyObject> {
-        guard
-            index >= 0, index < count,
-            let value = unsafe PyTuple_GetItem(pointer, index)
-        else {
+        guard index >= 0, index < layout.count else {
             throw Exception(name: "TypeError", message: "Invalid Python argument index.")
         }
-        return unsafe value
+        return unsafe try Object.require(
+            PyTuple_GetItem(pointer, index),
+            "Unable to read a Python argument.",
+        )
+    }
+}
+
+// MARK: Arguments.Layout
+
+extension Arguments {
+    struct Layout: Sendable {
+        let slots: [Slot]
+        let count: Int
+
+        init(_ parameters: [Module.Function.Parameter]) {
+            var position = 0
+            slots = parameters.map { parameter in
+                if parameter.isInjected {
+                    return .context
+                }
+                defer { position += 1 }
+                return .argument(position, parameter)
+            }
+            count = position
+        }
+    }
+}
+
+// MARK: - Arguments.Layout.Slot
+
+extension Arguments.Layout {
+    enum Slot: Sendable {
+        case context
+        case argument(Int, Module.Function.Parameter)
     }
 }

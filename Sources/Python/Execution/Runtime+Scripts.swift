@@ -3,7 +3,7 @@
 //
 
 internal import _NIOFileSystem
-internal import SystemPackage
+public import SystemPackage
 
 // MARK: Runtime + Scripts
 
@@ -20,44 +20,35 @@ public extension Runtime {
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
         timeout: Duration? = nil,
-        standardIO: StandardIO = .init(),
-        onOutput: (@Sendable (Output.Stream, String) -> Void)? = nil,
-    ) async throws -> Output {
-        let definitions = try ExportCatalog.resolve(modules)
-        _ = try Self.paths(directory: nil, imports: [path])
-        try ExecutionControl.validateTimeout(timeout)
-        let file = FilePath(path)
-        let source = try await FileSystem.shared.withFileHandle(forReadingAt: file) { handle in
-            let buffer = try await handle.readToEnd(maximumSizeAllowed: .unlimited)
-            let bytes = buffer.readableBytesView
-            let prefix = bytes.starts(with: [0xEF, 0xBB, 0xBF]) ? 3 : 0
-            guard let source = String(validating: bytes.dropFirst(prefix), as: UTF8.self) else {
-                throw RuntimeFailure("Python script source must be UTF-8.")
-            }
-            return source
-        }
+        redirecting redirects: [Session.Stream: FilePath] = [:],
+        _ output: (@Sendable (Output.Stream, String) -> Void)? = nil,
+    ) async throws -> Execution {
+        let definitions = try Module.Catalog.resolve(modules)
+        try Session.Control.validateTimeout(timeout)
+        let file = try Path(path).file
+        let source = try await Self.readScript(at: file)
         let requirements = try await scriptRequirements(source)
+
         let session = try Session(
-            directory: file.removingLastComponent().string,
-            importPaths: importPaths,
+            directory: Path(file.removingLastComponent()),
+            importPaths: importPaths.map(Path.init),
             modules: definitions,
-            packages: packages,
-            packageService: packageService,
-            packageConfiguration: packageConfiguration,
-            environmentDirectory: environmentDirectory,
+            packaging: packaging,
+            environmentDirectory: environmentDirectory.map(Path.init),
             requirements: requirements,
         )
+
         do {
             try await session.prepare()
-            let output = try await session.run(
+            let execution = try await session.run(
                 .script(source, arguments: arguments),
                 filename: path,
                 timeout: timeout,
-                standardIO: standardIO,
-                onOutput: onOutput,
+                redirecting: redirects,
+                output: output,
             )
             await session.close()
-            return output
+            return execution
         } catch {
             await session.close()
             throw error
@@ -66,13 +57,26 @@ public extension Runtime {
 }
 
 extension Runtime {
+    private static func readScript(at path: FilePath) async throws -> String {
+        try await FileSystem.shared.withFileHandle(forReadingAt: path) { handle in
+            let buffer = try await handle.readToEnd(maximumSizeAllowed: .unlimited)
+            let bytes = buffer.readableBytesView
+            let bomLength = bytes.starts(with: [0xEF, 0xBB, 0xBF]) ? 3 : 0
+            guard let source = String(validating: bytes.dropFirst(bomLength), as: UTF8.self) else {
+                throw Runtime.Failure("Python script source must be UTF-8.")
+            }
+            return source
+        }
+    }
+
     private func scriptRequirements(_ source: String) async throws -> [String] {
-        let execution = try ExecutionControl(timeout: nil, onOutput: nil)
-        return try await execution.withCancellation {
-            defer { _ = execution.finish() }
-            let result = try await packageService.request(
+        // A script without the header cannot contain PEP 723 requirements.
+        guard source.contains("# /// script") else {
+            return []
+        }
+        return try await withPackageService { service, _, execution in
+            let result = try await service.request(
                 .script(source: source),
-                as: [String].self,
                 execution: execution,
             )
             try execution.checkInterruption()

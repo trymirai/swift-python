@@ -31,9 +31,7 @@ extension CPythonBuild {
             guard packageDirectory.isAbsolute, outputDirectory.isAbsolute else {
                 throw ValidationError("The package and output directories must be absolute.")
             }
-            guard jobs > 0 else {
-                throw ValidationError("--jobs must be positive.")
-            }
+            try CPythonBuild.validateJobCount(jobs)
         }
 
         func run() async throws {

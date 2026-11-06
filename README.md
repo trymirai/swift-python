@@ -6,201 +6,104 @@
 [![Mac Catalyst 26.4+](https://img.shields.io/badge/Mac%20Catalyst-26.4%2B-315D8A?logo=apple&logoColor=white)](#requirements)
 [![Linux with glibc and musl](https://img.shields.io/badge/Linux-glibc%20%26%20musl-316A54?logo=linux&logoColor=white)](#requirements)
 
-Embed CPython 3.16.0a1 in a Swift application. The static `Python` library
-includes the interpreter and selected standard library modules.
+Embed CPython 3.16.0a1 in a Swift application. The SwiftPM product `Python`
+bundles the interpreter and standard-library modules in a static library.
+
+## Installation
+
+Add the package to `Package.swift`.
+
+```swift
+.package(url: "https://github.com/trymirai/swift-python.git", from: "0.2.0")
+```
+
+Add `Python` to your target's dependencies.
+
+```swift
+.product(name: "Python", package: "swift-python")
+```
 
 ## Usage
 
-### Sessions
-
-Add the `Python` product to your SwiftPM target.
+### Run Python and exchange typed values
 
 ```swift
 import Python
 
 let runtime = try await Python::Runtime()
-let session = try await runtime.session(.source("counter = 40"))
+let session = try await runtime.session()
+try await session.set([4, 8, 12], forKey: "samples")
 
-let output = try await session.evaluate("counter + 2")
-print(output.stdout, terminator: "") // 42
-```
-
-Each session has its own interpreter and keeps its Python globals between
-calls. `evaluate` supports top-level `await` and captures `stdout` and `stderr`.
-
-Set `timeout` to limit evaluation time or call `stop()` to request interruption.
-`ExecutionError` carries captured output and includes a traceback for Python
-exceptions. Call `reset()` to rerun startup on the next evaluation or `close()`
-to end the session.
-
-### Typed values
-
-```swift
-try await session.set([1, 2, 3], forKey: "numbers")
-_ = try await session.evaluate("numbers.reverse()")
-let numbers = try await session.get("numbers", as: [Int].self) // [3, 2, 1]
-```
-
-Built-in codecs cover integers, floats, booleans, strings, optionals, arrays,
-and string-keyed dictionaries. Use `Python::Value` for dynamic data. For your
-own types, implement `Python::Encodable` and `Python::Decodable`.
-
-```swift
-struct Point: Sendable {
-    let x: Int
-    let y: Int
-}
-
-extension Point: Python::Encodable, Python::Decodable {
-    func encode(to encoder: inout Python::Encoder) throws {
-        try encoder.encode(x, forKey: "x")
-        try encoder.encode(y, forKey: "y")
-    }
-
-    init(from decoder: borrowing Python::Decoder) throws {
-        x = try decoder.decode(Int.self, forKey: "x")
-        y = try decoder.decode(Int.self, forKey: "y")
-    }
-}
-
-try await session.set(Point(x: 1, y: 2), forKey: "point")
-let point = try await session.get("point", as: Point.self)
-```
-
-### Interpreter access
-
-A synchronous `enqueue` closure runs on the session's interpreter thread. Keep
-Python objects and borrowed views inside the closure and return a `Sendable`
-value.
-
-```swift
-let x: Int = try await session.enqueue { context in
-    let object = try context.object("point")
-    return try object.get("x")
-}
-```
-
-Use `context.import(module:)` to import a module and `remove(_:)` to delete a
-name. In an async `enqueue` closure, each awaited context operation is queued
-separately.
-
-### Standard streams
-
-```swift
-let streams = Python::StandardIO(
-    stdin: "/work/input.txt",
-    stdout: "/work/stdout.log"
-)
-_ = try await session.evaluate("print(input())", standardIO: streams)
-let bytes = try await streams.read(.stdout, from: 0, maximumByteCount: 4096)
-```
-
-Use absolute paths with existing parent directories. Redirected output appends
-to files and leaves the corresponding `Output` strings empty. Omit `stdin` for
-EOF. Use `onOutput` for live text chunks or `startupIO` to configure startup
-streams.
-
-### Scripts
-
-`run(script:)` runs a UTF-8 file as `__main__` in a fresh session and sets
-`sys.argv`. It installs dependencies declared in the script's
-[PEP 723 metadata](https://packaging.python.org/en/latest/specifications/inline-script-metadata/).
-
-```python
-# /// script
-# dependencies = ["pypdf>=5"]
-# ///
-
-import sys
-
-from pypdf import PdfReader
-
-print(len(PdfReader(sys.argv[1]).pages))
-```
-
-```swift
-let pages = try await runtime.run(
-    script: "/scripts/page_count.py",
-    arguments: ["/work/invoice.pdf"],
-    environmentDirectory: "/work/script-environment"
-)
-print(pages.stdout, terminator: "")
-```
-
-Supply `environmentDirectory` to reuse installed dependencies across runs.
-
-### Projects and packages
-
-Open a flat-layout project by passing its directory and startup module.
-
-```text
-project/
-├── pyproject.toml
-└── assistant/
-    └── __init__.py
-```
-
-```swift
-let projectSession = try await runtime.session(
-    .project(directory: "/projects/project", module: "assistant"),
-    environmentDirectory: "/work/project-environment"
-)
-```
-
-The runtime installs compatible pure-Python wheels before importing the module.
-Its globals become the session namespace. `requirements.txt` takes precedence
-over `[project].dependencies` in `pyproject.toml`.
-
-Use `install(requirements:)` and `uninstall(packages:)` to change session
-packages, and `installedPackages()` to list their versions. `resolvePackages()`
-rereads project requirements. `updatePackages()` selects current compatible
-versions. If a package change throws `SessionError.resetRequired`, call
-`reset()` and retry.
-
-### Embedded packages
-
-`bundle(project:module:to:)` writes a ZIP of resolved packages and an optional
-startup module.
-
-```swift
-try await runtime.bundle(
-    project: "/projects/project",
-    module: "assistant",
-    to: "/work/packages.zip"
-)
-```
-
-Add `.embedInCode("Resources/packages.zip")` to your target's resources and pass
-`.embedded(PackageResources.packages_zip)` to `Runtime(packages:)`. Use
-`.archive(path)` or `.directory(path)` for packages on disk.
-
-### Swift modules
-
-```swift
-@PythonModule("example")
-enum Example {
-    @PythonFunction
-    static func greeting(_ name: String = "world") async -> String {
-        "Hello, \(name)!"
-    }
-}
-
-let exampleSession = try await runtime.session(modules: [Example.self])
-let greeting = try await exampleSession.evaluate("""
-import example
-print(await example.greeting())
+let execution = try await session.evaluate("""
+from statistics import median
+median_sample = median(samples)
+print(f"Processed {len(samples)} samples")
 """)
-print(greeting.stdout, terminator: "") // Hello, world!
+
+let median = try await session.get("median_sample", as: Int.self)
+print(execution.output.stdout, terminator: "") // Processed 3 samples
+print(median) // 8
+await session.close()
 ```
 
-Python uses Swift's local parameter names for keyword arguments. Swift defaults
-apply to omitted arguments. Async exports take and return owned `Sendable`
-values. Async instance methods also require a `Sendable` receiver.
+Each session has its own globals and keeps them between calls. `set` and `get`
+support Swift scalars, optionals, arrays, and string-keyed dictionaries. Use
+`Python::Value` for dynamic values or `Python::Encodable` and `Python::Decodable`
+for your own types.
 
-### Swift classes
+The following examples reuse `runtime` from this snippet.
+
+### Call a Python library from Swift
 
 ```swift
-@PythonClass(module: Example.self)
+let librarySession = try await runtime.session()
+let settings: [String: Int] = try await librarySession.enqueue { context in
+    let json = try context.import(module: "json")
+    return try json.attribute("loads").call(#"{"retries":3}"#).decode()
+}
+print(settings) // ["retries": 3]
+await librarySession.close()
+```
+
+### Stream output and limit execution time
+
+```swift
+let console = try await runtime.session()
+let job = try await console.evaluate(
+    """
+    import asyncio
+    print("Starting analysis")
+    await asyncio.sleep(10)
+    """,
+    timeout: .seconds(1),
+) { _, text in
+    print(text, terminator: "")
+}
+print(job.end) // timedOut
+await console.close()
+```
+
+Call `stop()` to interrupt an evaluation. Use `redirecting:` for file input
+or to save logs alongside live output.
+
+### Let the host approve Python file opens
+
+Pass a `Python::Session.Delegate` to `runtime.session(delegate:)` to review
+path-based file opens. Python raises `PermissionError` when the delegate declines
+a request. [File access example](Tests/Python/SessionDelegateTests.swift)
+
+### Expose Swift functions and classes to Python
+
+```swift
+@PythonModule("host")
+enum Host {
+    @PythonFunction
+    static func label(_ name: String) async -> String {
+        "Report for \(name)"
+    }
+}
+
+@PythonClass(module: Host.self)
 final class Counter {
     let context: Python::Context
 
@@ -213,77 +116,139 @@ final class Counter {
     }
 
     @PythonFunction
-    func increment(_ amount: Int = 1) throws -> Int {
-        try self.$value { $0 + amount }
-        return try self.value
+    func increment() throws {
+        try self.$value { $0 + 1 }
     }
 }
 
-let count = try await exampleSession.evaluate("""
-counter = example.Counter(40)
-counter.increment(2)
+let hostSession = try await runtime.session(modules: [Host.self])
+let report = try await hostSession.evaluate("""
+import host
+
+print(await host.label("April"))
+counter = host.Counter(40)
+counter.increment()
+print(counter.value)
 """)
-print(count.stdout, terminator: "") // 42
+print(report.output.stdout, terminator: "") // Report for April, then 41
+await hostSession.close()
 ```
 
-The `@PythonInit` initializer receives its `Context` automatically. Read a
-stored `@PythonProperty var` with `try counter.value` and assign it with
-`try counter.$value(42)`. Use `isReadOnly: true` to make it read-only in Python.
+### Process Python buffers in place
 
-### Python references
-
-Use `object.retain(in: context)` to keep a Python object alive across calls.
-Open a `Reference` or `WeakReference` with `context.object(_:)`. A weak handle
-resolves to `nil` once its target is collected. Handles expire when the
-session resets or closes.
-
-`Managed` keeps an exported Swift instance alive across calls.
+Invert grayscale bytes in a Python buffer without copying it.
 
 ```swift
-let managed = try await exampleSession.enqueue { context in
-    let counter = try context.get("counter", as: Counter.self)
-    return try Python::Managed(counter)
+@PythonModule("buffers")
+enum Buffers {
+    @PythonFunction
+    static func invert(_ pixels: inout MutableSpan<UInt8>) {
+        for index in pixels.indices {
+            pixels[index] = 255 - pixels[index]
+        }
+    }
 }
 
-let nextCount = try await managed { try $0.increment() } // 43
+let bufferSession = try await runtime.session(modules: [Buffers.self])
+let image = try await bufferSession.evaluate("""
+import buffers
+
+pixels = bytearray([0, 64, 255])
+buffers.invert(pixels)
+print(list(pixels))
+""")
+print(image.output.stdout, terminator: "") // [255, 191, 0]
+await bufferSession.close()
 ```
 
-### Buffers
+### Run a script with dependencies
 
-Synchronous exports accept `Span<Element>` and `inout MutableSpan<Element>` for
-contiguous, aligned Python buffers in native format, and `UTF8Span` for strings.
-Mutable spans require writable storage. For direct access from Swift, use
-`Object.buffer(as:isWritable:)` with `withSpan` or `withMutableSpan`.
-Finish the span closure before calling back into Python.
+Save this as `version_label.py`. The metadata block declares the script's Python
+dependencies. [Inline script metadata (PEP 723)](https://packaging.python.org/en/latest/specifications/inline-script-metadata/)
+
+```python
+# /// script
+# dependencies = ["packaging"]
+# ///
+
+import sys
+
+from packaging.version import Version
+
+print(Version(sys.argv[1]).public)
+```
+
+```swift
+let scriptExecution = try await runtime.run(
+    script: "/path/to/version_label.py",
+    arguments: ["v2.1rc1+ci"],
+)
+print(scriptExecution.output.stdout, terminator: "") // 2.1rc1
+```
+
+Each run starts a fresh session and passes `arguments` through `sys.argv`.
+Dependencies are resolved as pure-Python wheels. Pass `environmentDirectory:`
+to reuse the installed set across runs.
+
+### Open a Python project
+
+Use a flat-layout project with an importable package such as `reporting/` beside
+`pyproject.toml`. The session imports `reporting` and uses its globals.
+
+```swift
+let projectSession = try await runtime.session(
+    .project(directory: "/path/to/project", module: "reporting"),
+    environmentDirectory: "/path/to/environments/reporting",
+)
+print(try await projectSession.packages.installed())
+await projectSession.close()
+```
+
+The session installs pure-Python dependencies from `requirements.txt` or
+`pyproject.toml`. Use `session.packages` to inspect and manage them.
+
+### Bundle a project for offline use
+
+Build a ZIP containing the project's packages and startup module.
+
+```swift
+try await runtime.bundle(
+    project: "/path/to/project",
+    module: "reporting",
+    to: "/path/to/reporting.zip",
+)
+```
+
+Supply the ZIP as an application package source at runtime.
+
+```swift
+let bundledRuntime = try await Python::Runtime(
+    packages: [.archive("/path/to/reporting.zip")],
+)
+let bundledSession = try await bundledRuntime.session(.module("reporting"))
+await bundledSession.close()
+```
+
+To include the ZIP in a SwiftPM binary, add `.embedInCode("Resources/reporting.zip")`
+to the target's resources and pass `.embedded(PackageResources.reporting_zip)`.
+Use absolute paths for scripts, projects, environments, and archives.
 
 ## Requirements
 
 - Swift 6.4 with SwiftPM's `experimentalCGen` support.
-- Git and a checkout with submodules initialized.
-- GNU `make` and the host C/C++ toolchain (`cc`, `c++`, `ar`, `ranlib`) in
-  `/usr/bin`. CPython's `configure` uses `/bin/sh` and standard Unix tools
-  including `awk`, `grep`, and `sed`.
-- For Apple builds, macOS 26.4 or later and Xcode with the target SDK. The
-  minimum deployment version is 26.4 for macOS, iOS, and Mac Catalyst.
-- For native Linux builds, the zlib and bzip2 development headers and libraries.
-- Perl for OpenSSL source regeneration.
+- macOS, iOS, and Mac Catalyst 26.4 or later. Apple builds require Xcode with the target SDK.
+- Linux with glibc or musl, plus zlib and bzip2 development packages.
+- GNU make and the host C/C++ toolchain in `/usr/bin`.
 
-## Package Traits
+The manifest lists the SwiftPM traits for optional libraries and remote debugging.
+[Package.swift](Package.swift)
 
-| Trait             | Effect                                                                | Enabled by default |
-| ----------------- | --------------------------------------------------------------------- | ------------------ |
-| `OpenSSL`         | Bundles OpenSSL for `ssl` and `hashlib`                               | Yes                |
-| `libffi`          | Bundles libffi for `ctypes`                                           | No                 |
-| `libmpdec`        | Bundles libmpdec for `decimal`                                        | Yes                |
-| `liblzma`         | Bundles liblzma for `lzma`                                            | Yes                |
-| `Zstandard`       | Bundles Zstandard for `compression.zstd`                              | Yes                |
-| `SQLite`          | Bundles SQLite for `sqlite3`                                          | No                 |
-| `libedit`         | Bundles libedit and ncurses for `readline` and `curses` on Linux      | Yes                |
-| `RemoteDebugging` | Enables remote debugging and the sampling profiler on macOS and Linux | No                 |
+## Credits
 
-The default build also bundles libffi on iOS and Linux and SQLite on Linux.
+Thanks to the CPython contributors. [CPython](https://github.com/python/cpython)
 
-## Third-Party Notices
+Sources and licenses for bundled components are listed in [NOTICE](NOTICE).
 
-Bundled components, upstream sources, and license references are listed in
-[NOTICE](NOTICE).
+## License
+
+This package is available under the [MIT License](LICENSE).

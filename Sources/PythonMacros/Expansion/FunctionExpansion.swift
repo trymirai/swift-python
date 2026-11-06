@@ -14,52 +14,21 @@ struct FunctionExpansion {
         attribute: AttributeSyntax,
         isInstanceMethod: Bool = false,
     ) throws -> String {
-        guard declaration.genericParameterClause == nil else {
-            throw MacroExpansionErrorMessage(
-                "Python functions require concrete Swift parameter types.",
-            )
-        }
+        try validateSignature()
 
-        let isMutatingOrConsuming = declaration
-            .modifiers
-            .contains(where: { ["mutating", "consuming"].contains($0.name.text) })
-
-        if isMutatingOrConsuming {
-            throw MacroExpansionErrorMessage("Exported methods must keep their receiver available.")
-        }
-
-        let name = attribute.argument() ?? String(reflecting: declaration.name.text)
-        let documentation = attribute.argument(named: "documentation") ?? "nil"
-
-        let isStatic = declaration.modifiers.contains { ["static", "class"].contains($0.name.text) }
-        let isIsolated = !declaration.modifiers.contains { $0.name.text == "nonisolated" }
-            && ((owner.isActor && !isStatic) || owner.isMainActorIsolated)
+        let name = attribute.nameSource(default: declaration.name.text)
+        let documentation = attribute.documentationSource
+        let isAsynchronous = requiresAwait
 
         let signature = declaration.signature
-        let isAsynchronous = signature.effectSpecifiers?.asyncSpecifier != nil
-            || isIsolated
-            || declaration.attributes.attribute(named: "MainActor") != nil
-
         let isThrowing = signature.effectSpecifiers?.throwsClause != nil
-        let parameters = try signature
-            .parameterClause
-            .parameters
-            .enumerated()
-            .map { index, parameter in
-                try ParameterExpansion(
-                    parameter,
-                    index: index,
-                    owner: owner.name,
-                    hasReceiver: isInstanceMethod,
-                )
-            }
-
-        let metadata = (isInstanceMethod ? [".receiver"] : []) + parameters.map(\.metadataSource)
-        let arguments = parameters.map(\.argumentSource).joined(separator: ", ")
         let returnType = signature
             .returnClause
             .map { $0.type.concreteSpelling(owner: owner.name) } ?? "Swift::Void"
+        let parameters = try expandParameters(hasReceiver: isInstanceMethod)
+        let metadata = (isInstanceMethod ? [".receiver"] : []) + parameters.map(\.metadataSource)
 
+        let arguments = parameters.map(\.argumentSource).joined(separator: ", ")
         let prefix = (isThrowing ? "try " : "") + (isAsynchronous ? "await " : "")
         let receiver = isInstanceMethod ? "__self" : owner.name
         let invocation = "\(prefix)\(receiver).\(declaration.name.trimmedDescription)(\(arguments))"
@@ -73,12 +42,50 @@ struct FunctionExpansion {
             parameters: parameters,
             isAsynchronous: isAsynchronous,
         )
+
         return """
         Python::_ExportFunction(
             \(name), documentation: \(documentation),
             parameters: [\(metadata.joined(separator: ", "))],
             returning: (\(returnType)).self, \(body))
         """
+    }
+
+    private func validateSignature() throws {
+        guard declaration.genericParameterClause == nil else {
+            throw MacroExpansionErrorMessage(
+                "Python functions require concrete Swift parameter types.",
+            )
+        }
+
+        let changesReceiver = declaration.modifiers.contains {
+            $0.name.text == "mutating" || $0.name.text == "consuming"
+        }
+        if changesReceiver {
+            throw MacroExpansionErrorMessage("Exported methods must keep their receiver available.")
+        }
+    }
+
+    private var requiresAwait: Bool {
+        let modifiers = declaration.modifiers
+        let isInstanceActorMethod = owner.isActor && !modifiers.declaresStaticMember
+        let isNonisolated = modifiers.contains { $0.name.text == "nonisolated" }
+        let isIsolated = !isNonisolated && (isInstanceActorMethod || owner.isMainActorIsolated)
+
+        return declaration.signature.effectSpecifiers?.asyncSpecifier != nil
+            || isIsolated
+            || declaration.attributes.attribute(named: "MainActor") != nil
+    }
+
+    private func expandParameters(hasReceiver: Bool) throws -> [ParameterExpansion] {
+        try declaration.signature.parameterClause.parameters.enumerated().map { index, parameter in
+            try ParameterExpansion(
+                parameter,
+                index: index,
+                owner: owner.name,
+                hasReceiver: hasReceiver,
+            )
+        }
     }
 
     private func callBody(

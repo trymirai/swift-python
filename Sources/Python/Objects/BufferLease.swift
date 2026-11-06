@@ -4,47 +4,41 @@
 
 internal import libcpython
 
-/// Pins a contiguous, native-format buffer until the interpreter scope ends.
-/// Views cannot escape their closure. Mutable views exclude overlapping aliases and Python reentry.
+// MARK: - BufferLease
+
+/// Pins a contiguous, native-format buffer for reading within the interpreter scope.
 @safe
 public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
     private let view: UnsafeMutablePointer<Py_buffer>
-    private let storage: InterpreterStorage
-    private let isWritable: Bool
+    private let storage: Interpreter.Storage
 
     @_lifetime(borrow owner)
     @unsafe
     init<Owner: ~Copyable & ~Escapable>(
         _ object: UnsafeMutablePointer<PyObject>,
+        in owner: borrowing Owner,
+    ) throws {
+        self = unsafe try BufferLease(object, isWritable: false, in: owner)
+    }
+
+    @_lifetime(borrow owner)
+    @unsafe
+    private init<Owner: ~Copyable & ~Escapable>(
+        _ object: UnsafeMutablePointer<PyObject>,
         isWritable: Bool,
         in owner: borrowing Owner,
     ) throws {
-        let storage = try InterpreterStorage.requireCurrent()
+        let storage = try Interpreter.Storage.requireCurrent()
         guard let arrayType = storage.arrayType else {
-            throw SessionError.closed
+            throw Session.Error.closed
         }
 
-        let array = unsafe try arrayType.storage.references.pointer(arrayType.storage.token)
+        let array = unsafe try arrayType.storage.pointer()
         guard unsafe CPython_BufferIsSupported(object, isWritable ? 1 : 0, array) != 0 else {
             throw Self.invalid("Expected bytes, bytearray, array.array or their memoryview.")
         }
 
-        let view = UnsafeMutablePointer<Py_buffer>.allocate(capacity: 1)
-        unsafe view.initialize(to: Py_buffer())
-
-        let result = unsafe PyObject_GetBuffer(
-            object,
-            view,
-            PyBUF_FORMAT | PyBUF_STRIDES | (isWritable ? PyBUF_WRITABLE : 0),
-        )
-
-        guard result == 0
-        else {
-            unsafe view.deinitialize(count: 1)
-            unsafe view.deallocate()
-            throw Object.failure("Unable to acquire a Python buffer.")
-        }
-
+        let view = unsafe try Self.acquire(object, isWritable: isWritable)
         do {
             unsafe try Self.validate(view)
         } catch {
@@ -54,7 +48,6 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
 
         unsafe self.view = view
         self.storage = storage
-        self.isWritable = isWritable
     }
 
     deinit {
@@ -68,31 +61,30 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
     public borrowing func withSpan<Result: ~Copyable>(
         _ body: (Span<Element>) throws -> Result,
     ) throws -> Result {
-        let borrowID = unsafe try storage.beginBufferBorrow(view, isMutable: false)
-        defer { storage.endBufferBorrow(borrowID) }
-        let span = unsafe Span<Element>(
-            _unsafeStart: baseAddress,
-            count: count,
-        )
-        let scoped = unsafe _overrideLifetime(span, borrowing: self)
-        return try body(scoped)
+        try withBorrow(isMutable: false) {
+            let span = unsafe Span<Element>(_unsafeStart: baseAddress, count: count)
+            let scoped = unsafe _overrideLifetime(span, borrowing: self)
+            return try body(scoped)
+        }
     }
 
-    public borrowing func withMutableSpan<Result: ~Copyable>(
+    private borrowing func withMutableSpan<Result: ~Copyable>(
         _ body: (inout MutableSpan<Element>) throws -> Result,
     ) throws -> Result {
-        guard isWritable
-        else {
-            throw Self.invalid("Acquire a writable buffer before requesting a mutable span.")
+        try withBorrow(isMutable: true) {
+            let span = unsafe MutableSpan<Element>(_unsafeStart: baseAddress, count: count)
+            var scoped = unsafe _overrideLifetime(consume span, borrowing: self)
+            return try body(&scoped)
         }
-        let borrowID = unsafe try storage.beginBufferBorrow(view, isMutable: true)
+    }
+
+    private borrowing func withBorrow<Result: ~Copyable>(
+        isMutable: Bool,
+        _ body: () throws -> Result,
+    ) throws -> Result {
+        let borrowID = unsafe try storage.beginBufferBorrow(view, isMutable: isMutable)
         defer { storage.endBufferBorrow(borrowID) }
-        let span = unsafe MutableSpan<Element>(
-            _unsafeStart: baseAddress,
-            count: count,
-        )
-        var scoped = unsafe _overrideLifetime(consume span, borrowing: self)
-        return try body(&scoped)
+        return try body()
     }
 
     @unsafe
@@ -104,11 +96,30 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
     }
 
     @unsafe
+    private static func acquire(
+        _ object: UnsafeMutablePointer<PyObject>,
+        isWritable: Bool,
+    ) throws -> UnsafeMutablePointer<Py_buffer> {
+        let view = UnsafeMutablePointer<Py_buffer>.allocate(capacity: 1)
+        unsafe view.initialize(to: Py_buffer())
+
+        let flags = PyBUF_FORMAT | PyBUF_STRIDES | (isWritable ? PyBUF_WRITABLE : 0)
+        guard unsafe PyObject_GetBuffer(object, view, flags) == 0 else {
+            unsafe view.deinitialize(count: 1)
+            unsafe view.deallocate()
+            throw Object.failure("Unable to acquire a Python buffer.")
+        }
+        return unsafe view
+    }
+
+    @unsafe
     private static func validate(_ view: UnsafeMutablePointer<Py_buffer>) throws {
         let stride = MemoryLayout<Element>.stride
         let size = unsafe view.pointee.len
+        let cOrder = CChar(UInt8(ascii: "C"))
+
         guard
-            unsafe view.pointee.ndim == 1, unsafe PyBuffer_IsContiguous(view, 67) != 0,
+            unsafe view.pointee.ndim == 1, unsafe PyBuffer_IsContiguous(view, cOrder) != 0,
             size >= 0, unsafe (size == 0 || view.pointee.buf != nil),
             unsafe view.pointee.itemsize == stride, size % stride == 0,
             let format = unsafe view.pointee.format
@@ -118,6 +129,17 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
             )
         }
 
+        unsafe try validateFormat(format)
+        if
+            let start = unsafe view.pointee.buf,
+            Int(bitPattern: start) % MemoryLayout<Element>.alignment != 0
+        {
+            throw invalid("Python buffer is not aligned for \(Element.self).")
+        }
+    }
+
+    @unsafe
+    private static func validateFormat(_ format: UnsafePointer<CChar>) throws {
         var code = unsafe String(cString: format)
         if code.first == "@" || code.first == "=" {
             code.removeFirst()
@@ -126,13 +148,6 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
             throw invalid(
                 "Python buffer format does not match \(Element.self) in native byte order.",
             )
-        }
-
-        if
-            let start = unsafe view.pointee.buf,
-            Int(bitPattern: start) % MemoryLayout<Element>.alignment != 0
-        {
-            throw invalid("Python buffer is not aligned for \(Element.self).")
         }
     }
 
@@ -169,6 +184,40 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
             format == "d"
         default:
             false
+        }
+    }
+}
+
+// MARK: BufferLease.Mutable
+
+public extension BufferLease {
+    /// A buffer pinned with write access. Mutable views exclude overlapping aliases and Python reentry.
+    struct Mutable: ~Copyable, ~Escapable {
+        private let lease: BufferLease<Element>
+
+        @_lifetime(borrow owner)
+        @unsafe
+        init<Owner: ~Copyable & ~Escapable>(
+            _ object: UnsafeMutablePointer<PyObject>,
+            in owner: borrowing Owner,
+        ) throws {
+            lease = unsafe try BufferLease(object, isWritable: true, in: owner)
+        }
+
+        public var count: Int {
+            lease.count
+        }
+
+        public borrowing func withSpan<Result: ~Copyable>(
+            _ body: (Span<Element>) throws -> Result,
+        ) throws -> Result {
+            try lease.withSpan(body)
+        }
+
+        public borrowing func withMutableSpan<Result: ~Copyable>(
+            _ body: (inout MutableSpan<Element>) throws -> Result,
+        ) throws -> Result {
+            try lease.withMutableSpan(body)
         }
     }
 }

@@ -1,8 +1,6 @@
 #ifdef __APPLE__
 #include "system_trust.h"
 
-#include <CoreFoundation/CoreFoundation.h>
-#include <Security/Security.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
@@ -41,16 +39,15 @@ append_sec_certificate(CFMutableArrayRef certificates, X509 *certificate)
     return 1;
 }
 
-static SecTrustRef
-create_system_trust(X509_STORE_CTX *context, X509 *leaf)
+static CFArrayRef
+copy_sec_chain(X509_STORE_CTX *context, X509 *leaf)
 {
     CFMutableArrayRef certificates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
     if (certificates == NULL) {
         return NULL;
     }
     if (!append_sec_certificate(certificates, leaf)) {
-        CFRelease(certificates);
-        return NULL;
+        goto failed;
     }
 
     STACK_OF(X509) *untrusted = X509_STORE_CTX_get0_untrusted(context);
@@ -58,9 +55,22 @@ create_system_trust(X509_STORE_CTX *context, X509 *leaf)
         // A TLS peer's untrusted chain can include the same leaf.
         X509 *certificate = sk_X509_value(untrusted, index);
         if (certificate != leaf && !append_sec_certificate(certificates, certificate)) {
-            CFRelease(certificates);
-            return NULL;
+            goto failed;
         }
+    }
+    return certificates;
+
+failed:
+    CFRelease(certificates);
+    return NULL;
+}
+
+static SecTrustRef
+create_system_trust(X509_STORE_CTX *context, X509 *leaf)
+{
+    CFArrayRef certificates = copy_sec_chain(context, leaf);
+    if (certificates == NULL) {
+        return NULL;
     }
 
     SSL *connection = X509_STORE_CTX_get_ex_data(context, SSL_get_ex_data_X509_STORE_CTX_idx());
@@ -80,20 +90,8 @@ create_system_trust(X509_STORE_CTX *context, X509 *leaf)
     return trust;
 }
 
-static X509 *
-copy_x509_certificate(SecCertificateRef certificate)
-{
-    CFDataRef data = SecCertificateCopyData(certificate);
-    if (data == NULL) {
-        return NULL;
-    }
-    const unsigned char *bytes = CFDataGetBytePtr(data);
-    X509 *result = d2i_X509(NULL, &bytes, CFDataGetLength(data));
-    CFRelease(data);
-    return result;
-}
-
-static STACK_OF(X509) * copy_x509_chain(CFArrayRef certificates, CFIndex first, CFIndex end)
+static STACK_OF(X509) *
+copy_x509_chain(CFArrayRef certificates, CFIndex first, CFIndex end)
 {
     STACK_OF(X509) *result = sk_X509_new_null();
     if (result == NULL) {
@@ -101,7 +99,7 @@ static STACK_OF(X509) * copy_x509_chain(CFArrayRef certificates, CFIndex first, 
     }
     for (CFIndex index = first; index < end; index++) {
         X509 *certificate =
-            copy_x509_certificate((SecCertificateRef)CFArrayGetValueAtIndex(certificates, index));
+            CPython_CopyX509Certificate((SecCertificateRef)CFArrayGetValueAtIndex(certificates, index));
         if (certificate == NULL || !sk_X509_push(result, certificate)) {
             X509_free(certificate);
             sk_X509_pop_free(result, X509_free);
@@ -111,21 +109,38 @@ static STACK_OF(X509) * copy_x509_chain(CFArrayRef certificates, CFIndex first, 
     return result;
 }
 
-int
-CPython_VerifySystemTrust(X509_STORE_CTX *context, void *argument)
+// Takes the verified chain and releases it once the OpenSSL stacks have been copied.
+static int
+verify_system_chain(X509_STORE_CTX *context, CFArrayRef chain, CFIndex count)
 {
-    (void)argument;
-    X509 *leaf = X509_STORE_CTX_get0_cert(context);
-    if (leaf == NULL) {
-        return X509_verify_cert(context);
-    }
-
-    SecTrustRef trust = create_system_trust(context, leaf);
-    if (trust == NULL) {
-        X509_STORE_CTX_set_error(context, X509_V_ERR_UNSPECIFIED);
+    STACK_OF(X509) *anchors = copy_x509_chain(chain, count - 1, count);
+    STACK_OF(X509) *intermediates = copy_x509_chain(chain, 1, count - 1);
+    CFRelease(chain);
+    if (anchors == NULL || intermediates == NULL) {
+        sk_X509_pop_free(anchors, X509_free);
+        sk_X509_pop_free(intermediates, X509_free);
+        X509_STORE_CTX_set_error(context, X509_V_ERR_OUT_OF_MEM);
         return 0;
     }
 
+    // Security chooses the path. OpenSSL enforces the caller's parameters and retains the result.
+    STACK_OF(X509) *original = X509_STORE_CTX_get0_untrusted(context);
+    X509_STORE_CTX_set0_untrusted(context, intermediates);
+    X509_STORE_CTX_set0_trusted_stack(context, anchors);
+    int result = X509_verify_cert(context);
+
+    X509_STORE_CTX_set0_trusted_stack(context, NULL);
+    X509_STORE_CTX_set0_untrusted(context, original);
+
+    sk_X509_pop_free(intermediates, X509_free);
+    sk_X509_pop_free(anchors, X509_free);
+    return result;
+}
+
+// Consumes the SecTrust reference even when system verification cannot supply a chain.
+static int
+verify_with_system_policy(X509_STORE_CTX *context, SecTrustRef trust)
+{
     // Verification must not introduce hidden network requests. The peer chain and system cache
     // suffice.
     OSStatus status = SecTrustSetNetworkFetchAllowed(trust, false);
@@ -149,7 +164,9 @@ CPython_VerifySystemTrust(X509_STORE_CTX *context, void *argument)
         chain = SecTrustCopyCertificateChain(trust);
     }
     CFRelease(trust);
-    if (chain == NULL || CFArrayGetCount(chain) == 0) {
+
+    CFIndex count = chain == NULL ? 0 : CFArrayGetCount(chain);
+    if (count == 0) {
         if (chain != NULL) {
             CFRelease(chain);
         }
@@ -157,39 +174,35 @@ CPython_VerifySystemTrust(X509_STORE_CTX *context, void *argument)
         return X509_verify_cert(context);
     }
 
-    CFIndex count = CFArrayGetCount(chain);
-    STACK_OF(X509) *anchors = copy_x509_chain(chain, count - 1, count);
-    STACK_OF(X509) *intermediates = copy_x509_chain(chain, 1, count - 1);
-    CFRelease(chain);
-    if (anchors == NULL || intermediates == NULL) {
-        sk_X509_pop_free(anchors, X509_free);
-        sk_X509_pop_free(intermediates, X509_free);
-        X509_STORE_CTX_set_error(context, X509_V_ERR_OUT_OF_MEM);
-        return 0;
+    return verify_system_chain(context, chain, count);
+}
+
+int
+CPython_VerifySystemTrust(X509_STORE_CTX *context, void *argument)
+{
+    (void)argument;
+    X509 *leaf = X509_STORE_CTX_get0_cert(context);
+    if (leaf == NULL) {
+        return X509_verify_cert(context);
     }
 
-    /* Security chooses the trusted path. OpenSSL enforces the caller's verification parameters.
-     * This context is used for one verification and retains the verified certificates. */
-    STACK_OF(X509) *original = X509_STORE_CTX_get0_untrusted(context);
-    X509_STORE_CTX_set0_untrusted(context, intermediates);
-    X509_STORE_CTX_set0_trusted_stack(context, anchors);
-    int result = X509_verify_cert(context);
-    X509_STORE_CTX_set0_trusted_stack(context, NULL);
-    X509_STORE_CTX_set0_untrusted(context, original);
-    sk_X509_pop_free(intermediates, X509_free);
-    sk_X509_pop_free(anchors, X509_free);
-    return result;
+    SecTrustRef trust = create_system_trust(context, leaf);
+    if (trust == NULL) {
+        X509_STORE_CTX_set_error(context, X509_V_ERR_UNSPECIFIED);
+        return 0;
+    }
+    return verify_with_system_policy(context, trust);
 }
 
 int
 CPython_SetDefaultVerifyPaths(SSL_CTX *context)
 {
     SSL_CTX_set_cert_verify_callback(context, NULL, NULL);
-    if (getenv(X509_get_default_cert_file_env()) == NULL &&
-        getenv(X509_get_default_cert_dir_env()) == NULL) {
-        SSL_CTX_set_cert_verify_callback(context, CPython_VerifySystemTrust, NULL);
-        return 1;
+    if (getenv(X509_get_default_cert_file_env()) != NULL ||
+        getenv(X509_get_default_cert_dir_env()) != NULL) {
+        return SSL_CTX_set_default_verify_paths(context);
     }
-    return SSL_CTX_set_default_verify_paths(context);
+    SSL_CTX_set_cert_verify_callback(context, CPython_VerifySystemTrust, NULL);
+    return 1;
 }
 #endif

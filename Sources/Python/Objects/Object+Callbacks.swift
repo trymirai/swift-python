@@ -22,7 +22,7 @@ extension Object {
     @_lifetime(borrow attachment)
     static func makeFunction(
         _ body: any Callable,
-        in attachment: borrowing ThreadState.Attachment,
+        in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
         // CPython takes this retain on every path, including allocation failure.
         let context = unsafe Unmanaged.passRetained(Callback(body)).toOpaque()
@@ -44,16 +44,13 @@ extension Object {
 
         let callback = unsafe Unmanaged<Callback>.fromOpaque(context).takeUnretainedValue()
         do {
-            return unsafe try ThreadState.withCurrent { attachment in
-                unsafe Py_IncRef(argumentsPointer)
-                let arguments = unsafe Object(owned: argumentsPointer, in: attachment)
+            return unsafe try PThread.withCurrent { attachment in
+                let arguments = unsafe Object.retaining(argumentsPointer, in: attachment)
                 let result = try callback.body.call(arguments, in: attachment)
                 return unsafe result.release()
             }
-        } catch let exception as Exception {
-            unsafe CPython_RaiseSwiftError(exception.name, exception.message)
         } catch {
-            unsafe CPython_RaiseSwiftError("RuntimeError", String(describing: error))
+            Object.raise(error)
         }
         return nil
     }

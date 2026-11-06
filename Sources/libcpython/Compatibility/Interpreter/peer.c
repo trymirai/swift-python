@@ -10,12 +10,18 @@ typedef struct {
 static const char peer_name[] = "swift-python.peer";
 
 static void
+free_peer(SwiftPeer *peer)
+{
+    peer->destroy(peer->value);
+    free(peer);
+}
+
+static void
 destroy_peer(PyObject *capsule)
 {
     SwiftPeer *peer = PyCapsule_GetPointer(capsule, peer_name);
     if (peer != NULL) {
-        peer->destroy(peer->value);
-        free(peer);
+        free_peer(peer);
     }
 }
 
@@ -27,11 +33,11 @@ CPython_NewPeer(void *value, void (*destroy)(void *))
         destroy(value);
         return PyErr_NoMemory();
     }
-    *peer = (SwiftPeer){value, destroy};
+    *peer = (SwiftPeer){.value = value, .destroy = destroy};
+
     PyObject *capsule = PyCapsule_New(peer, peer_name, destroy_peer);
     if (capsule == NULL) {
-        destroy(value);
-        free(peer);
+        free_peer(peer);
     }
     return capsule;
 }

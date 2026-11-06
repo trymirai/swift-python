@@ -19,8 +19,12 @@ class Resource:
     def name(self) -> str:
         return self.path.rsplit("/", 1)[-1]
 
+    @property
+    def _prefix(self) -> str:
+        return self.path + "/" if self.path else ""
+
     def iterdir(self):
-        prefix = self.path + "/" if self.path else ""
+        prefix = self._prefix
         names = {
             name[len(prefix) :].split("/", 1)[0]
             for name in self.archive.names
@@ -34,8 +38,7 @@ class Resource:
         return self.path in self.archive.names and not self.path.endswith("/")
 
     def is_dir(self) -> bool:
-        prefix = self.path + "/" if self.path else ""
-        return any(name.startswith(prefix) for name in self.archive.names)
+        return self.archive.has_member_with_prefix(self._prefix)
 
     def exists(self) -> bool:
         # Distribution.files() also checks installed RECORD paths. Unlike the

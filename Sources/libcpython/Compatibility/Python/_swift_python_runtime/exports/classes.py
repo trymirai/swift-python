@@ -1,24 +1,40 @@
 """Assemble Python classes and bind their instances to Swift peers."""
 
+from collections import namedtuple
 from types import ModuleType
 
-from .functions import FunctionFactory, identifier, is_reserved_member
+from .functions import FunctionFactory, identifier, is_reserved_member, require_free_name
+
+_PreparedClass = namedtuple(
+    "_PreparedClass",
+    (
+        "module",
+        "key",
+        "base",
+        "name",
+        "documentation",
+        "constructor",
+        "members",
+    ),
+)
 
 
 class NativeClasses:
     def __init__(self, invoke, functions: FunctionFactory) -> None:
         self._invoke = invoke
         self._functions = functions
-        self._types = {}
-        self._creating = False
-        self._base = None
 
-    def prepare(self, record, module: ModuleType) -> tuple:
+        self._types = {}
+        self._base = None
+        self._creating = False
+
+    def prepare(self, record, module: ModuleType) -> _PreparedClass:
         key, base, name, documentation, constructor, methods, properties = record
         name = identifier(name)
+
         create = self._functions.create
         constructor = create(constructor, module) if constructor is not None else None
-        members = {record[0]: create(record, module, member=True) for record in methods}
+        members = {method[0]: create(method, module, member=True) for method in methods}
 
         for property_name, property_doc, getter, setter in properties:
             identifier(property_name)
@@ -31,9 +47,9 @@ class NativeClasses:
                 doc=property_doc,
             )
 
-        return module, key, base, name, documentation, constructor, members
+        return _PreparedClass(module, key, base, name, documentation, constructor, members)
 
-    def install(self, pending: list[tuple]) -> None:
+    def install(self, pending: list[_PreparedClass]) -> None:
         registry = self
 
         class _SwiftObject:
@@ -49,13 +65,18 @@ class NativeClasses:
         self._invoke("freeze", _SwiftObject)
         self._invoke("register_wrap", self.wrap)
 
+        self._install_pending(pending)
+
+    def _install_pending(self, pending: list[_PreparedClass]) -> None:
         while pending:
-            ready = [record for record in pending if record[2] is None or record[2] in self._types]
+            ready = [
+                record for record in pending if record.base is None or record.base in self._types
+            ]
             if not ready:
                 raise TypeError("A native class base module is missing")
 
             for record in ready:
-                self._make_class(*record)
+                self._make_class(record)
                 pending.remove(record)
 
     def wrap(self, key, capsule):
@@ -65,9 +86,11 @@ class NativeClasses:
         self._invoke("bind", wrapper)
         return wrapper
 
-    def _make_class(
-        self, module: ModuleType, key, base, name: str, doc: str | None, constructor, members: dict
-    ) -> None:
+    def _make_class(self, record: _PreparedClass) -> None:
+        module = record.module
+        name = record.name
+        constructor = record.constructor
+
         native_type = None
 
         def new(cls: type, *args, **kwargs):
@@ -83,23 +106,23 @@ class NativeClasses:
             # __new__ has already initialized and bound the complete Swift peer.
             pass
 
-        members.update(
+        record.members.update(
             __slots__=(),
             __module__=module.__name__,
-            __doc__=doc,
+            __doc__=record.documentation,
             __new__=staticmethod(new),
             __init__=initialize,
         )
+
         self._creating = True
         try:
-            native_type = type(name, (self._types[base] if base else self._base,), members)
+            base = self._types[record.base] if record.base else self._base
+            native_type = type(name, (base,), record.members)
         finally:
             self._creating = False
 
-        if name in module.__dict__:
-            raise ValueError(f"Python name {module.__name__}.{name} already exists")
-
-        self._types[key] = native_type
-        self._invoke("register_type", key, native_type)
+        require_free_name(module, name)
+        self._types[record.key] = native_type
+        self._invoke("register_type", record.key, native_type)
         self._invoke("freeze", native_type)
         setattr(module, name, native_type)

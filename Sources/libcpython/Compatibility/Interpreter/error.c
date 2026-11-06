@@ -18,6 +18,12 @@ CPython_IsKeyError(void)
     return PyErr_ExceptionMatches(PyExc_KeyError);
 }
 
+void
+CPython_RaiseKeyboardInterrupt(void)
+{
+    PyErr_SetNone(PyExc_KeyboardInterrupt);
+}
+
 const char *
 CPython_ExceptionName(PyObject *exception)
 {

@@ -35,7 +35,7 @@ extension PythonClassMacro: MemberMacro {
         }
 
         let owner = scope.qualifiedName(of: declaration)
-        let name = attribute.argument() ?? String(reflecting: declaration.name.text)
+        let name = attribute.nameSource(default: declaration.name.text)
 
         let module = attribute.argument(named: "module")
             ?? scope.owner.flatMap { $0.isModule ? "\($0.name).self" : nil }
@@ -46,7 +46,7 @@ extension PythonClassMacro: MemberMacro {
             )
         }
 
-        let documentation = attribute.argument(named: "documentation") ?? "nil"
+        let documentation = attribute.documentationSource
         let initializers = declaration.memberBlock.members.count {
             $0.decl.as(InitializerDeclSyntax.self)?.attributes.attribute(named: "PythonInit") != nil
         }
@@ -62,8 +62,8 @@ extension PythonClassMacro: MemberMacro {
         ).declaration
 
         let identity: DeclSyntax = """
-        private nonisolated let __python_identity: (any Swift::AnyObject & Swift::Sendable)? =
-            Python::_makeInstanceIdentity(for: \(raw: owner).self)
+        private nonisolated let __p_identity: Python::Object.Identity? =
+            Python::Object.Identity(for: \(raw: owner).self)
         """
         return [registration, identity]
     }
@@ -81,7 +81,7 @@ extension PythonClassMacro: MemberAttributeMacro {
         guard
             let variable = member.as(VariableDeclSyntax.self),
             variable.attributes.attribute(named: "PythonProperty") != nil,
-            PropertyDeclaration.usesPythonStorage(variable)
+            PropertyDeclaration.usesPStorage(variable)
         else {
             return []
         }
@@ -103,9 +103,9 @@ extension PythonClassMacro: ExtensionMacro {
             return []
         }
         return [try ExtensionDeclSyntax("""
-        extension \(type): Python::_PythonClass {
-            public nonisolated var _pythonIdentity: any Swift::AnyObject & Swift::Sendable { __python_identity! }
-            public nonisolated var _pythonContext: Python::Context { self.context }
+        extension \(type): Python::_PClass {
+            public nonisolated var _pIdentity: Python::Object.Identity { __p_identity! }
+            public nonisolated var _pContext: Python::Context { self.context }
         }
         """)]
     }

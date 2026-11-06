@@ -6,12 +6,15 @@
 #include "system_trust.h"
 #define SSL_CTX_set_default_verify_paths CPython_SetDefaultVerifyPaths
 #endif
+
 // CPython retains these deprecated OpenSSL APIs for Python compatibility.
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
+
 #include "../../src/Modules/_ssl.c"
+
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif

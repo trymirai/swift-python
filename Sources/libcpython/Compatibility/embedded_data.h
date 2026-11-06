@@ -15,6 +15,7 @@ typedef struct {
 
 typedef struct {
     const char *path;
+
     // Borrowed read-only bytes with process lifetime; Python reads make interpreter-owned copies.
     const unsigned char *bytes;
     size_t size;

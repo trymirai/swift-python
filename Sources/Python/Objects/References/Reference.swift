@@ -9,15 +9,20 @@ internal import libcpython
 /// An owning Python root. Resolve it only in the session generation that created it.
 public struct Reference: Sendable {
     final class Storage: Sendable {
-        let references: ReferenceStore
-        let token: UInt64
+        let references: Reference.Store
+        private let token: UInt64
 
-        init(references: ReferenceStore, token: UInt64) {
+        init(references: Reference.Store, token: UInt64) {
             self.references = references
             self.token = token
         }
 
         deinit { references.release(token) }
+
+        @unsafe
+        func pointer() throws -> UnsafeMutablePointer<PyObject> {
+            unsafe try references.pointer(token)
+        }
     }
 
     let storage: Storage
@@ -29,20 +34,19 @@ public struct Reference: Sendable {
     @_lifetime(borrow context)
     func resolve(in context: borrowing Context) throws -> Object {
         let current = try context.checkAccess()
-        let pointer = unsafe try retainedPointer(in: current.references)
-        return unsafe Object(owned: pointer, in: context)
+        return try object(in: current.references, scopedTo: context)
     }
 
-    @unsafe
-    private func retainedPointer(in references: ReferenceStore) throws
-        -> UnsafeMutablePointer<PyObject>
-    {
+    @_lifetime(borrow owner)
+    private func object<Owner: ~Copyable & ~Escapable>(
+        in references: Reference.Store,
+        scopedTo owner: borrowing Owner,
+    ) throws -> Object {
         guard references === storage.references else {
             throw Self.wrongInterpreter()
         }
-        let pointer = unsafe try storage.references.pointer(storage.token)
-        unsafe Py_IncRef(pointer)
-        return unsafe pointer
+        let pointer = unsafe try storage.pointer()
+        return unsafe Object.retaining(pointer, in: owner)
     }
 
     static func wrongInterpreter() -> Exception {
@@ -57,8 +61,8 @@ public struct Reference: Sendable {
 
 extension Reference: Encodable {
     public func encode(to encoder: inout Encoder) throws {
-        let state = try InterpreterStorage.requireCurrent()
-        unsafe try encoder.replace(retainedPointer(in: state.references))
+        let state = try Interpreter.Storage.requireCurrent()
+        try encoder.encode(object(in: state.references, scopedTo: self))
     }
 }
 
@@ -66,7 +70,7 @@ extension Reference: Encodable {
 
 extension Reference: Decodable {
     public init(from decoder: borrowing Decoder) throws {
-        let state = try InterpreterStorage.requireCurrent()
+        let state = try Interpreter.Storage.requireCurrent()
         self = unsafe try state.references.retain(decoder.pointer)
     }
 }

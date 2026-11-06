@@ -4,10 +4,9 @@ import re
 import tomllib
 
 from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 
-from .configuration import MARKER_ENVIRONMENT, PYTHON_VERSION
+from .configuration import MARKER_ENVIRONMENT, PYTHON_VERSION, supports_python
 
 
 def _requirements(values: list[str]) -> list[Requirement]:
@@ -26,45 +25,58 @@ def _requirements(values: list[str]) -> list[Requirement]:
     return result
 
 
+def _requirements_txt(text: str) -> list[str]:
+    lines = []
+    pending = ""
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        line = re.split(r"\s+#", line, maxsplit=1)[0].strip()
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+
+        line = pending + line
+        pending = ""
+        if line.startswith("-"):
+            raise ValueError(
+                "requirements.txt supports requirement declarations, not pip command options"
+            )
+        lines.append(line)
+
+    if pending:
+        raise ValueError("Unfinished continuation in requirements.txt")
+    return lines
+
+
+def _check_python(specifier: str | None, origin: str) -> None:
+    if not supports_python(specifier):
+        raise ValueError(
+            f"The {origin} requires Python {specifier}; this runtime is {PYTHON_VERSION}"
+        )
+
+
 def project(request: dict, unused, control) -> list[str]:
     manifest = request.get("pyproject")
-    requirements = request.get("requirements")
+    requirements_text = request.get("requirements")
     metadata = tomllib.loads(manifest).get("project", {}) if manifest is not None else {}
-    requires_python = metadata.get("requires-python")
-    if requires_python and not SpecifierSet(requires_python).contains(
-        PYTHON_VERSION, prereleases=True
-    ):
-        raise ValueError(
-            f"The project requires Python {requires_python}; this runtime is {PYTHON_VERSION}"
-        )
-    if requirements is not None:
-        lines, pending = [], ""
-        for raw in requirements.splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            line = re.split(r"\s+#", line, maxsplit=1)[0].strip()
-            if line.endswith("\\"):
-                pending += line[:-1] + " "
-                continue
-            line = pending + line
-            pending = ""
-            if line.startswith("-"):
-                raise ValueError(
-                    "requirements.txt supports requirement declarations, not pip command options"
-                )
-            lines.append(line)
-        if pending:
-            raise ValueError("Unfinished continuation in requirements.txt")
-        return [str(value) for value in _requirements(lines)]
-    if "dependencies" in metadata.get("dynamic", []):
-        raise ValueError("Project dependencies must be declared in pyproject.toml")
-    return [str(value) for value in _requirements(metadata.get("dependencies", []))]
+
+    _check_python(metadata.get("requires-python"), "project")
+
+    if requirements_text is not None:
+        requirements = _requirements_txt(requirements_text)
+    else:
+        if "dependencies" in metadata.get("dynamic", []):
+            raise ValueError("Project dependencies must be declared in pyproject.toml")
+        requirements = metadata.get("dependencies", [])
+
+    return [str(value) for value in _requirements(requirements)]
 
 
-def script(request: dict, unused, control) -> list[str]:
-    source = request["source"]
-
+def _script_metadata(source: str) -> dict | None:
     # PyPA's canonical PEP 723 scan; unknown block types remain untouched.
     pattern = r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$"
     normalized = source.replace("\r\n", "\n").replace("\r", "\n")
@@ -73,13 +85,20 @@ def script(request: dict, unused, control) -> list[str]:
         raise ValueError("Multiple script metadata blocks found")
 
     if not matches:
-        return []
+        return None
 
     content = "".join(
         line[2:] if line.startswith("# ") else line[1:]
         for line in matches[0]["content"].splitlines(keepends=True)
     )
-    metadata = tomllib.loads(content)
+    return tomllib.loads(content)
+
+
+def script(request: dict, unused, control) -> list[str]:
+    metadata = _script_metadata(request["source"])
+    if metadata is None:
+        return []
+
     requirements = metadata.get("dependencies", [])
     if not isinstance(requirements, list) or not all(
         isinstance(value, str) for value in requirements
@@ -91,10 +110,7 @@ def script(request: dict, unused, control) -> list[str]:
         if not isinstance(requires_python, str):
             raise ValueError("Script requires-python must be a version specifier string")
 
-        if not SpecifierSet(requires_python).contains(PYTHON_VERSION, prereleases=True):
-            raise ValueError(
-                f"The script requires Python {requires_python}; this runtime is {PYTHON_VERSION}"
-            )
+        _check_python(requires_python, "script")
 
     return [str(requirement) for requirement in _requirements(requirements)]
 
@@ -111,7 +127,7 @@ def names(request: dict, unused, control) -> list[str]:
 
 
 def module_name(request: dict, unused, control) -> str:
-    name = request["module"]
-    if not all(part.isidentifier() for part in name.split(".")):
+    parts = request["module"].split(".")
+    if not all(part.isidentifier() for part in parts):
         raise ValueError("Expected an importable module name")
-    return name.split(".")[0]
+    return parts[0]

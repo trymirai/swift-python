@@ -3,6 +3,8 @@
 import CompilerPluginSupport
 import PackageDescription
 
+private let appleRuntimePlatforms: [Platform] = [.macOS, .iOS, .macCatalyst]
+
 let package = Package(
     name: "swift-python",
     platforms: [
@@ -63,12 +65,13 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-syntax", exact: "603.0.1"),
+        .package(url: "https://github.com/swiftlang/swift-subprocess", exact: "1.0.0", traits: []),
+
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/apple/swift-log", from: "1.15.1"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.103.0"),
         .package(url: "https://github.com/apple/swift-system", from: "1.8.1"),
-        .package(url: "https://github.com/swiftlang/swift-subprocess", exact: "1.0.0", traits: []),
-        .package(url: "https://github.com/swiftlang/swift-syntax", exact: "603.0.1"),
     ],
     targets: [
         // Plugins
@@ -94,15 +97,7 @@ let package = Package(
             ],
             swiftSettings: .default,
         ),
-        .macro(
-            name: "PythonMacros",
-            dependencies: [
-                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
-                .product(name: "SwiftSyntax", package: "swift-syntax"),
-                .product(name: "SwiftSyntaxBuilder", package: "swift-syntax"),
-                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
-            ],
-        ),
+
         .testTarget(
             name: "PythonTests",
             dependencies: [
@@ -114,6 +109,16 @@ let package = Package(
             ],
             path: "Tests/Python",
             swiftSettings: .default,
+        ),
+
+        .macro(
+            name: "PythonMacros",
+            dependencies: [
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxBuilder", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+            ],
         ),
 
         .target(
@@ -133,6 +138,41 @@ let package = Package(
             publicHeadersPath: ".",
         ),
 
+        .libcpython,
+
+        .libedit,
+        .libffi,
+        .liblzma,
+        .libmpdec,
+        .libncurses,
+        .libopenssl,
+        .libsqlite,
+        .libzstd,
+
+        // Tools
+
+        .executableTarget(
+            name: "CPythonBuild",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "_NIOFileSystem", package: "swift-nio"),
+                .product(name: "Subprocess", package: "swift-subprocess"),
+                .product(name: "SystemPackage", package: "swift-system"),
+            ],
+            path: "Tools/CPythonBuild",
+            swiftSettings: .default,
+        ),
+
+        // Supporting
+
+        .libpythontestsupport,
+    ],
+    cLanguageStandard: .c11,
+)
+
+private extension Target {
+    static var libcpython: Target {
         .target(
             name: "libcpython",
             dependencies: [
@@ -153,20 +193,9 @@ let package = Package(
                     ),
                 ),
 
-                .byName(
-                    name: "libffi",
-                    condition: .when(traits: ["libffi"]),
-                ),
-
-                .byName(
-                    name: "liblzma",
-                    condition: .when(traits: ["liblzma"]),
-                ),
-
-                .byName(
-                    name: "libmpdec",
-                    condition: .when(traits: ["libmpdec"]),
-                ),
+                .byName(name: "libffi", condition: .when(traits: ["libffi"])),
+                .byName(name: "liblzma", condition: .when(traits: ["liblzma"])),
+                .byName(name: "libmpdec", condition: .when(traits: ["libmpdec"])),
 
                 .byName(
                     name: "libncurses",
@@ -176,21 +205,11 @@ let package = Package(
                     ),
                 ),
 
-                .byName(
-                    name: "libopenssl",
-                    condition: .when(traits: ["OpenSSL"]),
-                ),
-
-                .byName(
-                    name: "libsqlite",
-                    condition: .when(traits: ["SQLite"]),
-                ),
-
-                .byName(
-                    name: "libzstd",
-                    condition: .when(traits: ["Zstandard"]),
-                ),
+                .byName(name: "libopenssl", condition: .when(traits: ["OpenSSL"])),
+                .byName(name: "libsqlite", condition: .when(traits: ["SQLite"])),
+                .byName(name: "libzstd", condition: .when(traits: ["Zstandard"])),
             ],
+
             path: "Sources/libcpython",
             exclude: [
                 "LICENSE",
@@ -205,6 +224,7 @@ let package = Package(
                 "src/Modules/main.c",
                 "src/Modules/_ctypes/_ctypes_test.c",
                 "src/Modules/_ctypes/malloc_closure.c",
+                "src/Modules/_io/fileio.c",
                 "src/Modules/_io/winconsoleio.c",
 
                 "src/Python/README",
@@ -247,8 +267,8 @@ let package = Package(
                 "src/Parser/Python.asdl",
                 "src/Parser/asdl.py",
                 "src/Parser/asdl_c.py",
-
             ],
+
             sources: [
                 "Compatibility",
                 // A file named main.c would make SwiftPM classify libcpython as an executable.
@@ -346,54 +366,27 @@ let package = Package(
                 "zlibmodule.c",
             ].map { "src/Modules/\($0)" },
             publicHeadersPath: "include",
+
             cSettings: [
-                .disableWarning(
-                    "shorten-64-to-32",
-                    .when(platforms: [.macOS, .iOS, .macCatalyst]),
-                ),
+                .suppressAppleIntegerNarrowing,
 
                 .headerSearchPath("Compatibility"),
-
                 .headerSearchPath("include/internal"),
 
                 .headerSearchPath("src/Modules"),
+                .headerSearchPath("src/Modules/_io"),
                 .headerSearchPath("src/Modules/_hacl"),
                 .headerSearchPath("src/Modules/_hacl/include"),
                 .headerSearchPath("src/Modules/expat"),
 
-                .define(
-                    "SWIFT_PYTHON_BUNDLED_OPENSSL",
-                    .when(traits: ["OpenSSL"]),
-                ),
-
-                .define(
-                    "SWIFT_PYTHON_BUNDLED_FFI",
-                    .when(traits: ["libffi"]),
-                ),
-
-                .define(
-                    "SWIFT_PYTHON_BUNDLED_MPDECIMAL",
-                    .when(traits: ["libmpdec"]),
-                ),
-
-                .define(
-                    "SWIFT_PYTHON_BUNDLED_LZMA",
-                    .when(traits: ["liblzma"]),
-                ),
-                .define(
-                    "SWIFT_PYTHON_BUNDLED_ZSTANDARD",
-                    .when(traits: ["Zstandard"]),
-                ),
-
-                .define(
-                    "SWIFT_PYTHON_BUNDLED_SQLITE",
-                    .when(traits: ["SQLite"]),
-                ),
-
-                .define(
-                    "SWIFT_PYTHON_BUNDLED_READLINE",
-                    .when(traits: ["libedit"]),
-                ),
+                // config.c uses these defines to select system-library fallbacks.
+                .define("SWIFT_PYTHON_BUNDLED_OPENSSL", .when(traits: ["OpenSSL"])),
+                .define("SWIFT_PYTHON_BUNDLED_FFI", .when(traits: ["libffi"])),
+                .define("SWIFT_PYTHON_BUNDLED_MPDECIMAL", .when(traits: ["libmpdec"])),
+                .define("SWIFT_PYTHON_BUNDLED_LZMA", .when(traits: ["liblzma"])),
+                .define("SWIFT_PYTHON_BUNDLED_ZSTANDARD", .when(traits: ["Zstandard"])),
+                .define("SWIFT_PYTHON_BUNDLED_SQLITE", .when(traits: ["SQLite"])),
+                .define("SWIFT_PYTHON_BUNDLED_READLINE", .when(traits: ["libedit"])),
 
                 .define(
                     "SWIFT_PYTHON_DESKTOP_MODULES",
@@ -450,98 +443,34 @@ let package = Package(
                 .define(
                     "__STDC_WANT_LIB_EXT1__",
                     to: "1",
-                    .when(platforms: [.macOS, .iOS, .macCatalyst]),
+                    .when(platforms: appleRuntimePlatforms),
                 ),
             ],
+
             linkerSettings: [
-                .linkedFramework(
-                    "Security",
-                    .when(platforms: [.macOS, .iOS, .macCatalyst]),
-                ),
-
-                .linkedFramework(
-                    "SystemConfiguration",
-                    .when(platforms: [.macOS]),
-                ),
-
-                .linkedFramework(
-                    "CoreFoundation",
-                    .when(platforms: [.macOS, .iOS, .macCatalyst]),
-                ),
+                .linkedFramework("Security", .when(platforms: appleRuntimePlatforms)),
+                .linkedFramework("SystemConfiguration", .when(platforms: [.macOS])),
+                .linkedFramework("CoreFoundation", .when(platforms: appleRuntimePlatforms)),
 
                 .linkedLibrary("z"),
                 .linkedLibrary("bz2"),
 
-                .linkedLibrary(
-                    "edit",
-                    .when(platforms: [.macOS]),
-                ),
+                .linkedLibrary("edit", .when(platforms: [.macOS])),
+                .linkedLibrary("iconv", .when(platforms: appleRuntimePlatforms)),
+                .linkedLibrary("ncurses", .when(platforms: [.macOS])),
+                .linkedLibrary("panel", .when(platforms: [.macOS])),
 
-                .linkedLibrary(
-                    "iconv",
-                    .when(platforms: [.macOS, .iOS, .macCatalyst]),
-                ),
-
-                .linkedLibrary(
-                    "ncurses",
-                    .when(platforms: [.macOS]),
-                ),
-
-                .linkedLibrary(
-                    "panel",
-                    .when(platforms: [.macOS]),
-                ),
-
-                .linkedLibrary(
-                    "m",
-                    .when(platforms: [.linux]),
-                ),
-
-                .linkedLibrary(
-                    "dl",
-                    .when(platforms: [.linux]),
-                ),
-
-                .linkedLibrary(
-                    "pthread",
-                    .when(platforms: [.linux]),
-                ),
+                .linkedLibrary("m", .when(platforms: [.linux])),
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux])),
             ],
+
             plugins: [
                 .plugin(name: "CPythonBuildPlugin"),
             ],
-        ),
-
-        .libedit,
-        .libffi,
-        .liblzma,
-        .libmpdec,
-        .libncurses,
-        .libopenssl,
-        .libsqlite,
-        .libzstd,
-
-        // Tools
-
-        .executableTarget(
-            name: "CPythonBuild",
-            dependencies: [
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                .product(name: "Logging", package: "swift-log"),
-                .product(name: "_NIOFileSystem", package: "swift-nio"),
-                .product(name: "Subprocess", package: "swift-subprocess"),
-                .product(name: "SystemPackage", package: "swift-system"),
-            ],
-            path: "Tools/CPythonBuild",
-            swiftSettings: .default,
-        ),
-
-        // Supporting
-
-        .libpythontestsupport,
-    ],
-    cLanguageStandard: .c11,
-)
+        )
+    }
+}
 
 private extension Target {
     static var libedit: Target {
@@ -612,10 +541,7 @@ private extension Target {
                 "src",
             ],
             cSettings: [
-                .disableWarning(
-                    "shorten-64-to-32",
-                    .when(platforms: [.macOS, .iOS, .macCatalyst]),
-                ),
+                .suppressAppleIntegerNarrowing,
 
                 .headerSearchPath("Compatibility"),
 
@@ -735,10 +661,7 @@ private extension Target {
             ],
             sources: ["src"],
             cSettings: [
-                .disableWarning(
-                    "shorten-64-to-32",
-                    .when(platforms: [.macOS, .iOS, .macCatalyst]),
-                ),
+                .suppressAppleIntegerNarrowing,
 
                 .headerSearchPath("Compatibility"),
                 .headerSearchPath("src"),
@@ -846,6 +769,12 @@ private extension Target {
                 ),
             ],
         )
+    }
+}
+
+private extension CSetting {
+    static var suppressAppleIntegerNarrowing: Self {
+        .disableWarning("shorten-64-to-32", .when(platforms: appleRuntimePlatforms))
     }
 }
 

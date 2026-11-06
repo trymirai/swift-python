@@ -11,7 +11,7 @@ struct ExportRegistration {
     private let definition: String
 
     init(name base: String, definition: String, in context: some MacroExpansionContext) {
-        name = context.makeUniqueName("__python_" + base)
+        name = context.makeUniqueName("__p_" + base)
         self.definition = definition
     }
 
@@ -36,7 +36,7 @@ struct ExportRegistration {
     var declaration: DeclSyntax {
         """
         private enum \(name): Python::_ExportProvider {
-            nonisolated static func _pythonExport<Collector: Python::_ExportSink>(to collector: inout Collector) {
+            nonisolated static func _pExport<Collector: Python::_ExportSink>(to collector: inout Collector) {
                 \(raw: definition)
             }
             \(raw: registration)

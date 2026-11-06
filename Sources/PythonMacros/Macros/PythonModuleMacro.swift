@@ -21,21 +21,13 @@ extension PythonModuleMacro: MemberMacro {
     ) throws -> [DeclSyntax] {
         try ExportScope(context).validate()
 
-        guard
-            declaration.is(StructDeclSyntax.self) || declaration.is(ClassDeclSyntax.self)
-            || declaration.is(EnumDeclSyntax.self) || declaration.is(ActorDeclSyntax.self)
-        else {
+        guard let type = declaration.exportTypeDeclaration else {
             throw MacroExpansionErrorMessage(
                 "PythonModule requires an enum, struct, actor or class.",
             )
         }
 
-        guard
-            declaration.as(StructDeclSyntax.self)?.genericParameterClause == nil,
-            declaration.as(ClassDeclSyntax.self)?.genericParameterClause == nil,
-            declaration.as(EnumDeclSyntax.self)?.genericParameterClause == nil,
-            declaration.as(ActorDeclSyntax.self)?.genericParameterClause == nil
-        else {
+        guard type.genericParameterClause == nil else {
             throw MacroExpansionErrorMessage("PythonModule requires a concrete, non-generic type.")
         }
 
@@ -43,14 +35,19 @@ extension PythonModuleMacro: MemberMacro {
             throw MacroExpansionErrorMessage("PythonModule requires a module name.")
         }
 
-        let documentation = attribute.argument(named: "documentation") ?? "nil"
+        func metadata(_ member: String, type: String, value: String) -> DeclSyntax {
+            DeclSyntax(
+                stringLiteral:
+                "@_documentation(visibility: internal) public nonisolated static var \(member): \(type) { \(value) }",
+            )
+        }
 
         return [
-            DeclSyntax(
-                stringLiteral: "@_documentation(visibility: internal) public nonisolated static var _pythonModuleName: Swift::String { \(name) }",
-            ),
-            DeclSyntax(
-                stringLiteral: "@_documentation(visibility: internal) public nonisolated static var _pythonModuleDocumentation: Swift::String? { \(documentation) }",
+            metadata("_pModuleName", type: "Swift::String", value: name),
+            metadata(
+                "_pModuleDocumentation",
+                type: "Swift::String?",
+                value: attribute.documentationSource,
             ),
         ]
     }

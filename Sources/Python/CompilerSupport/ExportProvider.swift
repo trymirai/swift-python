@@ -9,7 +9,7 @@ internal import libcpython
 /// A private provider emitted by an export macro into its registration section.
 @_documentation(visibility: internal)
 public protocol _ExportProvider {
-    static func _pythonExport<Collector: _ExportSink>(to collector: inout Collector)
+    static func _pExport<Collector: _ExportSink>(to collector: inout Collector)
 }
 
 public extension _ExportProvider {

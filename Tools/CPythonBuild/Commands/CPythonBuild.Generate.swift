@@ -26,9 +26,7 @@ extension CPythonBuild {
             if let packageDirectory, !packageDirectory.isAbsolute {
                 throw ValidationError("The package directory must be absolute.")
             }
-            guard jobs > 0 else {
-                throw ValidationError("--jobs must be positive.")
-            }
+            try CPythonBuild.validateJobCount(jobs)
         }
 
         func run() async throws {
@@ -40,8 +38,8 @@ extension CPythonBuild {
             }
 
             let build = package.appending(".build")
-
             try await fileSystem.createDirectory(at: build, withIntermediateDirectories: true)
+
             try await fileSystem.withTemporaryDirectory(prefix: build) { _, directory in
                 let workspace = BuildWorkspace(
                     packageDirectory: package,

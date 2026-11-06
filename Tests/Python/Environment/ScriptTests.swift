@@ -3,8 +3,8 @@
 //
 
 import _NIOFileSystem
-import Foundation
 import Python
+import Synchronization
 import SystemPackage
 import Testing
 
@@ -25,56 +25,126 @@ func scriptDependenciesAndGlobalsAreIsolatedFromTheProject() async throws {
         counter = globals().get("counter", 0) + 1
         print(sampledep.VALUE, counter, sys.argv[1])
         """
-        let script = try fixture.write("\u{FEFF}" + source, to: "script.py")
+        let script = try await fixture.write("\u{FEFF}" + source, to: "script.py")
         let environment = fixture.root.appending("script-environment").string
+
+        func runScript(argument: String) async throws -> Python::Execution {
+            try await fixture.runtime.run(
+                script: script,
+                arguments: [argument],
+                environmentDirectory: environment,
+            )
+        }
 
         try await fixture.withProject { session in
             for argument in ["first", "second"] {
-                let output = try await fixture.runtime.run(
-                    script: script,
-                    arguments: [argument],
-                    environmentDirectory: environment,
-                )
-                #expect(output.stdout == "1 1 \(argument)\n")
+                let execution = try await runScript(argument: argument)
+                #expect(execution.output.stdout == "1 1 \(argument)\n")
             }
-            #expect(try await session.installedPackages()["sampledep"] == "2.0")
+            #expect(try await session.packages.installed()["sampledep"] == "2.0")
         }
 
-        try fixture.takeIndexOffline()
-        let output = try await fixture.runtime.run(
-            script: script,
-            arguments: ["offline"],
-            environmentDirectory: environment,
-        )
-        #expect(output.stdout == "1 1 offline\n")
+        try await fixture.takeIndexOffline()
+        let execution = try await runScript(argument: "offline")
+        #expect(execution.output.stdout == "1 1 offline\n")
     }
 }
 
 @Test
-func scriptsReleaseTemporaryEnvironmentsOnExitAndFailure() async throws {
+func plainSessionAndScriptDoNotCreatePackageDirectories() async throws {
     try await FileSystem.shared.withTemporaryDirectory { _, root in
         let cache = root.appending("cache")
         let runtime = try await Python::Runtime(cacheDirectory: cache.string)
-        let environments = cache.appending("environments").string
-        let files = FileManager.default
-        try files.createDirectory(atPath: environments, withIntermediateDirectories: true)
+        let session = try await runtime.session()
+        #expect(try await session.packages.installed().isEmpty)
+        #expect(try await session.evaluate("1 + 1").output.stdout == "2\n")
+        await session.close()
 
         let script = root.appending("script.py")
-        let exit = """
-        print("completed")
-        raise SystemExit(0)
-        """
-        try await exit.write(toFileAt: script)
-        #expect(try await runtime.run(script: script.string).stdout == "completed\n")
-        #expect(try files.contentsOfDirectory(atPath: environments).isEmpty)
-
-        for source in ["raise SystemExit(0.0)", "if True print('invalid syntax')"] {
-            try await source.write(toFileAt: script, options: .newFile(replaceExisting: true))
-            await #expect(throws: Python::ExecutionError.self) {
-                try await runtime.run(script: script.string)
+        try await "print('completed')\n".write(toFileAt: script)
+        let stdout = root.appending("stdout.log")
+        let streamed = Mutex("")
+        let execution = try await runtime.run(
+            script: script.string,
+            redirecting: [.stdout: stdout],
+        ) { stream, text in
+            if stream == .stdout {
+                streamed.withLock { $0 += text }
             }
-            #expect(try files.contentsOfDirectory(atPath: environments).isEmpty)
         }
+        #expect(execution.end == .finished)
+        #expect(execution.output.stdout.isEmpty)
+        #expect(streamed.withLock { $0 } == "completed\n")
+        #expect(try await String(contentsOf: stdout, maximumSizeAllowed: .unlimited) ==
+            "completed\n")
+        #expect(try await FileSystem.shared.info(forFileAt: cache) == nil)
+    }
+}
+
+@Test
+func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        let cache = fixture.root.appending("cache")
+        let scratch = cache.appending("tmp")
+        let header = "# /// script\n# dependencies = [\"sampledep==1.0\"]\n# ///\n"
+
+        func writeScript(_ source: String, named name: String) async throws -> String {
+            try await fixture.write(header + source, to: name)
+        }
+
+        let script = try await writeScript("""
+        from pathlib import Path
+        import sampledep, sys
+        assert Path(sampledep.__file__).samefile(sys.argv[1])
+        assert not Path(sampledep.__file__).parents[1].joinpath("environment.json").exists()
+        print("completed")
+        """, named: "reuse.py")
+
+        try await fixture.withProject { session in
+            _ = try await session.evaluate("package_file = sampledep.__file__")
+            let path: String = try await session.get("package_file")
+            for wheel in ["sampledep", "sampleleaf"] {
+                try await FileSystem.shared.removeItem(
+                    at: fixture.root.appending("\(wheel)-1.0-py3-none-any.whl"),
+                )
+            }
+            try await fixture.withProject(
+                environmentDirectory: fixture.root.appending("second-environment").string,
+            ) { second in
+                try await second.set(path, forKey: "first_package")
+                _ = try await second.evaluate("""
+                from pathlib import Path
+                assert Path(sampledep.__file__).samefile(first_package)
+                """)
+            }
+
+            let execution = try await fixture.runtime.run(script: script, arguments: [path])
+            #expect(execution.output.stdout == "completed\n")
+            #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
+            #expect(try await ProjectFixture.directoryNames(at: cache.appending("wheels"))
+                .count == 2)
+            #expect(try await ProjectFixture.directoryNames(at: cache.appending("installed"))
+                .count == 2)
+        }
+
+        let failed = try await writeScript(
+            "raise ValueError('test failure')",
+            named: "failure.py",
+        )
+        let error = try await #require(throws: Python::ExecutionError.self) {
+            try await fixture.runtime.run(script: failed)
+        }
+        #expect(error.output.stderr == error.traceback)
+        #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
+
+        let slow = try await writeScript(
+            "print('before timeout')\nwhile True:\n    pass\n",
+            named: "slow.py",
+        )
+        let interrupted = try await fixture.runtime.run(script: slow, timeout: .seconds(2))
+        #expect(interrupted.end == .timedOut)
+        #expect(interrupted.output.stdout == "before timeout\n")
+        #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
     }
 }
 

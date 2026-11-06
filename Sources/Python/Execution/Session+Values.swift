@@ -14,7 +14,7 @@ public extension Session {
         _ value: consuming T,
         forKey name: String,
     ) async throws {
-        let transfer = ValueTransfer(consume value)
+        let transfer = Session.Transfer(consume value)
         try await enqueue { context in
             let value = transfer.take()
             try context.set(value, forKey: name)

@@ -2,8 +2,33 @@
 #include "embedded_data.h"
 #include "internal/pycore_unicodeobject.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+static int
+compare_module_name(const void *key, const void *item)
+{
+    const CPythonEmbeddedModule *module = item;
+    return strcmp(key, module->name);
+}
+
+static PyObject *
+lookup_module(PyObject *Py_UNUSED(self), PyObject *argument)
+{
+    const char *name = _PyUnicode_AsUTF8NoNUL(argument);
+    if (name == NULL) {
+        return NULL;
+    }
+
+    const CPythonEmbeddedModule *module =
+        bsearch(name, CPythonEmbeddedModules, CPythonEmbeddedModuleCount,
+                sizeof(CPythonEmbeddedModules[0]), compare_module_name);
+    if (module == NULL) {
+        Py_RETURN_NONE;
+    }
+    return Py_BuildValue("(si)", module->path, module->is_package);
+}
 
 static int
 compare_resource_path(const void *key, const void *item)
@@ -19,13 +44,6 @@ find_resource(const char *path)
                    sizeof(CPythonEmbeddedResources[0]), compare_resource_path);
 }
 
-static int
-compare_module_name(const void *key, const void *item)
-{
-    const CPythonEmbeddedModule *module = item;
-    return strcmp(key, module->name);
-}
-
 static PyObject *
 read_resource(PyObject *Py_UNUSED(self), PyObject *argument)
 {
@@ -33,6 +51,7 @@ read_resource(PyObject *Py_UNUSED(self), PyObject *argument)
     if (path == NULL) {
         return NULL;
     }
+
     const CPythonEmbeddedResource *entry = find_resource(path);
     if (entry == NULL) {
         PyErr_SetObject(PyExc_FileNotFoundError, argument);
@@ -42,19 +61,13 @@ read_resource(PyObject *Py_UNUSED(self), PyObject *argument)
 }
 
 static PyObject *
-lookup_module(PyObject *Py_UNUSED(self), PyObject *argument)
+is_resource_file(PyObject *Py_UNUSED(self), PyObject *argument)
 {
-    const char *name = _PyUnicode_AsUTF8NoNUL(argument);
-    if (name == NULL) {
+    const char *path = _PyUnicode_AsUTF8NoNUL(argument);
+    if (path == NULL) {
         return NULL;
     }
-    const CPythonEmbeddedModule *module =
-        bsearch(name, CPythonEmbeddedModules, CPythonEmbeddedModuleCount,
-                sizeof(CPythonEmbeddedModules[0]), compare_module_name);
-    if (module == NULL) {
-        Py_RETURN_NONE;
-    }
-    return Py_BuildValue("(si)", module->path, module->is_package);
+    return PyBool_FromLong(find_resource(path) != NULL);
 }
 
 // Compare against path followed by '/' so files with the same prefix sort correctly.
@@ -84,6 +97,13 @@ directory_lower_bound(const char *path, size_t length)
     return lower;
 }
 
+static bool
+resource_is_in_directory(size_t index, const char *path, size_t length)
+{
+    return index < CPythonEmbeddedResourceCount &&
+           compare_directory(CPythonEmbeddedResources[index].path, path, length) == 0;
+}
+
 static PyObject *
 is_resource_directory(PyObject *Py_UNUSED(self), PyObject *argument)
 {
@@ -93,19 +113,46 @@ is_resource_directory(PyObject *Py_UNUSED(self), PyObject *argument)
     }
     size_t length = strlen(path);
     size_t index = directory_lower_bound(path, length);
-    return PyBool_FromLong(index < CPythonEmbeddedResourceCount &&
-                           compare_directory(CPythonEmbeddedResources[index].path, path, length) ==
-                               0);
+    return PyBool_FromLong(resource_is_in_directory(index, path, length));
 }
 
-static PyObject *
-is_resource_file(PyObject *Py_UNUSED(self), PyObject *argument)
+static int
+append_resource_name(PyObject *children, const char *child, size_t size)
 {
-    const char *path = _PyUnicode_AsUTF8NoNUL(argument);
-    if (path == NULL) {
-        return NULL;
+    PyObject *name = PyUnicode_FromStringAndSize(child, (Py_ssize_t)size);
+    if (name == NULL) {
+        return -1;
     }
-    return PyBool_FromLong(find_resource(path) != NULL);
+    int status = PyList_Append(children, name);
+    Py_DECREF(name);
+    return status;
+}
+
+static int
+append_directory_children(PyObject *children, const char *path)
+{
+    size_t length = strlen(path);
+    size_t prefix = length + (length != 0);
+
+    const char *last = NULL;
+    size_t last_size = 0;
+    for (size_t index = directory_lower_bound(path, length);
+         resource_is_in_directory(index, path, length);
+         index++) {
+        const char *child = CPythonEmbeddedResources[index].path + prefix;
+        const char *slash = strchr(child, '/');
+        size_t size = slash == NULL ? strlen(child) : (size_t)(slash - child);
+        // Sorted paths place all descendants of a directory next to one another.
+        if (last != NULL && size == last_size && strncmp(last, child, size) == 0) {
+            continue;
+        }
+        if (append_resource_name(children, child, size) < 0) {
+            return -1;
+        }
+        last = child;
+        last_size = size;
+    }
+    return 0;
 }
 
 static PyObject *
@@ -115,36 +162,14 @@ list_resource_children(PyObject *Py_UNUSED(self), PyObject *argument)
     if (path == NULL) {
         return NULL;
     }
+
     PyObject *result = PyList_New(0);
     if (result == NULL) {
         return NULL;
     }
-    size_t length = strlen(path);
-    size_t prefix = length + (length != 0);
-    const char *last = NULL;
-    size_t last_size = 0;
-    for (size_t index = directory_lower_bound(path, length); index < CPythonEmbeddedResourceCount;
-         index++) {
-        const char *entry = CPythonEmbeddedResources[index].path;
-        if (compare_directory(entry, path, length) != 0) {
-            break;
-        }
-        const char *child = entry + prefix;
-        const char *slash = strchr(child, '/');
-        size_t size = slash == NULL ? strlen(child) : (size_t)(slash - child);
-        // Sorted paths place all descendants of a directory next to one another.
-        if (last != NULL && size == last_size && strncmp(last, child, size) == 0) {
-            continue;
-        }
-        PyObject *name = PyUnicode_FromStringAndSize(child, (Py_ssize_t)size);
-        if (name == NULL || PyList_Append(result, name) < 0) {
-            Py_XDECREF(name);
-            Py_DECREF(result);
-            return NULL;
-        }
-        Py_DECREF(name);
-        last = child;
-        last_size = size;
+    if (append_directory_children(result, path) < 0) {
+        Py_DECREF(result);
+        return NULL;
     }
     return result;
 }

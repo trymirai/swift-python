@@ -9,6 +9,7 @@ import SwiftSyntaxBuilder
 
 private final class ConcreteSelfRewriter: SyntaxRewriter {
     let owner: String
+
     init(_ owner: String) {
         self.owner = owner
     }
@@ -36,6 +37,7 @@ extension TypeSyntax {
                 text.removeFirst(prefix.count)
             }
         }
+
         return ConcreteSelfRewriter(owner)
             .rewrite(TypeSyntax(stringLiteral: text))
             .trimmedDescription

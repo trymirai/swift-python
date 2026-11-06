@@ -21,11 +21,7 @@ private struct BufferScale: Python::Decodable {
 private enum BufferModule {
     @PythonFunction
     static func sum(_ values: Span<UInt8>) -> Int {
-        var result = 0
-        for index in values.indices {
-            result += Int(values[index])
-        }
-        return result
+        values.indices.reduce(0) { total, index in total + Int(values[index]) }
     }
 
     @PythonFunction
@@ -37,11 +33,7 @@ private enum BufferModule {
 
     @PythonFunction
     static func floating(_ values: Span<Double>) -> Double {
-        var result = 0.0
-        for index in values.indices {
-            result += values[index]
-        }
-        return result
+        values.indices.reduce(0.0) { total, index in total + values[index] }
     }
 
     @PythonFunction
@@ -59,9 +51,7 @@ private enum BufferModule {
 
 @Test
 func exportedBufferArgumentsBorrowPythonStorage() async throws {
-    let runtime = try await Python::Runtime()
-    let session = try await runtime.session(modules: [BufferModule.self])
-    _ = try await session.evaluate(#"""
+    try await evaluateInFreshSession(#"""
     import buffers, array
 
     values = bytearray([1, 2, 3])
@@ -94,8 +84,7 @@ func exportedBufferArgumentsBorrowPythonStorage() async throws {
 
     buffers.scale(values, {'amount': 2})
     assert values == bytearray([6, 12, 18])
-    """#)
-    await session.close()
+    """#, modules: [BufferModule.self])
 }
 
 @Test
@@ -117,7 +106,7 @@ func explicitBufferLeaseMutatesAndReadsPythonStorage() async throws {
         }
 
         let object = try context.object("values")
-        let lease = try object.buffer(as: UInt8.self, isWritable: true)
+        let lease = try object.mutableBuffer(as: UInt8.self)
         try lease.withMutableSpan { span in
             span[1] = 42
             do {
@@ -127,7 +116,7 @@ func explicitBufferLeaseMutatesAndReadsPythonStorage() async throws {
                 #expect(exception.name == "RuntimeError")
             }
         }
-        let sum = try lease.withSpan { span in BufferModule.sum(span) }
+        let sum = try lease.withSpan(BufferModule.sum)
         #expect(sum == 66)
     }
     _ = try await session.evaluate("assert values == bytearray([6, 42, 18])")

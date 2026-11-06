@@ -2,6 +2,8 @@
 //  Created by Anton Spivak
 //
 
+// MARK: - _ExportFunction
+
 @_documentation(visibility: internal)
 public struct _ExportFunction: Sendable {
     public typealias AsyncOperation = @Sendable () async throws -> any Encodable & Sendable
@@ -24,10 +26,9 @@ public struct _ExportFunction: Sendable {
     let name: String
     let documentation: String?
     let parameters: [Parameter]
-
     let returnAnnotation: String?
-    let usesSwiftBinding: Bool
 
+    let usesSwiftBinding: Bool
     let body: Body
 
     package init(
@@ -41,7 +42,7 @@ public struct _ExportFunction: Sendable {
             inout Encoder,
         ) throws -> Void,
     ) {
-        let indices = Self.makeArgumentIndices(for: parameters)
+        let layout = Arguments.Layout(parameters)
         self.init(
             name,
             documentation: documentation,
@@ -49,11 +50,7 @@ public struct _ExportFunction: Sendable {
             returnAnnotation: returnAnnotation,
             usesSwiftBinding: true,
             body: .synchronous { tuple, encoder in
-                let arguments = try Arguments(
-                    tuple,
-                    parameters: parameters,
-                    argumentIndices: indices,
-                )
+                let arguments = try Arguments(tuple, layout: layout)
                 let context = try Context()
                 try call(arguments, context, &encoder)
             },
@@ -70,7 +67,7 @@ public struct _ExportFunction: Sendable {
             borrowing Context,
         ) throws -> AsyncOperation,
     ) {
-        let indices = Self.makeArgumentIndices(for: parameters)
+        let layout = Arguments.Layout(parameters)
         self.init(
             name,
             documentation: documentation,
@@ -78,11 +75,7 @@ public struct _ExportFunction: Sendable {
             returnAnnotation: returnAnnotation,
             usesSwiftBinding: true,
             body: .asynchronous { tuple in
-                let arguments = try Arguments(
-                    tuple,
-                    parameters: parameters,
-                    argumentIndices: indices,
-                )
+                let arguments = try Arguments(tuple, layout: layout)
                 let context = try Context()
                 return try start(arguments, context)
             },
@@ -160,7 +153,7 @@ public struct _ExportFunction: Sendable {
             name,
             documentation: documentation,
             parameters: parameters,
-            returnAnnotation: pythonAnnotation(returning),
+            returnAnnotation: Self.pAnnotation(for: returning),
             call: call,
         )
     }
@@ -179,7 +172,7 @@ public struct _ExportFunction: Sendable {
             name,
             documentation: documentation,
             parameters: parameters,
-            returnAnnotation: pythonAnnotation(returning),
+            returnAnnotation: Self.pAnnotation(for: returning),
             start: start,
         )
     }
@@ -206,17 +199,12 @@ public struct _ExportFunction: Sendable {
         }
         return values
     }
+}
 
-    private static func makeArgumentIndices(for parameters: [Parameter]) -> [Int] {
-        var indices = [Int]()
-        indices.reserveCapacity(parameters.count)
-        var nextIndex = 0
-        for parameter in parameters {
-            indices.append(nextIndex)
-            if !parameter.isInjected {
-                nextIndex += 1
-            }
-        }
-        return indices
+// MARK: _ExportFunction.ID
+
+extension _ExportFunction {
+    struct ID {
+        let rawValue: Int
     }
 }

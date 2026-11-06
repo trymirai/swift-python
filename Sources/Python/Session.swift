@@ -3,114 +3,155 @@
 //
 
 import Synchronization
+internal import SystemPackage
 
 // MARK: - Session
 
 /// An interactive namespace with a private interpreter and local package environment.
 public actor Session {
-    private nonisolated let executor: InterpreterExecutor
-    private nonisolated let activeExecution: Mutex<ExecutionControl?> = .init(nil)
-    private let directory: String?
-    private var importPaths: [String]
-    private let modules: [Module]
-    private let packages: [PackageSource]
+    private nonisolated let executor: Interpreter.Executor
+    private nonisolated let operations: Operations = .init()
+    private nonisolated let activeExecution: Mutex<Control?> = .init(nil)
+
+    private let directory: Runtime.Path?
+    private let projectDirectory: Runtime.Path?
+    private var importPaths: [Runtime.Path]
+
     private let startup: Startup
-    private let packageService: PackageService?
-    private let packageConfiguration: PackageConfiguration?
-    private let environmentDirectory: String?
-    private let requirements: [String]
-    private var environment: EnvironmentStore?
-    private var interpreter: Interpreter?
-    private var isClosed: Bool = false
-    // A reservation spans package-service awaits and interpreter rollback. Keep
-    // these operations under one owner so actor reentrancy cannot interleave them.
-    private var isReserved: Bool = false
-    private var operationWaiters: [CheckedContinuation<Void, Never>] = []
+    private let modules: [Module]
+    private var delegate: (any Delegate)?
+
+    private(set) var environment: Environment?
+    private var state: State = .idle
 
     /// Streams produced by the most recent successful initialization.
-    public private(set) var startupOutput: Output?
+    public var startupOutput: Output? {
+        switch state {
+        case .idle:
+            nil
+        case let .ready(_, output):
+            output
+        case let .closed(output):
+            output
+        }
+    }
 
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
         unsafe executor.asUnownedSerialExecutor()
     }
 
     init(
-        directory: String?,
-        importPaths: [String],
+        directory: Runtime.Path?,
+        importPaths: [Runtime.Path],
         modules: [Module],
-        packages: [PackageSource] = [],
         startup: Startup = .source(""),
-        packageService: PackageService? = nil,
-        packageConfiguration: PackageConfiguration? = nil,
-        environmentDirectory: String? = nil,
+        packaging: Environment.Service.Lazy? = nil,
+        environmentDirectory: Runtime.Path? = nil,
         requirements: [String] = [],
+        delegate: (any Delegate)? = nil,
     ) throws {
         self.directory = directory
-        self.importPaths = try Runtime.paths(directory: directory, imports: importPaths)
-        _ = try Runtime.paths(
-            directory: startup.projectDirectory,
-            imports: environmentDirectory.map { [$0] } ?? [],
-        )
+        self.importPaths = importPaths
+
+        let projectDirectory = try startup.projectDirectory.map(Runtime.Path.init)
+        self.projectDirectory = projectDirectory
+        self.environment = packaging.map {
+            Environment(
+                directory: environmentDirectory,
+                projectDirectory: projectDirectory,
+                requirements: requirements,
+                packaging: $0,
+            )
+        }
+
         self.modules = modules
-        self.packages = packages
         self.startup = startup
-        self.packageService = packageService
-        self.packageConfiguration = packageConfiguration
-        self.environmentDirectory = environmentDirectory
-        self.requirements = requirements
-        self.executor = try InterpreterExecutor()
+        self.delegate = delegate
+        self.executor = try Interpreter.Executor()
     }
 
     isolated deinit {
-        interpreter = nil
+        state = .closed(nil)
         environment = nil
         executor.finish()
     }
 
     func initializeRuntime() throws {
-        try ThreadState.initialize()
+        try PThread.initializeRuntime()
     }
 
     private var resolvedImportPaths: [String] {
-        (startup.projectDirectory.map { [$0] } ?? [])
-            + importPaths + (environment?.path.map { [$0] } ?? [])
+        var paths = [String]()
+        if let projectDirectory {
+            paths.append(projectDirectory.string)
+        }
+        if let directory {
+            paths.append(directory.string)
+        }
+        paths.append(contentsOf: importPaths.lazy.map(\.string))
+        if let sitePackagesPath = environment?.sitePackagesPath {
+            paths.append(sitePackagesPath)
+        }
+        return paths
     }
 
-    private func openInterpreterIfNeeded(execution: ExecutionControl) throws {
-        switch interpreter {
-        case .some:
+    private func openInterpreterIfNeeded(execution: Control) throws {
+        guard state.isIdle else {
             return
-        case .none:
-            break
         }
-
         try Task.checkCancellation()
+
         let opened = try Interpreter(
+            execution: execution,
             importPaths: resolvedImportPaths,
             modules: modules,
-            packages: packages,
+            packages: environment?.packaging.packages ?? [],
             scheduleRelease: { [weak self] in Task { await self?.releasePendingReferences() } },
             sessionOrigin: ObjectIdentifier(executor),
             session: self,
+            delegate: delegate,
         )
-        startupOutput = try opened.initialize(startup, execution: execution)
-        interpreter = consume opened
+
+        let output = try opened.initialize(startup, execution: execution)
+        state = .ready(consume opened, output)
     }
 
     private func releasePendingReferences() {
-        interpreter?.releasePendingReferences()
+        withOpenInterpreter { $0.releasePendingReferences() }
     }
 
     func withInterpreter<Result: ~Copyable>(
-        execution: ExecutionControl,
+        execution: Control,
+        generation: Reference.Store? = nil,
         _ body: (borrowing Interpreter) throws -> Result,
     ) throws -> Result {
-        try openInterpreterIfNeeded(execution: execution)
-        switch interpreter {
-        case let .some(interpreter):
+        if generation == nil {
+            try openInterpreterIfNeeded(execution: execution)
+        }
+        switch state {
+        case let .ready(interpreter, _):
+            if let generation, interpreter.references !== generation {
+                throw Reference.wrongInterpreter()
+            }
             return try body(interpreter)
-        case .none:
-            throw SessionError.closed
+        case .idle:
+            throw Reference.wrongInterpreter()
+        case .closed:
+            throw Session.Error.closed
+        }
+    }
+
+    @discardableResult
+    private func withOpenInterpreter<Result: ~Copyable>(
+        _ body: (borrowing Interpreter) throws -> Result,
+    ) rethrows -> Result? {
+        switch state {
+        case let .ready(interpreter, _):
+            try body(interpreter)
+        case .idle:
+            nil
+        case .closed:
+            nil
         }
     }
 
@@ -126,127 +167,13 @@ public actor Session {
     /// Closes the interpreter. The next execution repeats initialization with the
     /// current packages; dependency operations can run before that re-import.
     public nonisolated func reset() async throws {
-        try checkReentry()
         try await withOperation { session in
-            session.interpreter = nil
-            session.startupOutput = nil
-            try session.environment?.prune()
+            session.state = .idle
         }
     }
 
-    /// Application and local distribution versions visible to this session.
-    public nonisolated func installedPackages() async throws -> [String: String] {
-        try await withPackageOperation { _, environment, _, _ in
-            environment.installedPackages()
-        }
-    }
-
-    nonisolated func changePackages(_ change: EnvironmentStore.Change) async throws {
-        try await withPackageOperation { session, environment, service, execution in
-            let staged = try await environment.prepare(
-                change,
-                projectDirectory: session.startup.projectDirectory,
-                additionalRequirements: session.requirements,
-                using: service,
-                execution: execution,
-            )
-            if let staged {
-                try session.publishGeneration(staged, in: environment, execution: execution)
-            } else {
-                try execution.finishCheckingInterruption()
-            }
-        }
-    }
-
-    private nonisolated func withPackageOperation<Result: Sendable>(
-        _ operation: @Sendable (
-            isolated Session,
-            EnvironmentStore,
-            PackageService,
-            ExecutionControl,
-        )
-        async throws -> Result,
-    ) async throws -> Result {
-        try await withExecution { session, execution in
-            guard
-                let service = session.packageService,
-                let configuration = session.packageConfiguration
-            else {
-                throw SessionError.closed
-            }
-
-            let result: Result
-            do {
-                let environment = try session.openEnvironment(configuration: configuration)
-                result = try await operation(session, environment, service, execution)
-            } catch {
-                try execution.finishCheckingInterruption()
-                throw error
-            }
-            try execution.finishCheckingInterruption()
-            return result
-        }
-    }
-
-    private func openEnvironment(configuration: PackageConfiguration) throws -> EnvironmentStore {
-        if let environment {
-            return environment
-        }
-        let opened = try EnvironmentStore(
-            directory: environmentDirectory,
-            configuration: configuration,
-        )
-        environment = opened
-        return opened
-    }
-
-    private func publishGeneration(
-        _ staged: EnvironmentStore.Generation,
-        in environment: EnvironmentStore,
-        execution: ExecutionControl,
-    ) throws {
-        let previousGeneration = environment.generation
-        let previousState = environment.state
-        var didPublish = false
-        do {
-            let loaded = try interpreter?.loadedModules(
-                files: staged.changedFiles,
-                roots: environment.importRoots(),
-                execution: execution,
-            ) ?? []
-            guard loaded.isEmpty else {
-                throw SessionError.resetRequired(modules: loaded)
-            }
-            try execution.checkInterruption()
-            try environment.publish(staged)
-            didPublish = true
-            try interpreter?.updateImports(
-                paths: resolvedImportPaths,
-                invalidatingModules: [],
-                execution: execution,
-            )
-            try execution.finishCheckingInterruption()
-        } catch {
-            do {
-                try environment.restore(
-                    generation: previousGeneration,
-                    state: previousState,
-                    discarding: staged.id,
-                )
-                if didPublish {
-                    try interpreter?.restoreImports(
-                        paths: resolvedImportPaths,
-                        discarding: [staged.path],
-                    )
-                }
-                try environment.discard(staged.id)
-            } catch {
-                isClosed = true
-                interpreter = nil
-                throw RuntimeFailure("Package publication recovery failed: \(error)")
-            }
-            throw error
-        }
+    var canReplacePackages: Bool {
+        state.isIdle
     }
 
     /// Changes explicitly supplied import roots without changing installed packages.
@@ -254,24 +181,34 @@ public actor Session {
         _ paths: [String],
         invalidatingModules modules: [String] = [],
     ) async throws {
-        try checkReentry()
         try await withOperation { session in
-            try session.changeImportPaths(paths, invalidatingModules: modules)
+            let execution = try Control(timeout: nil)
+            try await execution.run(on: session) { session in
+                try session.changeImportPaths(
+                    paths,
+                    invalidatingModules: modules,
+                    execution: execution,
+                )
+            }
         }
     }
 
     private func changeImportPaths(
         _ paths: [String],
         invalidatingModules modules: [String],
+        execution: Control,
     ) throws {
-        let replacement = try Runtime.paths(directory: directory, imports: paths)
+        let replacement = try paths.map(Runtime.Path.init)
         let previous = importPaths
         importPaths = replacement
         do {
-            try interpreter?.updateImports(
-                paths: resolvedImportPaths,
-                invalidatingModules: modules,
-            )
+            try withOpenInterpreter {
+                try $0.updateImports(
+                    paths: resolvedImportPaths,
+                    invalidatingModules: modules,
+                    execution: execution,
+                )
+            }
         } catch {
             importPaths = previous
             throw error
@@ -279,93 +216,107 @@ public actor Session {
     }
 
     /// Finishes prior operations and releases the interpreter and environment lease.
+    /// From a Python callback, requests closing after outstanding work finishes.
     public nonisolated func close() async {
-        if (try? checkReentry()) == nil {
+        if Self.isInCallback {
             // The callback must return before the current operation can release its reservation.
-            _ = stop()
-            Task.detached { await self.finishClose() }
+            if isInOwnCallback {
+                _ = stop()
+            }
+            Task.detached { await self.close() }
             return
         }
-        await finishClose()
+        await operations.drain { await finishClose() }
     }
 
     private func finishClose() async {
-        await acquireOperation()
-        defer {
-            releaseOperation()
-        }
-        isClosed = true
-        interpreter = nil
-        try? environment?.close()
+        state = .closed(startupOutput)
+        delegate = nil
+        await environment?.close()
         environment = nil
     }
 
-    private nonisolated func checkReentry() throws {
+    private nonisolated static var isInCallback: Bool {
+        !Control.sessionPath.isEmpty || Interpreter.Storage.current()?.sessionOrigin != nil
+    }
+
+    private nonisolated var isInOwnCallback: Bool {
         let identity = ObjectIdentifier(executor)
-        if
-            CallbackOrigin.current.contains(identity) || InterpreterStorage.current()?
-                .sessionOrigin == identity
-        {
-            throw Exception(
-                name: "RuntimeError",
-                message: "Use the current Python context; a callback cannot enqueue an operation on its own session.",
-            )
-        }
+        return Control.sessionPath.contains(identity)
+            || Interpreter.Storage.current()?.sessionOrigin == identity
     }
 
     nonisolated func withExecution<Result: Sendable>(
         timeout: Duration? = nil,
-        standardIO: StandardIO = .init(),
-        onOutput: ExecutionControl.OutputHandler? = nil,
-        _ operation: @Sendable (isolated Session, ExecutionControl) async throws -> Result,
+        redirecting redirects: [Stream: FilePath] = [:],
+        output: Control.OutputHandler? = nil,
+        onInterruption: Control.InterruptionHandler<Result>? = nil,
+        _ operation: @Sendable (isolated Session, Control) async throws -> Result,
     ) async throws -> Result {
-        try checkReentry()
-        let execution = try ExecutionControl(
-            timeout: timeout,
-            onOutput: onOutput,
-            standardIO: standardIO,
-        )
-        return try await execution.withCancellation {
-            try await withOperation(execution) { session in
-                try await operation(session, execution)
+        try await withOperation { session in
+            let execution = try Control(
+                timeout: timeout,
+                output: output,
+                redirecting: redirects,
+            )
+
+            session.activeExecution.withLock { $0 = execution }
+            defer { session.activeExecution.withLock { $0 = nil } }
+
+            return try await execution.withCancellation {
+                try await execution.run(on: session, onInterruption: onInterruption) { session in
+                    try await operation(session, execution)
+                }
             }
         }
     }
 
-    private func withOperation<Result: Sendable>(
-        _ execution: ExecutionControl? = nil,
+    private nonisolated func withOperation<Result: Sendable>(
         _ operation: @Sendable (isolated Session) async throws -> Result,
     ) async throws -> Result {
-        await acquireOperation()
-        defer {
-            releaseOperation()
-            _ = execution?.finish()
+        guard !isInOwnCallback else {
+            throw Session.Error.busy
         }
-        guard !isClosed else {
-            throw SessionError.closed
+        return try await operations.withReservation(Self.isInCallback ? .immediate : .queued) {
+            try await perform(operation)
+        }
+    }
+
+    private func perform<Result: Sendable>(
+        _ operation: @Sendable (isolated Session) async throws -> Result,
+    ) async throws -> Result {
+        if state.isClosed {
+            throw Session.Error.closed
         }
         try Task.checkCancellation()
-        guard let execution else {
-            return try await operation(self)
-        }
-        activeExecution.withLock { $0 = execution }
-        defer { activeExecution.withLock { $0 = nil } }
         return try await operation(self)
     }
+}
 
-    private func acquireOperation() async {
-        if isReserved {
-            await withCheckedContinuation { operationWaiters.append($0) }
-        } else {
-            isReserved = true
+// MARK: Session.State
+
+private extension Session {
+    enum State: ~Copyable {
+        case idle
+        case ready(Interpreter, Output)
+        case closed(Output?)
+
+        var isIdle: Bool {
+            switch self {
+            case .idle:
+                true
+            default:
+                false
+            }
         }
-    }
 
-    private func releaseOperation() {
-        if operationWaiters.isEmpty {
-            isReserved = false
-        } else {
-            operationWaiters.removeFirst().resume()
+        var isClosed: Bool {
+            switch self {
+            case .closed:
+                true
+            default:
+                false
+            }
         }
     }
 }

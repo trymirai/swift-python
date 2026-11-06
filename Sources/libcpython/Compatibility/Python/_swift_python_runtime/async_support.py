@@ -27,6 +27,7 @@ async def await_block(coroutine, control):
 
     try:
         done, _ = await asyncio.wait((task, stop), return_when=asyncio.FIRST_COMPLETED)
+        # Prefer the interruption when both tasks are done.
         if stop in done:
             await stop
             raise KeyboardInterrupt

@@ -37,16 +37,20 @@ private enum CounterLifetime {
 @PythonClass("Counter", module: CounterModule.self)
 private class Counter {
     let context: Python::Context
+    private var secret = 0
 
     @PythonProperty
     var value: Int
-    private var secret = 0
+
     @PythonProperty("readOnlyValue", isReadOnly: true)
     var `default`: Int
+
     @PythonProperty
     var callback: Python::Reference?
+
     @PythonProperty
     var next: Counter?
+
     @PythonProperty
     private var cached: Counter?
 
@@ -56,6 +60,7 @@ private class Counter {
         CounterLifetime.instanceCount.withLock { $0 += 1 }
         try self.$value(value)
         try self.$default(7)
+
         if linkToSelf {
             try self.$next(self)
             _ = try context.import(module: "gc").attribute("collect").call()
@@ -147,6 +152,7 @@ private final class ExistingInstance: Sendable {
 
     @PythonProperty
     var note: String?
+
     @PythonProperty
     let number = 42
 
@@ -166,6 +172,15 @@ func exportedClassInheritanceAndGarbageCollection() async throws {
     let runtime = try await Python::Runtime()
     // The base's module is pulled in by the exported Swift inheritance graph.
     let session = try await runtime.session(modules: [LabeledCounterModule.self])
+
+    try await withSession(session) { session in
+        try await checkInheritedClass(in: session)
+        try await checkRejectedClassOperations(in: session)
+        try await checkClassLifetimes(in: session)
+    }
+}
+
+private func checkInheritedClass(in session: Python::Session) async throws {
     _ = try await session.evaluate("""
     from counter_base import Counter
     from counter_child import Labeled, echo, echoList, ExistingInstance
@@ -195,6 +210,9 @@ func exportedClassInheritanceAndGarbageCollection() async throws {
     gc.collect()
     assert dead_linked() is None
     """)
+}
+
+private func checkRejectedClassOperations(in session: Python::Session) async throws {
     _ = try await session.evaluate("""
     rejected = [
         (AttributeError, lambda: setattr(x, 'readOnlyValue', 8)),
@@ -222,6 +240,9 @@ func exportedClassInheritanceAndGarbageCollection() async throws {
     else:
         raise AssertionError("Expected Python subclasses of Counter to be rejected")
     """)
+}
+
+private func checkClassLifetimes(in session: Python::Session) async throws {
     _ = try await session.evaluate("""
     assert x.callback is None and x.invoke() == -1
     assert x.next is None and x.recall() is None
@@ -239,43 +260,48 @@ func exportedClassInheritanceAndGarbageCollection() async throws {
     else:
         raise AssertionError("Expected a Counter")
     """)
-    do {
-        let managed = try await session.enqueue { context in
-            try Python::Managed(context.get("x", as: Counter.self))
-        }
-        _ = try await session.evaluate("del x; gc.collect(); assert dead() is not None")
-        let value = try await managed { counter in
-            #expect(try counter.next === counter)
-            try counter.$next(nil)
-            #expect(try counter.next == nil)
-            try counter.$next(counter)
-            #expect(throws: CancellationError.self) {
-                try counter.$value { _ in throw CancellationError() }
-            }
-            #expect(try counter.value == 10)
-            return try counter.increment(2)
-        }
-        #expect(value == 12)
-    }
+    try await checkManagedPythonCounter(in: session)
     _ = try await session.evaluate("gc.collect(); assert dead() is None")
     #expect(CounterLifetime.instanceCount.withLock { $0 } == 0)
 
-    do {
-        let managed = try await session.enqueue { context in
-            let counter = try Counter(40, linkToSelf: true, in: context)
-            #expect(try counter.value == 40)
-            #expect(try counter.next === counter)
-            return try Python::Managed(counter)
-        }
-        let value = try await managed { counter in
-            #expect(try counter.next === counter)
-            return try counter.increment(2)
-        }
-        #expect(value == 42)
-    }
+    try await checkManagedSwiftCounter(in: session)
     _ = try await session.evaluate("gc.collect()")
     #expect(CounterLifetime.instanceCount.withLock { $0 } == 0)
-    await session.close()
+}
+
+private func checkManagedPythonCounter(in session: Python::Session) async throws {
+    let managed = try await session.enqueue { context in
+        try Python::Managed(context.get("x", as: Counter.self))
+    }
+    _ = try await session.evaluate("del x; gc.collect(); assert dead() is not None")
+
+    let value = try await managed { counter in
+        #expect(try counter.next === counter)
+        try counter.$next(nil)
+        #expect(try counter.next == nil)
+        try counter.$next(counter)
+
+        #expect(throws: CancellationError.self) {
+            try counter.$value { _ in throw CancellationError() }
+        }
+        #expect(try counter.value == 10)
+        return try counter.increment(2)
+    }
+    #expect(value == 12)
+}
+
+private func checkManagedSwiftCounter(in session: Python::Session) async throws {
+    let managed = try await session.enqueue { context in
+        let counter = try Counter(40, linkToSelf: true, in: context)
+        #expect(try counter.value == 40)
+        #expect(try counter.next === counter)
+        return try Python::Managed(counter)
+    }
+    let value = try await managed { counter in
+        #expect(try counter.next === counter)
+        return try counter.increment(2)
+    }
+    #expect(value == 42)
 }
 
 @Test
@@ -283,17 +309,20 @@ func classIdentityAndSessionGenerations() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [LabeledCounterModule.self])
     let other = try await runtime.session(modules: [LabeledCounterModule.self])
+
     let peer = try await session.enqueue { ExistingInstance(in: $0) }
     try await session.set(peer, forKey: "peer")
     let decoded = try await session.get("peer", as: ExistingInstance.self)
     #expect(decoded === peer)
+
     _ = try await session
         .evaluate("import weakref; dead_peer = weakref.ref(peer); peer.note = 'old'")
     try await session.remove("peer")
     _ = try await session.evaluate("import gc; gc.collect(); assert dead_peer() is None")
     try await session.set(peer, forKey: "peer")
     _ = try await session.evaluate("assert peer.note is None and peer.number == 42")
-    await #expect(throws: (any Swift.Error).self) { try await other.set(peer, forKey: "peer") }
+    await #expect(throws: (any Swift::Error).self) { try await other.set(peer, forKey: "peer") }
+
     let managed = try await session.enqueue { _ in try Python::Managed(peer) }
     _ = try await session.evaluate("assert await peer.asynchronous() == 42")
     try await session.set(42, forKey: "value")
@@ -302,6 +331,7 @@ func classIdentityAndSessionGenerations() async throws {
         return try await peer.context.get("value")
     }
     #expect(value == 42)
+
     try await session.reset()
     await #expect(throws: Python::Exception.self) { try await session.set(peer, forKey: "peer") }
     await #expect(throws: Python::Exception.self) { try await managed { $0.number } }

@@ -25,14 +25,15 @@ extension StandardLibraryBuilder {
             ![".pyc", ".pyo", ".so", ".dll", ".exe", ".pyd", ".DS_Store"]
                 .contains { path.hasSuffix($0) }
         }
-
         var resources = paths.map { Resource(path: $0, source: library.appending($0)) }
+
         let adapters = root.appending("Sources/libcpython/Compatibility/Python")
         for path in try await workspace.paths(adapters, omitting: ["__pycache__"])
             where path.hasSuffix(".py")
         {
             resources.append(Resource(path: path, source: adapters.appending(path)))
         }
+
         let packages = root.appending("Submodules/python-packages")
         for path in try await workspace.paths(packages, omitting: []) where path.hasSuffix(".whl") {
             resources.append(Resource(

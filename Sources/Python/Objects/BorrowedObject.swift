@@ -27,8 +27,7 @@ public struct BorrowedObject: ~Escapable {
 
     @_lifetime(copy self)
     public borrowing func owned() throws -> Object {
-        _ = try InterpreterStorage.requireCurrent()
-        unsafe Py_IncRef(pointer)
-        return unsafe try Object.take(pointer, inheriting: self)
+        _ = try Interpreter.Storage.requireCurrent()
+        return unsafe Object.retaining(pointer, inheriting: self)
     }
 }

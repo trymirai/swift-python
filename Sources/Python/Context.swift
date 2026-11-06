@@ -10,16 +10,16 @@ internal import libcpython
 /// Raw Python objects are available while that interpreter is attached.
 @safe
 public struct Context: Sendable {
-    let references: ReferenceStore
+    let references: Reference.Store
     private weak var session: Session?
 
-    init(storage: InterpreterStorage) {
+    init(storage: Interpreter.Storage) {
         references = storage.references
         session = storage.session
     }
 
     init() throws {
-        self.init(storage: try InterpreterStorage.requireCurrent())
+        self.init(storage: try Interpreter.Storage.requireCurrent())
     }
 
     public borrowing func get<T: Decodable & ~Copyable>(
@@ -73,7 +73,7 @@ public struct Context: Sendable {
     static func currentNamespace<Owner: ~Copyable & ~Escapable>(
         in owner: borrowing Owner,
     ) throws -> Object {
-        let module = try Object.import(module: "_swift_python_runtime.execution", in: owner)
+        let module = try Interpreter.executionModule(in: owner)
         return try module.attribute("current_namespace").call()
     }
 
@@ -91,14 +91,14 @@ public struct Context: Sendable {
 
     public borrowing func checkCancellation() throws {
         try Task.checkCancellation()
-        if let storage = InterpreterStorage.current(), storage.references === references {
+        if let storage = Interpreter.Storage.current(), storage.references === references {
             try storage.execution?.checkInterruption()
         }
     }
 
     @discardableResult
-    func checkAccess() throws -> InterpreterStorage {
-        let current = try InterpreterStorage.requireCurrent()
+    func checkAccess() throws -> Interpreter.Storage {
+        let current = try Interpreter.Storage.requireCurrent()
         guard current.references === references else {
             throw Reference.wrongInterpreter()
         }
@@ -107,7 +107,7 @@ public struct Context: Sendable {
 
     func requireSession() throws -> Session {
         guard let session else {
-            throw SessionError.closed
+            throw Session.Error.closed
         }
         return session
     }
@@ -118,20 +118,20 @@ public extension Context {
         _ name: String,
         as type: T.Type = T.self,
     ) async throws -> T {
-        try await requireSession().enqueue { _ in try get(name, as: type) }
+        try await requireSession().enqueue(in: references) { try $0.get(name, as: type) }
     }
 
     func set<T: Encodable & Sendable & ~Copyable>(
         _ value: consuming T,
         forKey name: String,
     ) async throws {
-        let transfer = ValueTransfer(consume value)
-        try await requireSession().enqueue { _ in
-            try set(transfer.take(), forKey: name)
+        let transfer = Session.Transfer(consume value)
+        try await requireSession().enqueue(in: references) {
+            try $0.set(transfer.take(), forKey: name)
         }
     }
 
     func remove(_ name: String) async throws {
-        try await requireSession().enqueue { _ in try remove(name) }
+        try await requireSession().enqueue(in: references) { try $0.remove(name) }
     }
 }

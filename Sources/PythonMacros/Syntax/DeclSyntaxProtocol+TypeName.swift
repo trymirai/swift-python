@@ -4,20 +4,14 @@
 
 import SwiftSyntax
 
-extension DeclSyntaxProtocol {
-    var typeName: String? {
-        if let value = self.as(EnumDeclSyntax.self) {
-            return value.name.trimmedDescription
+extension SyntaxProtocol {
+    var exportTypeDeclaration: (any NamedDeclSyntax & WithGenericParametersSyntax)? {
+        switch kind {
+        case .enumDecl, .structDecl, .classDecl, .actorDecl:
+            let declaration = Syntax(self).asProtocol(SyntaxProtocol.self)
+            return declaration as? any NamedDeclSyntax & WithGenericParametersSyntax
+        default:
+            return nil
         }
-        if let value = self.as(StructDeclSyntax.self) {
-            return value.name.trimmedDescription
-        }
-        if let value = self.as(ClassDeclSyntax.self) {
-            return value.name.trimmedDescription
-        }
-        if let value = self.as(ActorDeclSyntax.self) {
-            return value.name.trimmedDescription
-        }
-        return nil
     }
 }
