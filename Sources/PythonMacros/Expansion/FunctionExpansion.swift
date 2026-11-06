@@ -8,20 +8,12 @@ import SwiftSyntaxMacros
 
 struct FunctionExpansion {
     let declaration: FunctionDeclSyntax
-
-    enum Kind {
-        case module
-        case instanceMethod
-        case initializer
-    }
+    let owner: ExportScope.Owner
 
     func source(
         attribute: AttributeSyntax,
-        receiver: String,
-        owner: ExportScope.Owner? = nil,
-        kind: Kind = .module,
+        isInstanceMethod: Bool = false,
     ) throws -> String {
-        let isInstanceMethod = kind == .instanceMethod
         guard declaration.genericParameterClause == nil else {
             throw MacroExpansionErrorMessage(
                 "Python functions require concrete Swift parameter types.",
@@ -36,28 +28,20 @@ struct FunctionExpansion {
             throw MacroExpansionErrorMessage("Exported methods must keep their receiver available.")
         }
 
-        let name = attribute
-            .argument()
-            .flatMap { $0 == "nil" ? nil : $0 } ?? String(reflecting: declaration.name.text)
-
+        let name = attribute.argument() ?? String(reflecting: declaration.name.text)
         let documentation = attribute.argument(named: "documentation") ?? "nil"
 
         let isStatic = declaration.modifiers.contains { ["static", "class"].contains($0.name.text) }
         let isIsolated = !declaration.modifiers.contains { $0.name.text == "nonisolated" }
-            && ((owner?.isActor == true && !isStatic) || owner?.isMainActorIsolated == true)
+            && ((owner.isActor && !isStatic) || owner.isMainActorIsolated)
 
-        let isAsynchronous = declaration.signature.effectSpecifiers?.asyncSpecifier != nil
+        let signature = declaration.signature
+        let isAsynchronous = signature.effectSpecifiers?.asyncSpecifier != nil
             || isIsolated
             || declaration.attributes.attribute(named: "MainActor") != nil
 
-        if isInstanceMethod && isAsynchronous {
-            throw MacroExpansionErrorMessage(
-                "Exported instance methods must be synchronous; use an async module function for Sendable values.",
-            )
-        }
-
-        let isThrowing = declaration.signature.effectSpecifiers?.throwsClause != nil
-        let parameterExpansions = try declaration.signature
+        let isThrowing = signature.effectSpecifiers?.throwsClause != nil
+        let parameters = try signature
             .parameterClause
             .parameters
             .enumerated()
@@ -65,24 +49,48 @@ struct FunctionExpansion {
                 try ParameterExpansion(
                     parameter,
                     index: index,
-                    owner: owner?.name,
+                    owner: owner.name,
                     hasReceiver: isInstanceMethod,
                 )
             }
 
-        let parameters = (isInstanceMethod ? [".init(\"self\")"] : [])
-            + parameterExpansions.map(\.metadataSource)
-
-        let arguments = parameterExpansions.map(\.argumentSource)
-        let returnType = declaration.signature
+        let metadata = (isInstanceMethod ? [".receiver"] : []) + parameters.map(\.metadataSource)
+        let arguments = parameters.map(\.argumentSource).joined(separator: ", ")
+        let returnType = signature
             .returnClause
-            .map { $0.type.concreteSpelling(owner: owner?.name) } ?? "Swift::Void"
+            .map { $0.type.concreteSpelling(owner: owner.name) } ?? "Swift::Void"
 
         let prefix = (isThrowing ? "try " : "") + (isAsynchronous ? "await " : "")
-        let invocation = "\(prefix)\(receiver)\(declaration.name.trimmedDescription)(\(arguments.joined(separator: ", ")))"
+        let receiver = isInstanceMethod ? "__self" : owner.name
+        let invocation = "\(prefix)\(receiver).\(declaration.name.trimmedDescription)(\(arguments))"
+        let receiverBinding = isInstanceMethod
+            ? "let __self = try arguments.receiver(as: \(owner.name).self)"
+            : ""
+        let body = callBody(
+            invoking: invocation,
+            returning: returnType,
+            receiverBinding: receiverBinding,
+            parameters: parameters,
+            isAsynchronous: isAsynchronous,
+        )
+        return """
+        Python::_ExportFunction(
+            \(name), documentation: \(documentation),
+            parameters: [\(metadata.joined(separator: ", "))],
+            returning: (\(returnType)).self, \(body))
+        """
+    }
+
+    private func callBody(
+        invoking invocation: String,
+        returning returnType: String,
+        receiverBinding: String,
+        parameters: [ParameterExpansion],
+        isAsynchronous: Bool,
+    ) -> String {
         var expression: String = if isAsynchronous {
             """
-            return Python::Module.Function.makeOperation {
+            return Python::_ExportFunction.makeOperation {
                 let result: \(returnType) = \(invocation)
                 return result
             }
@@ -91,43 +99,30 @@ struct FunctionExpansion {
             "return \(invocation)"
         }
 
-        for parameter in parameterExpansions.reversed() {
+        for parameter in parameters.reversed() {
             expression = parameter.wrapping(expression, isAsynchronous: isAsynchronous)
         }
 
-        let body: String
         if isAsynchronous {
-            body = """
+            return """
             start: { arguments, _ in
+                \(receiverBinding)
                 \(expression)
-            }
-            """
-        } else {
-            let receiverLine = if isInstanceMethod {
-                "let __self = try arguments.receiver(as: \(owner?.name ?? "Self").self)"
-            } else {
-                ""
-            }
-
-            let preparationSource = parameterExpansions
-                .map(\.preparationSource)
-                .joined(separator: "\n")
-
-            body = """
-            call: { arguments, context, encoder in
-                let result: \(returnType) = try { () throws -> \(returnType) in
-                    \(receiverLine)
-                    \(preparationSource)
-                    \(expression)
-                }()
-                try encoder.\(kind == .initializer ? "_encodeNewInstance" : "encode")(result)
             }
             """
         }
 
+        // Validate every argument before any borrowed buffer is opened.
+        let preparation = parameters.map(\.preparationSource).joined(separator: "\n")
         return """
-        Python::Module.Function(\(name), documentation: \(documentation), parameters: [\(parameters.joined(separator: ", "))],
-            returning: (\(returnType)).self, \(body))
+        call: { arguments, _, encoder in
+            let result: \(returnType) = try { () throws -> \(returnType) in
+                \(receiverBinding)
+                \(preparation)
+                \(expression)
+            }()
+            try encoder.encode(result)
+        }
         """
     }
 }

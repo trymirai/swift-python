@@ -52,15 +52,29 @@ public struct Runtime: Sendable {
         environmentDirectory: String? = nil,
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
-        moduleInstances: [any ModuleHost] = [],
-        moduleDefinitions: [Module] = [],
         startupIO: StandardIO = .init(),
     ) async throws -> Session {
-        let definitions = try ExportCatalog.resolve(
-            modules,
-            instances: moduleInstances,
-            definitions: moduleDefinitions,
+        try await session(
+            startup,
+            directory: directory,
+            environmentDirectory: environmentDirectory,
+            importPaths: importPaths,
+            modules: modules,
+            moduleDefinitions: [],
+            startupIO: startupIO,
         )
+    }
+
+    package func session(
+        _ startup: Session.Startup = .source(""),
+        directory: String? = nil,
+        environmentDirectory: String? = nil,
+        importPaths: [String] = [],
+        modules: [any ModuleHost.Type] = [],
+        moduleDefinitions: [Module],
+        startupIO: StandardIO = .init(),
+    ) async throws -> Session {
+        let definitions = try ExportCatalog.resolve(modules, definitions: moduleDefinitions)
         let session = try Session(
             directory: directory,
             importPaths: importPaths,

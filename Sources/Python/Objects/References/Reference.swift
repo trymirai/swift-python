@@ -27,14 +27,22 @@ public struct Reference: Sendable {
     }
 
     @_lifetime(borrow context)
-    public func resolve(in context: borrowing Context) throws -> Object {
-        try context.checkAccess()
-        guard context.storage.references === storage.references else {
+    func resolve(in context: borrowing Context) throws -> Object {
+        let current = try context.checkAccess()
+        let pointer = unsafe try retainedPointer(in: current.references)
+        return unsafe Object(owned: pointer, in: context)
+    }
+
+    @unsafe
+    private func retainedPointer(in references: ReferenceStore) throws
+        -> UnsafeMutablePointer<PyObject>
+    {
+        guard references === storage.references else {
             throw Self.wrongInterpreter()
         }
         let pointer = unsafe try storage.references.pointer(storage.token)
         unsafe Py_IncRef(pointer)
-        return unsafe Object(owned: pointer, in: context)
+        return unsafe pointer
     }
 
     static func wrongInterpreter() -> Exception {
@@ -50,12 +58,7 @@ public struct Reference: Sendable {
 extension Reference: Encodable {
     public func encode(to encoder: inout Encoder) throws {
         let state = try InterpreterStorage.requireCurrent()
-        guard state.references === storage.references else {
-            throw Self.wrongInterpreter()
-        }
-        let pointer = unsafe try storage.references.pointer(storage.token)
-        unsafe Py_IncRef(pointer)
-        unsafe try encoder.replace(pointer)
+        unsafe try encoder.replace(retainedPointer(in: state.references))
     }
 }
 

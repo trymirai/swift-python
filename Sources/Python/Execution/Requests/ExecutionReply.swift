@@ -13,7 +13,10 @@ struct ExecutionReply: Sendable {
 
 extension ExecutionReply: Decodable {
     init(from decoder: borrowing Decoder) throws {
-        output = Output(stdout: try decoder[0].get(), stderr: try decoder[1].get())
-        traceback = try decoder[2].get()
+        output = Output(
+            stdout: try decoder.decode(String.self, at: 0),
+            stderr: try decoder.decode(String.self, at: 1),
+        )
+        traceback = try decoder.decode(String.self, at: 2)
     }
 }

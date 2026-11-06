@@ -53,10 +53,9 @@ struct ThreadState: ~Copyable {
         unsafe PyEval_RestoreThread(pointer)
         storage.releasePendingReferences()
         defer {
-            storage.releasePendingReferences()
             _ = unsafe PyEval_SaveThread()
         }
-        return try body(Attachment())
+        return try storage.withConstructionScope { try body(Attachment()) }
     }
 
     // CPython enters Swift callbacks with the originating state already attached.
@@ -66,10 +65,10 @@ struct ThreadState: ~Copyable {
         _ body: (borrowing Attachment) throws -> Result,
     ) rethrows -> Result {
         precondition(unsafe PyThreadState_GetUnchecked() != nil)
-        defer {
-            InterpreterStorage.current()?.releasePendingReferences()
+        guard let storage = InterpreterStorage.current() else {
+            return try body(Attachment())
         }
-        return try body(Attachment())
+        return try storage.withConstructionScope { try body(Attachment()) }
     }
 
     private static func message(_ status: borrowing PyStatus, default fallback: String) -> String {

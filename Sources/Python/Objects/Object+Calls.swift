@@ -4,6 +4,21 @@
 
 internal import libcpython
 
+public extension Object {
+    @_lifetime(copy self)
+    borrowing func call() throws -> Object {
+        _ = try InterpreterStorage.requireCurrent()
+        return unsafe try Self.take(PyObject_CallNoArgs(pointer), inheriting: self)
+    }
+
+    @_lifetime(copy self)
+    borrowing func call<T: Encodable>(_ argument: T) throws -> Object {
+        _ = try InterpreterStorage.requireCurrent()
+        let object = try Object(encoding: argument, in: self)
+        return try call(object)
+    }
+}
+
 extension Object {
     @_lifetime(copy self)
     borrowing func item(at index: Int) throws -> Object {
@@ -14,17 +29,6 @@ extension Object {
         return unsafe try Self.take(item, inheriting: self)
     }
 
-    private static func interrupt(_ context: UnsafeMutableRawPointer?) -> Bool {
-        guard let context = unsafe context else {
-            return false
-        }
-        return unsafe Unmanaged<ExecutionControl>.fromOpaque(context)
-            .takeUnretainedValue()
-            .deliverInterruption()
-    }
-}
-
-extension Object {
     @_lifetime(copy self)
     borrowing func call(_ argument: borrowing Object) throws -> Object {
         unsafe try Self.take(PyObject_CallOneArg(pointer, argument.pointer), inheriting: self)
@@ -83,5 +87,14 @@ extension Object {
             context,
             { context in unsafe Object.interrupt(context) },
         ), in: self)
+    }
+
+    private static func interrupt(_ context: UnsafeMutableRawPointer?) -> Bool {
+        guard let context = unsafe context else {
+            return false
+        }
+        return unsafe Unmanaged<ExecutionControl>.fromOpaque(context)
+            .takeUnretainedValue()
+            .deliverInterruption()
     }
 }

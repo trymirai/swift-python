@@ -26,7 +26,7 @@ extension PythonModuleMacro: MemberMacro {
             || declaration.is(EnumDeclSyntax.self) || declaration.is(ActorDeclSyntax.self)
         else {
             throw MacroExpansionErrorMessage(
-                "PythonModule requires an enum, struct, actor or Sendable class.",
+                "PythonModule requires an enum, struct, actor or class.",
             )
         }
 
@@ -44,42 +44,6 @@ extension PythonModuleMacro: MemberMacro {
         }
 
         let documentation = attribute.argument(named: "documentation") ?? "nil"
-        let owner = ExportScope(context).qualifiedName(of: declaration)
-
-        let isNamespace = declaration.is(EnumDeclSyntax.self)
-        let isMainActorIsolated = declaration.attributes.attribute(named: "MainActor") != nil
-
-        let initializers = declaration.memberBlock
-            .members
-            .compactMap { $0.decl.as(InitializerDeclSyntax.self) }
-
-        let hasUninitializedProperties = declaration.memberBlock
-            .members
-            .compactMap { $0.decl.as(VariableDeclSyntax.self) }
-            .filter { !$0.modifiers.contains { ["static", "class"].contains($0.name.text) } }
-            .contains { $0.bindings.contains { $0.initializer == nil && $0.accessorBlock == nil } }
-
-        let defaultInitializer = initializers.first {
-            $0.optionalMark == nil
-                && $0.signature.effectSpecifiers?.asyncSpecifier == nil
-                && $0.signature.parameterClause.parameters.allSatisfy { $0.defaultValue != nil }
-        }
-
-        let hasDefaultInitializer = initializers.isEmpty
-            ? !hasUninitializedProperties
-            : defaultInitializer != nil
-
-        let initializerPrefix = defaultInitializer?.signature.effectSpecifiers?.throwsClause == nil
-            ? ""
-            : "try "
-
-        let defaultInstance: String = if isNamespace {
-            "return nil"
-        } else if hasDefaultInitializer && !isMainActorIsolated {
-            "return \(initializerPrefix)\(owner)()"
-        } else {
-            "throw Python::Exception(name: \"TypeError\", message: \"This module requires moduleInstances with an explicit configuration.\")"
-        }
 
         return [
             DeclSyntax(
@@ -87,9 +51,6 @@ extension PythonModuleMacro: MemberMacro {
             ),
             DeclSyntax(
                 stringLiteral: "@_documentation(visibility: internal) public nonisolated static var _pythonModuleDocumentation: Swift::String? { \(documentation) }",
-            ),
-            DeclSyntax(
-                stringLiteral: "@_documentation(visibility: internal) public nonisolated static func _pythonDefaultInstance() throws -> (any Python::ModuleHost)? { \(defaultInstance) }",
             ),
         ]
     }
@@ -108,9 +69,6 @@ extension PythonModuleMacro: ExtensionMacro {
         guard !protocols.isEmpty else {
             return []
         }
-        let result = DeclSyntax(
-            stringLiteral: "extension \(type.trimmedDescription): Python::ModuleHost {}",
-        )
-        return result.as(ExtensionDeclSyntax.self).map { [$0] } ?? []
+        return [try ExtensionDeclSyntax("extension \(type): Python::ModuleHost {}")]
     }
 }

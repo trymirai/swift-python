@@ -35,8 +35,10 @@ final class InterpreterStorage {
     private var isClosed: Bool = false
 
     var sessionOrigin: ObjectIdentifier?
+    weak var session: Session?
     var execution: ExecutionControl?
 
+    var namespace: Reference?
     var defaultArgumentMarker: UInt = 0
     var classRegistry: ClassRegistry?
     var arrayType: Reference?
@@ -46,6 +48,7 @@ final class InterpreterStorage {
 
     private var pendingBufferReleases: [UInt] = []
     private var pendingObjectReleases: [UInt] = []
+    private var constructedWrappers: [Reference] = []
 
     init(key: UInt, schedule: @escaping @Sendable () -> Void) {
         self.key = key
@@ -87,6 +90,22 @@ final class InterpreterStorage {
         }
     }
 
+    func withConstructionScope<Result: ~Copyable>(
+        _ body: () throws -> Result,
+    ) rethrows -> Result {
+        // A nested Swift callback releases only the wrappers it created.
+        let boundary = constructedWrappers.count
+        defer {
+            constructedWrappers.removeSubrange(boundary...)
+            releasePendingReferences()
+        }
+        return try body()
+    }
+
+    func retainConstructedWrapper(_ wrapper: borrowing Object) throws {
+        constructedWrappers.append(unsafe try references.retain(wrapper.pointer))
+    }
+
     func releasePendingReferences() {
         guard borrowedBuffers.isEmpty else {
             return
@@ -115,6 +134,7 @@ final class InterpreterStorage {
     func close() {
         isClosed = true
         classRegistry = nil
+        namespace = nil
         arrayType = nil
         references.close()
         releasePendingReferences()

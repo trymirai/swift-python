@@ -17,12 +17,14 @@ struct Interpreter: ~Copyable {
         packages: [PackageSource] = [],
         scheduleRelease: @escaping @Sendable () -> Void = {},
         sessionOrigin: ObjectIdentifier? = nil,
+        session: Session? = nil,
     ) throws {
         let state = try ThreadState(scheduleRelease: scheduleRelease)
         let storage = state.storage
 
         let exportDispatcher = ExportDispatcher(modules)
         storage.sessionOrigin = sessionOrigin
+        storage.session = session
 
         let packagePaths = try state.withAttached { attachment in
             try Object.installImporter(in: attachment)
@@ -97,24 +99,31 @@ struct Interpreter: ~Copyable {
         _ startup: Session.Startup,
         execution: ExecutionControl,
     ) throws -> Output {
-        try execute(
+        let output = try execute(
             "initialize",
             source: StartupRequest(value: startup),
             filename: nil,
             execution: execution,
         )
+        let storage = state.storage
+        try state.withAttached { attachment in
+            let namespace = try Context.currentNamespace(in: attachment)
+            storage.namespace = unsafe try storage.references.retain(namespace.pointer)
+        }
+        return output
     }
 
     borrowing func withContext<R: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Context) throws -> R,
         execution: ExecutionControl,
     ) throws -> R {
-        try state.withAttached { attachment in
-            state.storage.execution = execution
+        let storage = state.storage
+        return try state.withAttached { _ in
+            storage.execution = execution
             defer {
-                state.storage.execution = nil
+                storage.execution = nil
             }
-            let context = try Context(in: attachment, execution: execution)
+            let context = Context(storage: storage)
             return try body(context)
         }
     }

@@ -51,6 +51,18 @@ public struct Object: ~Copyable, ~Escapable {
         return unsafe try Self.take(PyObject_GetAttr(pointer, name.pointer), inheriting: self)
     }
 
+    public borrowing func setAttribute<T: Encodable & ~Copyable>(
+        _ name: String,
+        to value: borrowing T,
+    ) throws {
+        _ = try InterpreterStorage.requireCurrent()
+        let name = try Object(encoding: name, in: self)
+        let value = try Object(encoding: value, in: self)
+        guard unsafe PyObject_SetAttr(pointer, name.pointer, value.pointer) == 0 else {
+            throw Self.failure("Unable to set a Python attribute.")
+        }
+    }
+
     borrowing func string() throws -> String {
         String(copying: try utf8())
     }
@@ -128,15 +140,15 @@ extension Object {
         as type: T.Type = T.self,
     ) throws -> T {
         let decoder = unsafe Decoder(pointer, in: self)
-        return try decoder.get(as: type)
+        return try decoder.decode(type)
     }
 }
 
 // MARK: Object + Reference
 
 public extension Object {
-    borrowing func reference(in context: borrowing Context) throws -> Reference {
+    borrowing func retain(in context: borrowing Context) throws -> Reference {
         try context.checkAccess()
-        return unsafe try context.storage.references.retain(pointer)
+        return unsafe try context.references.retain(pointer)
     }
 }

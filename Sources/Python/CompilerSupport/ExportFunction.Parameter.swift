@@ -2,7 +2,8 @@
 //  Created by Anton Spivak
 //
 
-public extension Module.Function {
+public extension _ExportFunction {
+    @_documentation(visibility: internal)
     struct Parameter: Sendable {
         let name: String
         let annotation: String?
@@ -12,7 +13,11 @@ public extension Module.Function {
 
         let isInjected: Bool
 
-        public init(
+        public static var receiver: Self {
+            Self("self")
+        }
+
+        package init(
             _ name: String,
             annotation: String? = nil,
             default defaultValue: Value? = nil,

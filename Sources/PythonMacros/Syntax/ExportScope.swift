@@ -72,7 +72,8 @@ struct ExportScope {
 
     func validate() throws {
         for scope in lexicalContext {
-            if scope.is(FunctionDeclSyntax.self)
+            if
+                scope.is(FunctionDeclSyntax.self)
                 || scope.is(InitializerDeclSyntax.self)
                 || scope.is(ClosureExprSyntax.self)
             {
@@ -80,7 +81,8 @@ struct ExportScope {
                     "Python exports require file scope or a concrete nominal type, not a local declaration.",
                 )
             }
-            if scope.as(StructDeclSyntax.self)?.genericParameterClause != nil
+            if
+                scope.as(StructDeclSyntax.self)?.genericParameterClause != nil
                 || scope.as(ClassDeclSyntax.self)?.genericParameterClause != nil
                 || scope.as(EnumDeclSyntax.self)?.genericParameterClause != nil
                 || scope.as(ActorDeclSyntax.self)?.genericParameterClause != nil

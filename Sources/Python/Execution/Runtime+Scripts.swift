@@ -19,17 +19,11 @@ public extension Runtime {
         environmentDirectory: String? = nil,
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
-        moduleInstances: [any ModuleHost] = [],
-        moduleDefinitions: [Module] = [],
         timeout: Duration? = nil,
         standardIO: StandardIO = .init(),
         onOutput: (@Sendable (Output.Stream, String) -> Void)? = nil,
     ) async throws -> Output {
-        let definitions = try ExportCatalog.resolve(
-            modules,
-            instances: moduleInstances,
-            definitions: moduleDefinitions,
-        )
+        let definitions = try ExportCatalog.resolve(modules)
         _ = try Self.paths(directory: nil, imports: [path])
         try ExecutionControl.validateTimeout(timeout)
         let file = FilePath(path)

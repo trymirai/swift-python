@@ -23,7 +23,6 @@ struct ExportCatalog {
         }
 
         var seen = Set<ObjectIdentifier>()
-
         for provider in providers {
             guard seen.insert(ObjectIdentifier(provider)).inserted else {
                 continue
@@ -34,29 +33,16 @@ struct ExportCatalog {
 
     static func resolve(
         _ moduleTypes: [any ModuleHost.Type],
-        instances: [any ModuleHost] = [],
         definitions: [Module] = [],
     ) throws -> [Module] {
-        guard !moduleTypes.isEmpty || !instances.isEmpty else {
+        guard !moduleTypes.isEmpty else {
             return definitions
         }
         let catalog = Self()
         var selectedModules = [ObjectIdentifier: any ModuleHost.Type]()
-        var configuredInstances = [ObjectIdentifier: any ModuleHost]()
 
         for type in moduleTypes {
             selectedModules[ObjectIdentifier(type)] = type
-        }
-
-        for instance in instances {
-            let type = Swift.type(of: instance)
-            let key = ObjectIdentifier(type)
-            guard configuredInstances[key] == nil
-            else {
-                throw Self.failure("A module instance was provided twice.")
-            }
-            selectedModules[key] = type
-            configuredInstances[key] = instance
         }
 
         var classes = try catalog.makeClassDefinitions()
@@ -76,13 +62,9 @@ struct ExportCatalog {
                 throw Self.failure("Python module '\(name)' was declared twice.")
             }
 
-            let instance = try configuredInstances[ObjectIdentifier(type)]
-                ?? type._pythonDefaultInstance()
-
             result.append(try catalog.makeModule(
                 for: type,
                 name: name,
-                instance: instance,
                 classes: classes,
             ))
         }
@@ -102,11 +84,11 @@ struct ExportCatalog {
             }
         }
 
-        for key in Array(classes.keys) {
-            var superclass: AnyClass? = _getSuperclass(classes[key]!.type)
+        for (key, definition) in classes {
+            var superclass: AnyClass? = _getSuperclass(definition.type)
             while let candidate = superclass {
-                if let definition = classes[ObjectIdentifier(candidate)] {
-                    classes[key]!.superclassKey = definition.key
+                if let base = classes[ObjectIdentifier(candidate)] {
+                    classes[key]?.superclass = base.type
                     break
                 }
                 superclass = _getSuperclass(candidate)
@@ -119,20 +101,24 @@ struct ExportCatalog {
         in selectedModules: inout [ObjectIdentifier: any ModuleHost.Type],
         classes: [ObjectIdentifier: Module.Class],
     ) {
-        // A selected subclass brings in its exported Swift bases and their modules.
-        var didIncludeModule = true
-        while didIncludeModule {
-            didIncludeModule = false
-            for definition in classes.values
-                where selectedModules[ObjectIdentifier(definition.module)] != nil
-            {
-                if
-                    let superclassKey = definition.superclassKey,
-                    let parent = classes.values.first(where: { $0.key == superclassKey }),
-                    selectedModules[ObjectIdentifier(parent.module)] == nil
-                {
-                    selectedModules[ObjectIdentifier(parent.module)] = parent.module
-                    didIncludeModule = true
+        let classesByModule = Dictionary(grouping: classes.values) {
+            ObjectIdentifier($0.module)
+        }
+
+        var pending = Array(selectedModules.keys)
+        while let module = pending.popLast() {
+            // Including a module also includes the bases of its other classes.
+            for definition in classesByModule[module, default: []] {
+                guard
+                    let superclass = definition.superclass,
+                    let parent = classes[ObjectIdentifier(superclass)]
+                else {
+                    continue
+                }
+                let parentModule = ObjectIdentifier(parent.module)
+                if selectedModules[parentModule] == nil {
+                    selectedModules[parentModule] = parent.module
+                    pending.append(parentModule)
                 }
             }
         }
@@ -142,16 +128,20 @@ struct ExportCatalog {
         for export in exports {
             switch export {
             case let .method(owner, function):
+                guard !function.parameters.contains(where: \.isInjected) else {
+                    throw Self.failure("An exported method uses the class's stored Context.")
+                }
                 classes[owner]?.methods.append(function)
             case let .initializer(owner, function):
+                guard function.parameters.count(where: \.isInjected) == 1 else {
+                    throw Self.failure("A PythonInit requires one Context parameter.")
+                }
                 if classes[owner]?.initializer != nil {
                     throw Self.failure("A class has more than one PythonInit.")
                 }
                 classes[owner]?.initializer = function
             case let .property(owner, property):
                 classes[owner]?.properties.append(property)
-            case let .field(owner, field):
-                classes[owner]?.fields.append(field)
             default:
                 break
             }
@@ -161,15 +151,17 @@ struct ExportCatalog {
     private func makeModule(
         for type: any ModuleHost.Type,
         name: String,
-        instance: (any ModuleHost)?,
         classes: [ObjectIdentifier: Module.Class],
     ) throws -> Module {
         let key = ObjectIdentifier(type)
         var functions = [Module.Function]()
-        for case let .function(owner, makeFunction) in exports
+        for case let .function(owner, function) in exports
             where ObjectIdentifier(owner) == key
         {
-            functions.append(try makeFunction(instance))
+            guard !function.parameters.contains(where: \.isInjected) else {
+                throw Self.failure("A module function cannot take a Python Context.")
+            }
+            functions.append(function)
         }
 
         functions.sort { $0.name < $1.name }
@@ -204,9 +196,9 @@ struct ExportCatalog {
 extension ExportCatalog: _ExportSink {
     mutating func addFunction(
         module: any ModuleHost.Type,
-        makeFunction: @escaping @Sendable ((any ModuleHost)?) throws -> Module.Function,
+        function: _ExportFunction,
     ) {
-        exports.append(.function(module: module, makeFunction: makeFunction))
+        exports.append(.function(module: module, function: function))
     }
 
     mutating func addClass<Instance: _PythonClass>(
@@ -273,19 +265,35 @@ extension ExportCatalog: _ExportSink {
         ))
     }
 
-    mutating func addReference<Instance: _PythonClass, Value>(
+    mutating func addStoredProperty<
+        Instance: _PythonClass,
+        Value: Decodable & SendableMetatype & ~Copyable,
+    >(
         _ type: Instance.Type,
         name: String,
-        field: @escaping @Sendable (Instance) -> Field<Value>,
+        key: String,
+        documentation: String?,
+        as valueType: Value.Type,
+        isReadOnly: Bool,
     ) {
-        exports.append(.field(ObjectIdentifier(type), { instance in
-            guard
-                let instance = instance as? Instance,
-                let identity = instance._pythonIdentity as? InstanceIdentity
-            else {
-                throw Self.failure("Invalid Python field owner.")
+        let setter: (@Sendable (Instance, borrowing Decoder, borrowing Context) throws -> Void)? =
+            if isReadOnly {
+                nil
+            } else {
+                { instance, decoder, _ in
+                    _ = try decoder.decode(valueType)
+                    let object = try decoder.object()
+                    try instance.storePythonProperty(object, forKey: key)
+                }
             }
-            try field(instance).bind(to: identity, key: String(reflecting: type) + "." + name)
-        }))
+        addProperty(
+            type,
+            name: name,
+            documentation: documentation,
+            getter: { instance, _, encoder in
+                try encoder.encode(instance.pythonProperty(key))
+            },
+            setter: setter,
+        )
     }
 }

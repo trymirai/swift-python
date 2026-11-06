@@ -8,8 +8,8 @@ struct PreparedDistribution: Decodable, Sendable {
     let files: [String]
 
     init(from decoder: borrowing Decoder) throws {
-        record = try decoder["record"].get()
-        directory = try decoder["directory"].get()
-        files = try decoder["files"].get()
+        record = try decoder.decode(InstalledPackage.self, forKey: "record")
+        directory = try decoder.decode(String.self, forKey: "directory")
+        files = try decoder.decode([String].self, forKey: "files")
     }
 }

@@ -20,7 +20,7 @@ extension PythonMacrosPlugin: CompilerPlugin {
             PythonClassMacro.self,
             PythonInitMacro.self,
             PythonPropertyMacro.self,
-            PythonReferenceMacro.self,
+            PythonStoredPropertyMacro.self,
         ]
     }
 }

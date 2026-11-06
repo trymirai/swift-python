@@ -36,6 +36,15 @@ public extension Session {
         }
         return result.take()
     }
+
+    /// Runs asynchronous Swift work with a context bound to the current generation.
+    /// Each asynchronous context operation takes its own turn in the session queue.
+    nonisolated func enqueue<R: Sendable & ~Copyable>(
+        _ body: @Sendable (borrowing Context) async throws -> R,
+    ) async throws -> R {
+        let context = try await enqueue { $0 }
+        return try await body(context)
+    }
 }
 
 extension Session {

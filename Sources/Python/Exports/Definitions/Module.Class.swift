@@ -10,14 +10,12 @@ extension Module {
         let name: String
         let documentation: String?
 
-        var superclassKey: String?
+        var superclass: (any _PythonClass.Type)?
 
         var initializer: Module.Function?
 
         var methods: [Module.Function] = []
         var properties: [Property] = []
-
-        var fields: [@Sendable (any _PythonClass) throws -> Void] = []
 
         var key: String {
             String(reflecting: type)

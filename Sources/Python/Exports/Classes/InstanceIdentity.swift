@@ -8,7 +8,6 @@ final class InstanceIdentity: Sendable {
     private struct State {
         var ownerID: ObjectIdentifier?
 
-        var references: ReferenceStore?
         var wrapper: WeakReference?
 
         var isConstructingWrapper: Bool = false
@@ -17,21 +16,16 @@ final class InstanceIdentity: Sendable {
     private let state: Mutex<State> = .init(State())
 
     func claim(_ instance: any _PythonClass, in storage: InterpreterStorage) throws {
+        guard instance._pythonContext.references === storage.references else {
+            throw Reference.wrongInterpreter()
+        }
         try state.withLock { state in
             if let ownerID = state.ownerID, ownerID != ObjectIdentifier(instance) {
                 throw ExportCatalog
                     .failure("An instance identity cannot be shared by Swift objects.")
             }
 
-            if
-                let references = state.references,
-                references !== storage.references
-            {
-                throw Reference.wrongInterpreter()
-            }
-
             state.ownerID = ObjectIdentifier(instance)
-            state.references = storage.references
         }
     }
 

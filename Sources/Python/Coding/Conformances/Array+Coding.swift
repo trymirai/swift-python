@@ -23,7 +23,7 @@ extension Array: Decodable where Element: Decodable {
         self.init()
         reserveCapacity(count)
         for index in 0 ..< count {
-            append(try decoder[index].get(as: Element.self))
+            append(try decoder.decode(Element.self, at: index))
         }
     }
 }

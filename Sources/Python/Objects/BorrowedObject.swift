@@ -22,7 +22,7 @@ public struct BorrowedObject: ~Escapable {
         as type: T.Type = T.self,
     ) throws -> T {
         let decoder = unsafe Decoder(pointer, in: self)
-        return try decoder.get(as: type)
+        return try decoder.decode(type)
     }
 
     @_lifetime(copy self)

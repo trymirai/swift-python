@@ -36,33 +36,45 @@ private enum CounterLifetime {
 
 @PythonClass("Counter", module: CounterModule.self)
 private class Counter {
+    let context: Python::Context
+
     @PythonProperty
     var value: Int
     private var secret = 0
+    @PythonProperty("readOnlyValue", isReadOnly: true)
+    var `default`: Int
     @PythonProperty
-    private(set) var readOnlyValue = 7
-    @PythonProperty @PythonReference
-    let callback: Python::Field<Python::Reference?> = .init()
+    var callback: Python::Reference?
+    @PythonProperty
+    var next: Counter?
+    @PythonProperty
+    private var cached: Counter?
 
     @PythonInit
-    init(_ value: Int = 0) throws {
+    init(_ value: Int = 0, linkToSelf: Bool = false, in context: Python::Context) throws {
+        self.context = context
+        CounterLifetime.instanceCount.withLock { $0 += 1 }
+        try self.$value(value)
+        try self.$default(7)
+        if linkToSelf {
+            try self.$next(self)
+            _ = try context.import(module: "gc").attribute("collect").call()
+        }
         guard value >= 0 else {
             throw Python::Exception(
                 name: "ValueError",
                 message: "negative",
             )
         }
-        self.value = value
-        CounterLifetime.instanceCount.withLock { $0 += 1 }
     }
 
     deinit { CounterLifetime.instanceCount.withLock { $0 -= 1 } }
 
     @PythonFunction
-    func increment(_ amount: Int = 1) -> Int {
+    func increment(_ amount: Int = 1) throws -> Int {
         secret += 1
-        value += amount
-        return value
+        try self.$value { $0 + amount }
+        return try self.value
     }
 
     @PythonFunction
@@ -76,25 +88,36 @@ private class Counter {
     }
 
     @PythonFunction
-    func invoke(context: borrowing Python::Context) throws -> Int {
-        guard let reference = try callback.get(in: context) else {
+    func invoke() throws -> Int {
+        guard let reference = try self.callback else {
             return -1
         }
-        let function = try reference.resolve(in: context)
+        let context = self.context
+        let function = try context.object(reference)
         return try function.call().decode()
+    }
+
+    @PythonFunction
+    func cache(_ value: Counter) throws {
+        try self.$cached(value)
+    }
+
+    @PythonFunction
+    func recall() throws -> Counter? {
+        try self.cached
     }
 }
 
 extension Counter {
     @PythonFunction
-    func extended(_ amount: Int) -> Int {
-        value + amount
+    func extended(_ amount: Int) throws -> Int {
+        try value + amount
     }
 
     @PythonProperty
     var doubled: Int {
-        get { value * 2 }
-        set { value = newValue / 2 }
+        get { secret * 2 }
+        set { secret = newValue / 2 }
     }
 }
 
@@ -106,9 +129,9 @@ private final class LabeledCounter: Counter {
     let label: String
 
     @PythonInit
-    init(_ value: Int, label: String = "label") throws {
+    init(_ value: Int, label: String = "label", in context: Python::Context) throws {
         self.label = label
-        try super.init(value)
+        try super.init(value, in: context)
     }
 
     override func describe() -> String {
@@ -120,24 +143,22 @@ private final class LabeledCounter: Counter {
 
 @PythonClass(module: LabeledCounterModule.self)
 private final class ExistingInstance: Sendable {
-    @PythonProperty @PythonReference
-    let note: Python::Field<String?> = .init()
+    let context: Python::Context
+
+    @PythonProperty
+    var note: String?
     @PythonProperty
     let number = 42
-}
 
-// MARK: - SharedFieldState
+    init(in context: Python::Context) {
+        self.context = context
+    }
 
-private enum SharedFieldState {
-    static let field: Python::Field<String?> = .init()
-}
-
-// MARK: - SharedFieldInstance
-
-@PythonClass(module: LabeledCounterModule.self)
-private final class SharedFieldInstance: Sendable {
-    @PythonReference
-    let field: Python::Field<String?> = SharedFieldState.field
+    @PythonFunction
+    func asynchronous() async -> Int {
+        await Task.yield()
+        return number
+    }
 }
 
 @Test
@@ -159,11 +180,20 @@ func exportedClassInheritanceAndGarbageCollection() async throws {
     assert x.myself() is x and echo(x) is x
     assert echoList([x, x]) == [x, x] and echoList([x])[0] is x
     x.doubled = 20
-    assert x.value == 10 and x.doubled == 20
+    assert x.doubled == 20
+    x.value = 10
     x.__init__(999, label='changed')
     assert x.value == 10 and x.label == 'x'
+    assert x.readOnlyValue == 7
     assert not hasattr(x, 'secret')
     assert list(inspect.signature(Counter.increment).parameters) == ['self', 'amount']
+
+    linked = Counter(12, True)
+    assert linked.value == 12 and linked.next is linked
+    dead_linked = weakref.ref(linked)
+    del linked
+    gc.collect()
+    assert dead_linked() is None
     """)
     _ = try await session.evaluate("""
     rejected = [
@@ -171,7 +201,7 @@ func exportedClassInheritanceAndGarbageCollection() async throws {
         (AttributeError, lambda: setattr(x, 'other', 1)),
         (TypeError, lambda: setattr(Counter, 'extra', 1)),
         (TypeError, lambda: ExistingInstance()),
-        (ValueError, lambda: Counter(-1)),
+        (ValueError, lambda: Counter(-1, True)),
         (TypeError, lambda: Counter('bad')),
         (TypeError, lambda: x.increment(None)),
         (TypeError, lambda: echoList([object()])),
@@ -194,12 +224,56 @@ func exportedClassInheritanceAndGarbageCollection() async throws {
     """)
     _ = try await session.evaluate("""
     assert x.callback is None and x.invoke() == -1
+    assert x.next is None and x.recall() is None
+    x.next = x
+    x.cache(x)
     x.callback = lambda captured=x: captured.value + 1
+    assert x.next is x and x.recall() is x
+    assert not hasattr(x, 'cached')
     assert x.invoke() == 11
     dead = weakref.ref(x)
-    del x
+    try:
+        x.next = object()
+    except TypeError:
+        assert x.next is x
+    else:
+        raise AssertionError("Expected a Counter")
     """)
+    do {
+        let managed = try await session.enqueue { context in
+            try Python::Managed(context.get("x", as: Counter.self))
+        }
+        _ = try await session.evaluate("del x; gc.collect(); assert dead() is not None")
+        let value = try await managed { counter in
+            #expect(try counter.next === counter)
+            try counter.$next(nil)
+            #expect(try counter.next == nil)
+            try counter.$next(counter)
+            #expect(throws: CancellationError.self) {
+                try counter.$value { _ in throw CancellationError() }
+            }
+            #expect(try counter.value == 10)
+            return try counter.increment(2)
+        }
+        #expect(value == 12)
+    }
     _ = try await session.evaluate("gc.collect(); assert dead() is None")
+    #expect(CounterLifetime.instanceCount.withLock { $0 } == 0)
+
+    do {
+        let managed = try await session.enqueue { context in
+            let counter = try Counter(40, linkToSelf: true, in: context)
+            #expect(try counter.value == 40)
+            #expect(try counter.next === counter)
+            return try Python::Managed(counter)
+        }
+        let value = try await managed { counter in
+            #expect(try counter.next === counter)
+            return try counter.increment(2)
+        }
+        #expect(value == 42)
+    }
+    _ = try await session.evaluate("gc.collect()")
     #expect(CounterLifetime.instanceCount.withLock { $0 } == 0)
     await session.close()
 }
@@ -209,29 +283,28 @@ func classIdentityAndSessionGenerations() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [LabeledCounterModule.self])
     let other = try await runtime.session(modules: [LabeledCounterModule.self])
-    let peer = ExistingInstance()
-    try await session.set("peer", to: peer)
+    let peer = try await session.enqueue { ExistingInstance(in: $0) }
+    try await session.set(peer, forKey: "peer")
     let decoded = try await session.get("peer", as: ExistingInstance.self)
     #expect(decoded === peer)
     _ = try await session
         .evaluate("import weakref; dead_peer = weakref.ref(peer); peer.note = 'old'")
     try await session.remove("peer")
     _ = try await session.evaluate("import gc; gc.collect(); assert dead_peer() is None")
-    try await session.set("peer", to: peer)
+    try await session.set(peer, forKey: "peer")
     _ = try await session.evaluate("assert peer.note is None and peer.number == 42")
-    await #expect(throws: (any Swift.Error).self) { try await other.set("peer", to: peer) }
-    let fieldOwner = SharedFieldInstance()
-    try await session.set("field_owner", to: fieldOwner)
-    let rejected = SharedFieldInstance()
-    for _ in 0 ..< 2 {
-        let exception = try await #require(throws: Python::Exception.self) {
-            try await session.set("rejected", to: rejected)
-        }
-        #expect(exception.name == "TypeError")
-        #expect(exception.message.contains("shared"))
+    await #expect(throws: (any Swift.Error).self) { try await other.set(peer, forKey: "peer") }
+    let managed = try await session.enqueue { _ in try Python::Managed(peer) }
+    _ = try await session.evaluate("assert await peer.asynchronous() == 42")
+    try await session.set(42, forKey: "value")
+    let value: Int = try await managed { peer in
+        await Task.yield()
+        return try await peer.context.get("value")
     }
+    #expect(value == 42)
     try await session.reset()
-    await #expect(throws: (any Swift.Error).self) { try await session.set("peer", to: peer) }
+    await #expect(throws: Python::Exception.self) { try await session.set(peer, forKey: "peer") }
+    await #expect(throws: Python::Exception.self) { try await managed { $0.number } }
     await session.close()
     await other.close()
 }

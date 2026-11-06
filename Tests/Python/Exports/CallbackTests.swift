@@ -9,14 +9,14 @@ import Testing
 // MARK: - ValueModule
 
 @PythonModule("host")
-private struct ValueModule: Sendable {
+private enum ValueModule {
     @PythonFunction
-    func echo(_ value: Python::Value) -> Python::Value {
+    static func echo(_ value: Python::Value) -> Python::Value {
         value
     }
 
     @PythonFunction
-    func asyncEcho(_ value: Python::Value) async -> Python::Value {
+    static func asyncEcho(_ value: Python::Value) async -> Python::Value {
         await Task.yield()
         return value
     }

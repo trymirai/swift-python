@@ -17,9 +17,10 @@ struct PackageConfiguration: Sendable {
 
 extension PackageConfiguration: Decodable {
     init(from decoder: borrowing Decoder) throws {
-        cacheDirectory = try decoder["cache"].get()
-        abi = try decoder["abi"].get()
-        baseVersions = try decoder["base"].get()
-        baseFiles = Set(try decoder["base_files"].get(as: [String].self).map { FilePath($0) })
+        cacheDirectory = try decoder.decode(String.self, forKey: "cache")
+        abi = try decoder.decode([String].self, forKey: "abi")
+        baseVersions = try decoder.decode([String: String].self, forKey: "base")
+        baseFiles = Set(try decoder.decode([String].self, forKey: "base_files")
+            .map { FilePath($0) })
     }
 }

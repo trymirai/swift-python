@@ -59,15 +59,13 @@ public extension Arguments {
         }
     }
 
-    @_lifetime(borrow self)
     @_documentation(visibility: internal)
     borrowing func prepare(
         _ type: Context.Type,
         parameter: Int,
-    ) throws -> some _PythonArgument<Context> & ~Copyable & ~Escapable {
+    ) throws -> some _PythonArgument<Context> & ~Copyable {
         do {
-            let value = try Context(in: self)
-            return PreparedValue(value: .some(consume value))
+            return PreparedValue(value: try Context())
         } catch {
             return PreparedValue<Context>(value: nil, error: error)
         }

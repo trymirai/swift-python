@@ -7,7 +7,7 @@ struct PackageRequirement: Decodable, Sendable {
     let declaration: String
 
     init(from decoder: borrowing Decoder) throws {
-        name = try decoder["name"].get()
-        declaration = try decoder["declaration"].get()
+        name = try decoder.decode(String.self, forKey: "name")
+        declaration = try decoder.decode(String.self, forKey: "declaration")
     }
 }

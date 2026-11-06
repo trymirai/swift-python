@@ -19,7 +19,8 @@ extension PythonClassMacro: MemberMacro {
         conformingTo protocols: [TypeSyntax],
         in context: some MacroExpansionContext,
     ) throws -> [DeclSyntax] {
-        try ExportScope(context).validate()
+        let scope = ExportScope(context)
+        try scope.validate()
         guard
             let declaration = declaration.as(ClassDeclSyntax.self),
             declaration.genericParameterClause == nil
@@ -33,13 +34,11 @@ extension PythonClassMacro: MemberMacro {
             )
         }
 
-        let owner = ExportScope(context).qualifiedName(of: declaration)
-        let name = attribute
-            .argument()
-            .flatMap { $0 == "nil" ? nil : $0 } ?? String(reflecting: declaration.name.text)
+        let owner = scope.qualifiedName(of: declaration)
+        let name = attribute.argument() ?? String(reflecting: declaration.name.text)
 
-        let module = attribute.argument(named: "module").flatMap { $0 == "nil" ? nil : $0 }
-            ?? ExportScope(context).owner.flatMap { $0.isModule ? "\($0.name).self" : nil }
+        let module = attribute.argument(named: "module")
+            ?? scope.owner.flatMap { $0.isModule ? "\($0.name).self" : nil }
 
         guard let module else {
             throw MacroExpansionErrorMessage(
@@ -48,27 +47,45 @@ extension PythonClassMacro: MemberMacro {
         }
 
         let documentation = attribute.argument(named: "documentation") ?? "nil"
-        let initializers = declaration.memberBlock
-            .members
-            .compactMap { $0.decl.as(InitializerDeclSyntax.self) }
-            .filter { $0.attributes.attribute(named: "PythonInit") != nil }
-
-        guard initializers.count <= 1
-        else {
+        let initializers = declaration.memberBlock.members.count {
+            $0.decl.as(InitializerDeclSyntax.self)?.attributes.attribute(named: "PythonInit") != nil
+        }
+        guard initializers <= 1 else {
             throw MacroExpansionErrorMessage("Select at most one PythonInit per concrete class.")
         }
 
-        var result: [DeclSyntax] = [ExportRegistration(
+        let registration = ExportRegistration(
             name: "class",
             definition:
             "collector.addClass(\(owner).self, module: \(module), name: \(name), documentation: \(documentation))",
             in: context,
-        ).declaration]
+        ).declaration
 
-        result.append(DeclSyntax(
-            stringLiteral: "private nonisolated let __python_identity: (any Swift::AnyObject & Swift::Sendable)? = Python::Module._makeInstanceIdentity(for: \(owner).self)",
-        ))
-        return result
+        let identity: DeclSyntax = """
+        private nonisolated let __python_identity: (any Swift::AnyObject & Swift::Sendable)? =
+            Python::_makeInstanceIdentity(for: \(raw: owner).self)
+        """
+        return [registration, identity]
+    }
+}
+
+// MARK: MemberAttributeMacro
+
+extension PythonClassMacro: MemberAttributeMacro {
+    static func expansion(
+        of attribute: AttributeSyntax,
+        attachedTo declaration: some DeclGroupSyntax,
+        providingAttributesFor member: some DeclSyntaxProtocol,
+        in context: some MacroExpansionContext,
+    ) throws -> [AttributeSyntax] {
+        guard
+            let variable = member.as(VariableDeclSyntax.self),
+            variable.attributes.attribute(named: "PythonProperty") != nil,
+            PropertyDeclaration.usesPythonStorage(variable)
+        else {
+            return []
+        }
+        return [AttributeSyntax(stringLiteral: "@Python::_PythonStoredProperty")]
     }
 }
 
@@ -88,6 +105,7 @@ extension PythonClassMacro: ExtensionMacro {
         return [try ExtensionDeclSyntax("""
         extension \(type): Python::_PythonClass {
             public nonisolated var _pythonIdentity: any Swift::AnyObject & Swift::Sendable { __python_identity! }
+            public nonisolated var _pythonContext: Python::Context { self.context }
         }
         """)]
     }

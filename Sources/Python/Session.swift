@@ -91,6 +91,7 @@ public actor Session {
             packages: packages,
             scheduleRelease: { [weak self] in Task { await self?.releasePendingReferences() } },
             sessionOrigin: ObjectIdentifier(executor),
+            session: self,
         )
         startupOutput = try opened.initialize(startup, execution: execution)
         interpreter = consume opened

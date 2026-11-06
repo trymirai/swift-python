@@ -61,8 +61,6 @@ extension ExportDispatcher: Object.Callable {
                 throw ExportCatalog.failure("Python wrapper registration is closed.")
             }
             try registry.registerWrapperFactory(request.item(at: 1), in: storage)
-        case "abandon":
-            try Self.registeredClasses().cancelConstruction(of: request.item(at: 1))
         case "bind":
             try Self.registeredClasses().bind(request.item(at: 1))
         case let command:
@@ -95,11 +93,11 @@ extension ExportDispatcher: Object.Callable {
             case let ("call", .synchronous(body)):
                 let tuple = try request.item(at: 2)
                 var encoder = Encoder(in: attachment)
-                try body(tuple, attachment, &encoder)
+                try body(tuple, &encoder)
                 return unsafe try Object(owned: encoder.take(), in: attachment)
             case let ("start", .asynchronous(body)):
                 let tuple = try request.item(at: 2)
-                return try startCall(body(tuple, attachment), in: attachment)
+                return try startCall(body(tuple), in: attachment)
             default:
                 throw RuntimeFailure("Invalid Swift callback mode.")
             }

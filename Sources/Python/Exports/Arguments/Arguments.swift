@@ -8,10 +8,9 @@ internal import libcpython
 @safe
 public struct Arguments: ~Copyable, ~Escapable {
     let pointer: UnsafeMutablePointer<PyObject>
-    let parameters: [Module.Function.Parameter]
-
     private let argumentIndices: [Int]
     private let count: Int
+    private let defaultArgumentMarker: UInt?
 
     @_lifetime(borrow object)
     init(
@@ -25,13 +24,14 @@ public struct Arguments: ~Copyable, ~Escapable {
             throw Exception(name: "TypeError", message: "Invalid Swift callback arguments.")
         }
 
+        let defaultArgumentMarker = InterpreterStorage.current()?.defaultArgumentMarker
         for (parameter, index) in zip(parameters, argumentIndices)
             where !parameter.isInjected && !parameter.hasDefaultValue
         {
             guard let value = unsafe PyTuple_GetItem(object.pointer, index) else {
                 throw Object.failure("Unable to read Python arguments.")
             }
-            if UInt(bitPattern: value) == InterpreterStorage.current()?.defaultArgumentMarker {
+            if UInt(bitPattern: value) == defaultArgumentMarker {
                 throw Exception(
                     name: "TypeError",
                     message: "Missing argument '\(parameter.name)'.",
@@ -39,16 +39,16 @@ public struct Arguments: ~Copyable, ~Escapable {
             }
         }
 
-        self.parameters = parameters
         self.argumentIndices = argumentIndices
         self.count = count
+        self.defaultArgumentMarker = defaultArgumentMarker
 
         unsafe self.pointer = object.pointer
     }
 
     public borrowing func isMissing(_ index: Int) throws -> Bool {
         let value = unsafe try element(index)
-        return UInt(bitPattern: value) == InterpreterStorage.current()?.defaultArgumentMarker
+        return UInt(bitPattern: value) == defaultArgumentMarker
     }
 
     public borrowing func get<T: Decodable & ~Copyable>(
@@ -56,7 +56,7 @@ public struct Arguments: ~Copyable, ~Escapable {
         as type: T.Type = T.self,
     ) throws -> T {
         let decoder = unsafe try Decoder(element(index), in: self)
-        return try decoder.get(as: type)
+        return try decoder.decode(type)
     }
 
     public borrowing func withArgument<T: Decodable & ~Copyable, Result: ~Copyable>(
@@ -82,7 +82,7 @@ public struct Arguments: ~Copyable, ~Escapable {
         parameter: Int,
         _ body: (borrowing Context) throws -> Result,
     ) throws -> Result {
-        let context = try Context(in: self)
+        let context = try Context()
         return try body(context)
     }
 

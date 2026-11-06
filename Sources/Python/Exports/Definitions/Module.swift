@@ -3,7 +3,9 @@
 //
 
 /// A module made available to the session by the host.
-public struct Module: Sendable {
+package struct Module: Sendable {
+    package typealias Function = _ExportFunction
+
     let name: String
     let documentation: String?
 
@@ -12,7 +14,7 @@ public struct Module: Sendable {
     let functions: [Function]
     var classes: [Module.Class] = []
 
-    public init(
+    package init(
         _ name: String,
         documentation: String? = nil,
         source: String? = nil,

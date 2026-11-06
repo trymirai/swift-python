@@ -6,7 +6,7 @@
 public protocol _ExportSink {
     mutating func addFunction(
         module: any ModuleHost.Type,
-        makeFunction: @escaping @Sendable ((any ModuleHost)?) throws -> Module.Function,
+        function: _ExportFunction,
     )
 
     mutating func addClass<Instance: _PythonClass>(
@@ -18,12 +18,12 @@ public protocol _ExportSink {
 
     mutating func addMethod<Instance: _PythonClass>(
         _ type: Instance.Type,
-        function: Module.Function,
+        function: _ExportFunction,
     )
 
     mutating func addInitializer<Instance: _PythonClass>(
         _ type: Instance.Type,
-        function: Module.Function,
+        function: _ExportFunction,
     )
 
     mutating func addProperty<Instance: _PythonClass>(
@@ -34,9 +34,15 @@ public protocol _ExportSink {
         setter: (@Sendable (Instance, borrowing Decoder, borrowing Context) throws -> Void)?,
     )
 
-    mutating func addReference<Instance: _PythonClass, Value>(
+    mutating func addStoredProperty<
+        Instance: _PythonClass,
+        Value: Decodable & SendableMetatype & ~Copyable,
+    >(
         _ type: Instance.Type,
         name: String,
-        field: @escaping @Sendable (Instance) -> Field<Value>,
+        key: String,
+        documentation: String?,
+        as valueType: Value.Type,
+        isReadOnly: Bool,
     )
 }

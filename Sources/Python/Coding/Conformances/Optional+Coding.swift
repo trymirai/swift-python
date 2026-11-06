@@ -19,6 +19,6 @@ extension Optional: Encodable where Wrapped: Encodable & ~Copyable {
 
 extension Optional: Decodable where Wrapped: Decodable & ~Copyable {
     public init(from decoder: borrowing Decoder) throws {
-        self = decoder.isNone ? nil : try decoder.get(as: Wrapped.self)
+        self = decoder.isNone ? nil : try decoder.decode(Wrapped.self)
     }
 }

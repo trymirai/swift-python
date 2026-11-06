@@ -59,18 +59,11 @@ class NativeClasses:
                 pending.remove(record)
 
     def wrap(self, key, capsule):
-        return self._bind(self._types[key], capsule)
-
-    def _bind(self, cls: type, capsule):
-        try:
-            wrapper = object.__new__(cls)
-            object.__setattr__(wrapper, "_swift_peer", capsule)
-            object.__setattr__(wrapper, "_swift_fields", {})
-            self._invoke("bind", wrapper)
-            return wrapper
-        except BaseException:
-            self._invoke("abandon", capsule)
-            raise
+        wrapper = object.__new__(self._types[key])
+        object.__setattr__(wrapper, "_swift_peer", capsule)
+        object.__setattr__(wrapper, "_swift_fields", {})
+        self._invoke("bind", wrapper)
+        return wrapper
 
     def _make_class(
         self, module: ModuleType, key, base, name: str, doc: str | None, constructor, members: dict
@@ -84,7 +77,7 @@ class NativeClasses:
             if constructor is None:
                 raise TypeError(f"{name} has no PythonInit; wrap an existing Swift instance")
 
-            return self._bind(cls, constructor(*args, **kwargs))
+            return constructor(*args, **kwargs)
 
         def initialize(self, *args, **kwargs) -> None:
             # __new__ has already initialized and bound the complete Swift peer.

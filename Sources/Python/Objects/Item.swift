@@ -4,9 +4,9 @@
 
 internal import libcpython
 
-/// A scoped name in the session's working namespace. Each operation resolves it afresh.
+/// A scoped lookup into a Python container. Namespace names report NameError.
 @safe
-public struct Item: ~Copyable, ~Escapable {
+struct Item: ~Copyable, ~Escapable {
     enum Key {
         case name(String)
         case string(String)
@@ -30,14 +30,14 @@ public struct Item: ~Copyable, ~Escapable {
         self.depth = depth
     }
 
-    public borrowing func get<T: Decodable & ~Copyable>(as type: T.Type = T.self) throws -> T {
+    borrowing func get<T: Decodable & ~Copyable>(as type: T.Type = T.self) throws -> T {
         let value = try object()
         let decoder = unsafe Decoder(value.pointer, depth: depth, in: value)
-        return try decoder.get(as: type)
+        return try decoder.decode(type)
     }
 
     @_lifetime(copy self)
-    public borrowing func object() throws -> Object {
+    borrowing func object() throws -> Object {
         _ = try InterpreterStorage.requireCurrent()
         let key = try keyObject()
         guard let value = unsafe PyObject_GetItem(container, key.pointer) else {
@@ -46,16 +46,21 @@ public struct Item: ~Copyable, ~Escapable {
         return unsafe try Object.take(value, inheriting: self)
     }
 
-    public borrowing func set<T: Encodable & ~Copyable>(_ value: borrowing T) throws {
+    borrowing func set<T: Encodable & ~Copyable>(_ value: borrowing T) throws {
+        _ = try InterpreterStorage.requireCurrent()
+        let value = try Object(encoding: value, in: self)
+        try set(value)
+    }
+
+    borrowing func set(_ value: borrowing Object) throws {
         _ = try InterpreterStorage.requireCurrent()
         let key = try keyObject()
-        let value = try Object(encoding: value, in: self)
         guard unsafe PyObject_SetItem(container, key.pointer, value.pointer) == 0 else {
             throw Object.failure("Unable to set a Python variable.")
         }
     }
 
-    public borrowing func remove() throws {
+    borrowing func remove() throws {
         _ = try InterpreterStorage.requireCurrent()
         let key = try keyObject()
         guard unsafe PyObject_DelItem(container, key.pointer) == 0 else {

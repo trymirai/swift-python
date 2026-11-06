@@ -18,13 +18,14 @@ extension PythonFunctionMacro: PeerMacro {
         providingPeersOf declaration: some DeclSyntaxProtocol,
         in context: some MacroExpansionContext,
     ) throws -> [DeclSyntax] {
-        try ExportScope(context).validate()
+        let scope = ExportScope(context)
+        try scope.validate()
         guard let method = declaration.as(FunctionDeclSyntax.self) else {
             throw MacroExpansionErrorMessage(
                 "PythonFunction must be attached to a function or method.",
             )
         }
-        let owner = ExportScope(context).owner
+        let owner = scope.owner
         let isStatic = method.modifiers.contains { ["static", "class"].contains($0.name.text) }
         if let owner, owner.isPythonClass || (owner.isExtension && !isStatic) {
             guard !isStatic
@@ -33,11 +34,9 @@ extension PythonFunctionMacro: PeerMacro {
                     "Exported Python classes support instance methods only.",
                 )
             }
-            let function = try FunctionExpansion(declaration: method).source(
+            let function = try FunctionExpansion(declaration: method, owner: owner).source(
                 attribute: attribute,
-                receiver: "__self.",
-                owner: owner,
-                kind: .instanceMethod,
+                isInstanceMethod: true,
             )
             return [ExportRegistration(
                 method: method,
@@ -45,35 +44,17 @@ extension PythonFunctionMacro: PeerMacro {
                 in: context,
             ).declaration]
         }
-        let module = attribute.argument(named: "module").flatMap { $0 == "nil" ? nil : $0 }
-            ?? owner
-            .flatMap { ($0.isModule || ($0.isExtension && isStatic)) ? "\($0.name).self" : nil }
-        guard let module else {
+        guard let owner, isStatic, owner.isModule || owner.isExtension else {
             throw MacroExpansionErrorMessage(
-                "A free Python function requires module: Module.self; instance methods require PythonClass.",
+                "A Python module function must be static; instance methods require PythonClass.",
             )
         }
-        let requiresModuleInstance = owner != nil && !isStatic
-        let receiver = owner.map { isStatic ? "\($0.name)." : "__instance." } ?? ""
-        let definition = try FunctionExpansion(declaration: method).source(
-            attribute: attribute,
-            receiver: receiver,
-            owner: owner,
-        )
-        var unwrap = ""
-        if requiresModuleInstance, let owner {
-            unwrap = """
-            guard let __instance = __instance as? \(owner.name) else {
-                throw Python::Exception(name: "TypeError", message: "Missing configured module instance.")
-            }
-            """
-        }
-        let export = """
-        collector.addFunction(module: \(module), makeFunction: { \(requiresModuleInstance ? "__instance" : "_") in
-            \(unwrap)
-            return \(definition)
-        })
-        """
-        return [ExportRegistration(method: method, definition: export, in: context).declaration]
+        let function = try FunctionExpansion(declaration: method, owner: owner)
+            .source(attribute: attribute)
+        return [ExportRegistration(
+            method: method,
+            definition: "collector.addFunction(module: \(owner.name).self, function: \(function))",
+            in: context,
+        ).declaration]
     }
 }

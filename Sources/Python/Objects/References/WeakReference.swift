@@ -11,11 +11,11 @@ public struct WeakReference: Sendable {
     public init(_ object: borrowing Object, in context: borrowing Context) throws {
         try context.checkAccess()
         let weak = unsafe try Object.take(CPython_NewWeakReference(object.pointer), in: context)
-        reference = unsafe try context.storage.references.retain(weak.pointer)
+        reference = unsafe try context.references.retain(weak.pointer)
     }
 
     @_lifetime(borrow context)
-    public func resolve(in context: borrowing Context) throws -> Object? {
+    func resolve(in context: borrowing Context) throws -> Object? {
         let reference = try reference.resolve(in: context)
         let object = unsafe try Object.take(
             CPython_ResolveWeakReference(reference.pointer),

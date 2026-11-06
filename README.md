@@ -6,46 +6,44 @@
 [![Mac Catalyst 26.4+](https://img.shields.io/badge/Mac%20Catalyst-26.4%2B-315D8A?logo=apple&logoColor=white)](#requirements)
 [![Linux with glibc and musl](https://img.shields.io/badge/Linux-glibc%20%26%20musl-316A54?logo=linux&logoColor=white)](#requirements)
 
-Embed CPython 3.16.0a1 in a Swift application with Swift Package Manager. The
-static `Python` library includes the interpreter and a selected standard
-library, with its sources and resources embedded in the binary.
+Embed CPython 3.16.0a1 in a Swift application. The static `Python` library
+includes the interpreter and selected standard library modules.
 
 ## Usage
 
 ### Sessions
 
-Each session has its own interpreter and persistent namespace.
+Add the `Python` product to your SwiftPM target.
 
 ```swift
 import Python
 
 let runtime = try await Python::Runtime()
 let session = try await runtime.session(.source("counter = 40"))
-let second = try await runtime.session()
 
-let answer = try await session.evaluate("counter + 2")
-let independent = try await second.evaluate("'counter' in globals()")
-
-print(answer.stdout, terminator: "")       // 42
-print(independent.stdout, terminator: "")  // False
-
-await second.close()
+let output = try await session.evaluate("counter + 2")
+print(output.stdout, terminator: "") // 42
 ```
 
-`evaluate` supports top-level `await`. Use `reset()` to restart the interpreter
-on the next evaluation with the same startup and packages. Use `close()` to
-release the session.
+Each session has its own interpreter and keeps its Python globals between
+calls. `evaluate` supports top-level `await` and captures `stdout` and `stderr`.
 
-Set `timeout` for a deadline that starts when evaluation begins. `stop()` requests
-interruption and `isRunning` reports active work. `ExecutionError` carries
-captured output and, for Python exceptions, a traceback.
+Set `timeout` to limit evaluation time or call `stop()` to request interruption.
+`ExecutionError` carries captured output and includes a traceback for Python
+exceptions. Call `reset()` to rerun startup on the next evaluation or `close()`
+to end the session.
 
 ### Typed values
 
-`set(_:to:)` and `get(_:as:)` use `Python::Encodable` and `Python::Decodable`.
-Built-in codecs cover integers, floats, booleans, strings, optionals, arrays and
-string-keyed dictionaries. They decode exact Python builtins. Use `Python::Value`
-for dynamic data.
+```swift
+try await session.set([1, 2, 3], forKey: "numbers")
+_ = try await session.evaluate("numbers.reverse()")
+let numbers = try await session.get("numbers", as: [Int].self) // [3, 2, 1]
+```
+
+Built-in codecs cover integers, floats, booleans, strings, optionals, arrays,
+and string-keyed dictionaries. Use `Python::Value` for dynamic data. For your
+own types, implement `Python::Encodable` and `Python::Decodable`.
 
 ```swift
 struct Point: Sendable {
@@ -60,122 +58,104 @@ extension Point: Python::Encodable, Python::Decodable {
     }
 
     init(from decoder: borrowing Python::Decoder) throws {
-        x = try decoder["x"].get()
-        y = try decoder["y"].get()
+        x = try decoder.decode(Int.self, forKey: "x")
+        y = try decoder.decode(Int.self, forKey: "y")
     }
 }
 
-try await session.set("point", to: Point(x: 1, y: 2))
+try await session.set(Point(x: 1, y: 2), forKey: "point")
 let point = try await session.get("point", as: Point.self)
 ```
 
 ### Interpreter access
 
-`enqueue` runs a synchronous closure on the session's interpreter thread.
-Keep scoped Python objects and views inside the closure. Return owned `Sendable`
-values.
+A synchronous `enqueue` closure runs on the session's interpreter thread. Keep
+Python objects and borrowed views inside the closure and return a `Sendable`
+value.
 
 ```swift
-try await session.enqueue { context in
-    let object = try context["point"].object()
-    let x: Int = try object["x"].get()
-    try context["answer"].set(x + 41)
-    try context["point"].remove()
+let x: Int = try await session.enqueue { context in
+    let object = try context.object("point")
+    return try object.get("x")
 }
 ```
 
-Use `context.import(module:)` to import a module. Missing names throw
-`NameError`. Setting `nil` stores Python `None`. Use `remove()` to delete a name.
+Use `context.import(module:)` to import a module and `remove(_:)` to delete a
+name. In an async `enqueue` closure, each awaited context operation is queued
+separately.
 
 ### Standard streams
 
 ```swift
 let streams = Python::StandardIO(
     stdin: "/work/input.txt",
-    stdout: "/work/stdout.log",
-    stderr: "/work/stderr.log",
-    traceback: "/work/traceback.txt"
+    stdout: "/work/stdout.log"
 )
-let output = try await session.evaluate("print(input())", standardIO: streams)
+_ = try await session.evaluate("print(input())", standardIO: streams)
 let bytes = try await streams.read(.stdout, from: 0, maximumByteCount: 4096)
 ```
 
-Supply absolute paths and create their parent directories. Redirected output
-appends to files, preserves binary writes, and leaves the matching string in
-`Output` empty. Other output is captured as text. Omitted input produces EOF.
-
-Use `onOutput` for text chunks, `read(_:from:maximumByteCount:)` to read files
-during execution, and `startupIO` to configure startup streams.
+Use absolute paths with existing parent directories. Redirected output appends
+to files and leaves the corresponding `Output` strings empty. Omit `stdin` for
+EOF. Use `onOutput` for live text chunks or `startupIO` to configure startup
+streams.
 
 ### Scripts
 
 `run(script:)` runs a UTF-8 file as `__main__` in a fresh session and sets
-`sys.argv`. The runtime installs dependencies declared in
+`sys.argv`. It installs dependencies declared in the script's
 [PEP 723 metadata](https://packaging.python.org/en/latest/specifications/inline-script-metadata/).
 
 ```python
 # /// script
-# requires-python = ">=3.13"
 # dependencies = ["pypdf>=5"]
 # ///
 
-"""Process PDF documents."""
+import sys
+
+from pypdf import PdfReader
+
+print(len(PdfReader(sys.argv[1]).pages))
 ```
 
 ```swift
-let output = try await runtime.run(
-    script: "/scripts/invoices.py",
+let pages = try await runtime.run(
+    script: "/scripts/page_count.py",
     arguments: ["/work/invoice.pdf"],
-    environmentDirectory: "/work/script-environment",
-    standardIO: streams
+    environmentDirectory: "/work/script-environment"
 )
+print(pages.stdout, terminator: "")
 ```
 
 Supply `environmentDirectory` to reuse installed dependencies across runs.
 
 ### Projects and packages
 
-Pass a flat-layout project and its startup module.
+Open a flat-layout project by passing its directory and startup module.
 
 ```text
 project/
 ├── pyproject.toml
 └── assistant/
-    ├── __init__.py
-    └── helpers.py
+    └── __init__.py
 ```
 
 ```swift
-let runtime = try await Python::Runtime(
-    packages: [.directory("/application/site-packages")],
-    cacheDirectory: "/application/package-cache"
-)
-let session = try await runtime.session(
-    .project(directory: "/projects/example", module: "assistant"),
-    directory: "/work/example",
-    environmentDirectory: "/work/example/python"
+let projectSession = try await runtime.session(
+    .project(directory: "/projects/project", module: "assistant"),
+    environmentDirectory: "/work/project-environment"
 )
 ```
 
-The runtime prepares dependencies before importing the startup module. Its
-globals become the session namespace. Use `.module("assistant")` to start from
-an existing module and `startupOutput` to read startup streams.
+The runtime installs compatible pure-Python wheels before importing the module.
+Its globals become the session namespace. `requirements.txt` takes precedence
+over `[project].dependencies` in `pyproject.toml`.
 
-`requirements.txt` takes precedence over `[project].dependencies` in
-`pyproject.toml`. Requirements use named PEP 508 declarations. The installer
-selects compatible pure-Python wheels and treats application packages as fixed.
-
-```swift
-try await session.resolvePackages()
-try await session.install(requirements: ["pypdf>=5"])
-let versions = try await session.installedPackages()
-try await session.reset()
-try await session.updatePackages()
-```
-
-Use `uninstall(packages:)` to remove session-added requirements. If a change
-would replace an imported distribution, the operation throws
-`SessionError.resetRequired`. Call `reset()` and retry before evaluating again.
+Use `install(requirements:)` and `uninstall(packages:)` to change session
+packages, and `installedPackages()` to list their versions. `resolvePackages()`
+rereads project requirements. `updatePackages()` selects current compatible
+versions. If a package change throws `SessionError.resetRequired`, call
+`reset()` and retry.
 
 ### Embedded packages
 
@@ -184,131 +164,97 @@ startup module.
 
 ```swift
 try await runtime.bundle(
-    project: "/absolute/project",
+    project: "/projects/project",
     module: "assistant",
-    to: "/absolute/packages.zip"
+    to: "/work/packages.zip"
 )
 ```
 
-Add `.embedInCode("Resources/packages.zip")` to the owning Swift target's
-resources and pass `.embedded(PackageResources.packages_zip)` in
-`Runtime(packages:)`. Use `.archive(path)` for a ZIP stored as a file.
+Add `.embedInCode("Resources/packages.zip")` to your target's resources and pass
+`.embedded(PackageResources.packages_zip)` to `Runtime(packages:)`. Use
+`.archive(path)` or `.directory(path)` for packages on disk.
 
 ### Swift modules
 
 ```swift
-import Python
-
 @PythonModule("example")
 enum Example {
-    @PythonFunction(documentation: "Return a greeting.")
+    @PythonFunction
     static func greeting(_ name: String = "world") async -> String {
         "Hello, \(name)!"
     }
 }
 
-let runtime = try await Python::Runtime()
-let session = try await runtime.session(modules: [Example.self])
-let output = try await session.evaluate("""
+let exampleSession = try await runtime.session(modules: [Example.self])
+let greeting = try await exampleSession.evaluate("""
 import example
-await example.greeting()
+print(await example.greeting())
 """)
+print(greeting.stdout, terminator: "") // Hello, world!
 ```
 
-`modules: [Example.self]` selects the linked exports. Use `moduleInstances:` for
-configured `Sendable` hosts and `moduleDefinitions:` for manual definitions.
-Free functions use `@PythonFunction(module: Example.self)`. When linking a
-custom static archive, retain the object files containing exports.
-
-Keyword arguments and Swift defaults are preserved. Async module functions
-take and return owned `Sendable` values.
-
-| Macro              | Export                             |
-| ------------------ | ---------------------------------- |
-| `@PythonModule`    | Swift namespace or configured host |
-| `@PythonFunction`  | Function or instance method        |
-| `@PythonClass`     | Swift class                        |
-| `@PythonInit`      | Initializer callable from Python   |
-| `@PythonProperty`  | Instance property                  |
-| `@PythonReference` | Python-owned `Field<T>` storage    |
+Python uses Swift's local parameter names for keyword arguments. Swift defaults
+apply to omitted arguments. Async exports take and return owned `Sendable`
+values. Async instance methods also require a `Sendable` receiver.
 
 ### Swift classes
 
 ```swift
 @PythonClass(module: Example.self)
-class Counter {
+final class Counter {
+    let context: Python::Context
+
     @PythonProperty var value: Int
-    private var updates = 0
 
     @PythonInit
-    init(_ value: Int = 0) { self.value = value }
+    init(_ value: Int = 0, in context: Python::Context) throws {
+        self.context = context
+        try self.$value(value)
+    }
 
-    @PythonFunction func increment(_ amount: Int = 1) -> Int {
-        updates += 1
-        value += amount
-        return value
+    @PythonFunction
+    func increment(_ amount: Int = 1) throws -> Int {
+        try self.$value { $0 + amount }
+        return try self.value
     }
 }
 
-extension Counter {
-    @PythonProperty
-    var doubled: Int { value * 2 }
-}
-
-@PythonClass(module: Example.self)
-final class LabeledCounter: Counter {
-    @PythonProperty
-    let label: String
-
-    @PythonInit init(_ value: Int, label: String) {
-        self.label = label
-        super.init(value)
-    }
-}
+let count = try await exampleSession.evaluate("""
+counter = example.Counter(40)
+counter.increment(2)
+""")
+print(count.stdout, terminator: "") // 42
 ```
 
-Python classes mirror Swift inheritance and include exported extension members.
-Each wrapper owns one Swift instance. Mark one synchronous, non-failable
-initializer with `@PythonInit` to allow construction from Python. Exported
-instance methods are synchronous. Constants, get-only properties and properties
-with private setters are read-only.
+The `@PythonInit` initializer receives its `Context` automatically. Read a
+stored `@PythonProperty var` with `try counter.value` and assign it with
+`try counter.$value(42)`. Use `isReadOnly: true` to make it read-only in Python.
 
 ### Python references
 
-`Object` holds a scoped reference and `BorrowedObject` borrows a callback
-argument. `Reference` keeps a Python object alive across calls. `WeakReference`
-resolves to `nil` after collection. Both handles expire on reset or close.
+Use `object.retain(in: context)` to keep a Python object alive across calls.
+Open a `Reference` or `WeakReference` with `context.object(_:)`. A weak handle
+resolves to `nil` once its target is collected. Handles expire when the
+session resets or closes.
 
-Use `@PythonReference` with `Field<T>` for callback references that can form
-cycles. Python's collector can see these fields. Add `@PythonProperty` to expose
-a field as a Python attribute.
+`Managed` keeps an exported Swift instance alive across calls.
 
 ```swift
-@PythonClass(module: Example.self)
-final class Listener {
-    @PythonProperty
-    @PythonReference
-    let callback = Python::Field<Python::Reference?>()
-
-    @PythonInit
-    init() {}
-
-    @PythonFunction func clear(context: borrowing Python::Context) throws {
-        try callback.set(nil, in: context)
-    }
+let managed = try await exampleSession.enqueue { context in
+    let counter = try context.get("counter", as: Counter.self)
+    return try Python::Managed(counter)
 }
+
+let nextCount = try await managed { try $0.increment() } // 43
 ```
 
 ### Buffers
 
-Synchronous exports accept `Span<Element>`, `inout MutableSpan<Element>` and
-`UTF8Span`. Buffers borrow contiguous, aligned, native-format storage from
-`bytes`, `bytearray`, `array.array` or their memoryviews. Mutable spans require
-writable storage. `UTF8Span` borrows Python's cached UTF-8.
-
-Use `Object.buffer(as:isWritable:)` for explicit `withSpan` or
-`withMutableSpan` access. Overlapping mutable views and Python reentry while a
-view is active raise errors.
+Synchronous exports accept `Span<Element>` and `inout MutableSpan<Element>` for
+contiguous, aligned Python buffers in native format, and `UTF8Span` for strings.
+Mutable spans require writable storage. For direct access from Swift, use
+`Object.buffer(as:isWritable:)` with `withSpan` or `withMutableSpan`.
+Finish the span closure before calling back into Python.
 
 ## Requirements
 

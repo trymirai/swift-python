@@ -5,29 +5,62 @@
 internal import libcpython
 
 public extension Object {
-    subscript(_ key: String) -> Item {
-        @_lifetime(borrow self)
-        get { unsafe Item(container: pointer, key: .string(key), in: self) }
+    borrowing func get<T: Decodable & ~Copyable>(
+        _ key: String,
+        as type: T.Type = T.self,
+    ) throws -> T {
+        try item(.string(key)).get(as: type)
     }
 
-    subscript(_ index: Int) -> Item {
-        @_lifetime(borrow self)
-        get { unsafe Item(container: pointer, key: .index(index), in: self) }
+    borrowing func get<T: Decodable & ~Copyable>(
+        _ index: Int,
+        as type: T.Type = T.self,
+    ) throws -> T {
+        try item(.index(index)).get(as: type)
+    }
+
+    borrowing func set<T: Encodable & ~Copyable>(
+        _ value: borrowing T,
+        forKey key: String,
+    ) throws {
+        try item(.string(key)).set(value)
+    }
+
+    borrowing func set<T: Encodable & ~Copyable>(
+        _ value: borrowing T,
+        at index: Int,
+    ) throws {
+        try item(.index(index)).set(value)
+    }
+
+    borrowing func remove(_ key: String) throws {
+        try item(.string(key)).remove()
+    }
+
+    borrowing func remove(_ index: Int) throws {
+        try item(.index(index)).remove()
     }
 
     @_lifetime(copy self)
-    borrowing func call() throws -> Object {
-        _ = try InterpreterStorage.requireCurrent()
-        return unsafe try Self.take(PyObject_CallNoArgs(pointer), inheriting: self)
+    borrowing func object(_ key: String) throws -> Object {
+        try object(for: .string(key))
     }
 
     @_lifetime(copy self)
-    borrowing func call<T: Encodable>(_ argument: T) throws -> Object {
-        _ = try InterpreterStorage.requireCurrent()
-        let argument = try Object(encoding: argument, in: self)
-        return unsafe try Self.take(
-            PyObject_CallOneArg(pointer, argument.pointer),
-            inheriting: self,
-        )
+    borrowing func object(_ index: Int) throws -> Object {
+        try object(for: .index(index))
+    }
+
+    @_lifetime(copy self)
+    private borrowing func object(for key: Item.Key) throws -> Object {
+        let value = try item(key).object()
+        return unsafe _overrideLifetime(consume value, copying: self)
+    }
+}
+
+extension Object {
+    @_lifetime(borrow self)
+    borrowing func item(_ key: Item.Key) -> Item {
+        unsafe Item(container: pointer, key: key, in: self)
     }
 }

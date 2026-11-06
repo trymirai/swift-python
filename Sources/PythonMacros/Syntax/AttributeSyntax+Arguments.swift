@@ -9,6 +9,7 @@ extension AttributeSyntax {
         guard case let .argumentList(arguments) = self.arguments else {
             return nil
         }
-        return arguments.first { $0.label?.text == label }?.expression.trimmedDescription
+        let value = arguments.first { $0.label?.text == label }?.expression.trimmedDescription
+        return value == "nil" ? nil : value
     }
 }

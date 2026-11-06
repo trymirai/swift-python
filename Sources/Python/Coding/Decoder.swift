@@ -36,17 +36,30 @@ public struct Decoder: ~Copyable, ~Escapable {
         self.depth = depth
     }
 
-    public subscript(_ key: String) -> Item {
-        @_lifetime(borrow self)
-        get { unsafe Item(container: pointer, key: .string(key), depth: depth + 1, in: self) }
+    public borrowing func decode<T: Decodable & ~Copyable>(
+        _ type: T.Type,
+        forKey key: String,
+    ) throws -> T {
+        let item = unsafe Item(container: pointer, key: .string(key), depth: depth + 1, in: self)
+        return try item.get(as: type)
     }
 
-    public subscript(_ index: Int) -> Item {
-        @_lifetime(borrow self)
-        get { unsafe Item(container: pointer, key: .index(index), depth: depth + 1, in: self) }
+    public borrowing func decode<T: Decodable & ~Copyable>(
+        _ type: T.Type,
+        at index: Int,
+    ) throws -> T {
+        let item = unsafe Item(container: pointer, key: .index(index), depth: depth + 1, in: self)
+        return try item.get(as: type)
     }
 
-    public borrowing func get<T: Decodable & ~Copyable>(as type: T.Type = T.self) throws -> T {
+    @_lifetime(borrow self)
+    public borrowing func object() throws -> Object {
+        _ = try InterpreterStorage.requireCurrent()
+        unsafe Py_IncRef(pointer)
+        return unsafe Object(owned: pointer, in: self)
+    }
+
+    public borrowing func decode<T: Decodable & ~Copyable>(_ type: T.Type = T.self) throws -> T {
         _ = try InterpreterStorage.requireCurrent()
         guard depth < 64 else {
             throw Exception(

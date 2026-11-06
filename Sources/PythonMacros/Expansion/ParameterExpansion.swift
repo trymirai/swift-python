@@ -7,16 +7,16 @@ import SwiftSyntaxMacros
 
 struct ParameterExpansion {
     private let index: Int
-    let typeName: String
-    let defaultValueSource: String
-    let parameterIndex: Int
+    private let typeName: String
+    private let defaultValueSource: String
+    private let parameterIndex: Int
     let metadataSource: String
     let argumentSource: String
 
     init(
         _ parameter: FunctionParameterSyntax,
         index: Int,
-        owner: String?,
+        owner: String,
         hasReceiver: Bool,
     ) throws {
         let spelling = parameter.type.trimmedDescription

@@ -23,27 +23,21 @@ private final class ConcreteSelfRewriter: SyntaxRewriter {
 }
 
 extension ExprSyntax {
-    func concreteSpelling(owner: String?) -> String {
-        guard let owner else {
-            return trimmedDescription
-        }
-        return ConcreteSelfRewriter(owner).rewrite(self).trimmedDescription
+    func concreteSpelling(owner: String) -> String {
+        ConcreteSelfRewriter(owner).rewrite(self).trimmedDescription
     }
 }
 
 extension TypeSyntax {
-    func concreteSpelling(owner: String?) -> String {
+    func concreteSpelling(owner: String) -> String {
         var text = trimmedDescription
         for prefix in ["borrowing ", "consuming ", "inout "] {
             if text.hasPrefix(prefix) {
                 text.removeFirst(prefix.count)
             }
         }
-        if let owner {
-            return ConcreteSelfRewriter(owner)
-                .rewrite(TypeSyntax(stringLiteral: text))
-                .trimmedDescription
-        }
-        return text
+        return ConcreteSelfRewriter(owner)
+            .rewrite(TypeSyntax(stringLiteral: text))
+            .trimmedDescription
     }
 }

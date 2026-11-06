@@ -27,7 +27,7 @@ struct ProjectFixture {
             )
             let builder = try await builderRuntime.session()
             do {
-                try await builder.set("root_path", to: root.string)
+                try await builder.set(root.string, forKey: "root_path")
                 _ = try await builder.evaluate(Self.setup)
                 let runtime = try await Python::Runtime(
                     packages: [.directory(root.appending("global").string)],

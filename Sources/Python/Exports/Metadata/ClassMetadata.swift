@@ -13,7 +13,7 @@ struct ClassMetadata {
 extension ClassMetadata: Encodable {
     func encode(to encoder: inout Encoder) throws {
         try encoder.encode(value.key, at: 0)
-        try encoder.encode(value.superclassKey, at: 1)
+        try encoder.encode(value.superclass.map { String(reflecting: $0) }, at: 1)
         try encoder.encode(value.name, at: 2)
         try encoder.encode(value.documentation, at: 3)
         try encoder.encode(value.initializer.map { FunctionMetadata(value: $0) }, at: 4)

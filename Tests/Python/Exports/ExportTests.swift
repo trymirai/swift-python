@@ -57,11 +57,6 @@ private enum AutomaticModule {
     static func format(_ value: Double) -> String {
         "float:\(value)"
     }
-
-    @PythonFunction
-    static func publish(_ value: Int, context: borrowing Python::Context) throws {
-        try context["published"].set(value)
-    }
 }
 
 extension AutomaticModule {
@@ -69,26 +64,32 @@ extension AutomaticModule {
     static func extended(_ value: Int) -> Int {
         value + 1
     }
-}
 
-@PythonFunction(module: AutomaticModule.self)
-private func multiply(_ lhs: Int, _ rhs: Int) -> Int {
-    lhs * rhs
+    @PythonFunction
+    static func multiply(_ lhs: Int, _ rhs: Int) -> Int {
+        lhs * rhs
+    }
 }
 
 // MARK: - ConfiguredModule
 
 @PythonModule("configured")
-private actor ConfiguredModule {
-    let prefix: String
-    init(prefix: String) {
-        self.prefix = prefix
-    }
+private final class ConfiguredModule {
+    private init(prefix: String) {}
 
     @PythonFunction
-    func greeting(_ name: String) -> String {
-        "\(prefix):\(name)"
+    static func greeting(_ name: String, prefix: String) async -> String {
+        await Task.yield()
+        return "\(prefix):\(name)"
     }
+}
+
+// MARK: - InvalidContextModule
+
+@PythonModule("invalid_context")
+private enum InvalidContextModule {
+    @PythonFunction
+    static func injected(_ context: Python::Context) {}
 }
 
 // MARK: - UnselectedModule
@@ -128,9 +129,6 @@ func automaticModuleDiscovery() async throws {
     assert automatic.optional() == 42
     assert automatic.optional(None) is None
 
-    automatic.publish(42)
-    assert published == 42
-    assert list(inspect.signature(automatic.publish).parameters) == ['value']
     assert 'def sum(' in inspect.getsource(automatic.sum)
     assert 'unselected' not in sys.modules
     """)
@@ -138,22 +136,19 @@ func automaticModuleDiscovery() async throws {
 }
 
 @Test
-func configuredActorModule() async throws {
+func staticModuleDoesNotRequireAnInstance() async throws {
     let runtime = try await Python::Runtime()
-    let first = try await runtime.session(moduleInstances: [ConfiguredModule(prefix: "first")])
-    let second = try await runtime.session(moduleInstances: [ConfiguredModule(prefix: "second")])
-    _ = try await first.evaluate("""
+    let session = try await runtime.session(modules: [ConfiguredModule.self])
+    _ = try await session.evaluate("""
     import configured, inspect
     assert inspect.iscoroutinefunction(configured.greeting)
-    assert list(inspect.signature(configured.greeting).parameters) == ['name']
+    assert list(inspect.signature(configured.greeting).parameters) == ['name', 'prefix']
     assert 'async def greeting(' in inspect.getsource(configured.greeting)
-    assert await configured.greeting('x') == 'first:x'
+    assert await configured.greeting('x', prefix='first') == 'first:x'
     """)
-    _ = try await second
-        .evaluate("import configured; assert await configured.greeting('x') == 'second:x'")
-    await #expect(throws: (any Swift.Error).self) {
-        try await runtime.session(modules: [ConfiguredModule.self])
+    let error = try await #require(throws: Python::Exception.self) {
+        try await runtime.session(modules: [InvalidContextModule.self])
     }
-    await first.close()
-    await second.close()
+    #expect(error.message.contains("cannot take a Python Context"))
+    await session.close()
 }

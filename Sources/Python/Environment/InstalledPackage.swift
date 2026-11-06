@@ -26,9 +26,9 @@ extension InstalledPackage: Encodable {
 
 extension InstalledPackage: Decodable {
     init(from decoder: borrowing Decoder) throws {
-        version = try decoder["version"].get()
-        url = try decoder["url"].get()
-        digest = try decoder["digest"].get()
-        filename = try decoder["filename"].get()
+        version = try decoder.decode(String.self, forKey: "version")
+        url = try decoder.decode(String.self, forKey: "url")
+        digest = try decoder.decode(String.self, forKey: "digest")
+        filename = try decoder.decode(String.self, forKey: "filename")
     }
 }

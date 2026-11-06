@@ -18,10 +18,11 @@ extension PythonInitMacro: PeerMacro {
         providingPeersOf declaration: some DeclSyntaxProtocol,
         in context: some MacroExpansionContext,
     ) throws -> [DeclSyntax] {
-        try ExportScope(context).validate()
+        let scope = ExportScope(context)
+        try scope.validate()
         guard
             let initializer = declaration.as(InitializerDeclSyntax.self),
-            let owner = ExportScope(context).owner,
+            let owner = scope.owner,
             owner.isPythonClass || owner.isExtension
         else {
             throw MacroExpansionErrorMessage("PythonInit requires an initializer of a PythonClass.")
@@ -38,12 +39,8 @@ extension PythonInitMacro: PeerMacro {
         // The parsed initializer signature has no result clause; attach the concrete class result.
         method.signature
             .returnClause = ReturnClauseSyntax(type: TypeSyntax(stringLiteral: owner.name))
-        let function = try FunctionExpansion(declaration: method).source(
-            attribute: attribute,
-            receiver: "\(owner.name).",
-            owner: owner,
-            kind: .initializer,
-        )
+        let function = try FunctionExpansion(declaration: method, owner: owner)
+            .source(attribute: attribute)
         return [ExportRegistration(
             method: method,
             definition: "collector.addInitializer(\(owner.name).self, function: \(function))",

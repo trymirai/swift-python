@@ -8,6 +8,18 @@
 @_documentation(visibility: internal)
 public protocol _PythonClass: AnyObject, SendableMetatype, Encodable, Decodable {
     var _pythonIdentity: any AnyObject & Sendable { get }
+    var _pythonContext: Context { get }
+}
+
+extension _PythonClass {
+    var pythonIdentity: InstanceIdentity {
+        get throws {
+            guard let identity = _pythonIdentity as? InstanceIdentity else {
+                throw ExportCatalog.failure("Invalid Swift instance identity.")
+            }
+            return identity
+        }
+    }
 }
 
 public extension _PythonClass {
