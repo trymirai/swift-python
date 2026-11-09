@@ -10,7 +10,7 @@ from contextlib import suppress
 from types import CodeType
 
 from .async_support import await_block
-from .imports import update_imports
+from .imports import import_project, update_imports
 from .streams import capture
 from .streams import install as install_streams
 
@@ -109,11 +109,7 @@ def configure(paths: list[str]) -> None:
             failure = ""
 
             try:
-                if "module" in request:
-                    module = importlib.import_module(request["module"])
-                    # Functions and later assignments share the package's actual globals.
-                    namespace = module.__dict__
-                else:
+                if "source" in request:
                     source = request["source"]
                     filename = "<startup>"
                     code = compile(
@@ -124,6 +120,15 @@ def configure(paths: list[str]) -> None:
                         dont_inherit=True,
                     )
                     run_code(code, source, filename, control)
+                else:
+                    if "project" in request:
+                        module = import_project(
+                            request["project"], request["module"], request["import_paths"]
+                        )
+                    else:
+                        module = importlib.import_module(request["module"])
+                    # Functions and later assignments share the module's actual globals.
+                    namespace = module.__dict__
             except BaseException as exception:
                 failure = _report_exception(exception, stderr, control)
 

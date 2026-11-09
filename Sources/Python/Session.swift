@@ -105,7 +105,12 @@ public actor Session {
             delegate: delegate,
         )
 
-        let output = try opened.initialize(startup, redirecting: redirects, execution: execution)
+        let output = try opened.initialize(
+            startup,
+            importPaths: importPaths,
+            redirecting: redirects,
+            execution: execution,
+        )
         state = .ready(consume opened, output)
     }
 

@@ -9,8 +9,12 @@ public extension Session {
     enum Startup: Sendable {
         case source(String)
 
-        /// Imports a flat-layout project package and resolves dependencies from its root.
-        case project(directory: String, module: String)
+        /// Resolves dependencies from a project and imports a module from it.
+        ///
+        /// A missing name selects the first top-level package with `__init__.py` in name order.
+        /// A named module can also be loaded from an explicit `importPaths` directory within the project.
+        /// Startup fails if the selected module is unavailable in the project.
+        case project(directory: String, module: String? = nil)
 
         /// Uses the imported module's globals as the interactive namespace.
         case module(String)

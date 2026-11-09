@@ -8,6 +8,71 @@ import SystemPackage
 import Testing
 
 @Test
+func projectStartupSelectsOnlyProjectModules() async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, root in
+        let project = root.appending("project")
+        let files = FileSystem.shared
+        try await files.createDirectory(
+            at: project.appending("_without_initializer"),
+            withIntermediateDirectories: true,
+        )
+        try await "pass".write(toFileAt: project.appending("a.py"))
+        try await "raise AssertionError('loaded outside the project')"
+            .write(toFileAt: root.appending("outside.py"))
+
+        let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
+        let empty = try await runtime.session(.project(directory: project.string))
+        try await withSession(empty) { session in
+            let error = try await #require(throws: Python::ExecutionError.self) {
+                try await session.initialize()
+            }
+            #expect(error.traceback.contains("ModuleNotFoundError: No startup package"))
+        }
+
+        for name in ["zeta", "0-invalid", "alpha"] {
+            let package = project.appending(name)
+            try await files.createDirectory(at: package, withIntermediateDirectories: false)
+            try await "pass".write(toFileAt: package.appending("__init__.py"))
+        }
+        try await "pass".write(toFileAt: project.appending("zeta/entry.py"))
+        let sources = project.appending("src")
+        try await files.createDirectory(at: sources, withIntermediateDirectories: false)
+        try await "pass".write(toFileAt: sources.appending("reporting.py"))
+
+        let selections: [(module: String?, name: String)] = [
+            (nil, "alpha"),
+            ("zeta", "zeta"),
+            ("zeta.entry", "zeta.entry"),
+            ("a", "a"),
+            ("reporting", "reporting"),
+        ]
+        for (module, name) in selections {
+            let session = try await runtime.session(
+                .project(directory: project.string, module: module),
+                importPaths: [sources.string],
+            )
+            try await withSession(session) { session in
+                let loaded = try await session.get("__name__", as: String.self)
+                #expect(loaded == name)
+            }
+        }
+
+        for module in ["missing", "alpha.missing", "outside", "sys"] {
+            let session = try await runtime.session(
+                .project(directory: project.string, module: module),
+                importPaths: [root.string],
+            )
+            try await withSession(session) { session in
+                let error = try await #require(throws: Python::ExecutionError.self) {
+                    try await session.initialize()
+                }
+                #expect(error.traceback.contains("ModuleNotFoundError: Startup module '\(module)'"))
+            }
+        }
+    }
+}
+
+@Test
 func projectPreparesPackagesBeforeStartupAndKeepsModuleGlobals() async throws {
     try await ProjectFixture.withFixture { fixture in
         _ = try await fixture.write("""

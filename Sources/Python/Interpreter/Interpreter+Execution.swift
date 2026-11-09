@@ -7,12 +7,13 @@ internal import libcpython
 extension Interpreter {
     borrowing func initialize(
         _ startup: Session.Startup,
+        importPaths: [Runtime.Path],
         redirecting redirects: [Session.Stream: Runtime.Path],
         execution: Session.Control,
     ) throws -> Output {
         let output = try execute(
             "initialize",
-            source: StartupRequest(startup: startup),
+            source: StartupRequest(startup: startup, importPaths: importPaths),
             filename: nil,
             redirecting: redirects,
             execution: execution,
@@ -122,13 +123,18 @@ extension Interpreter {
 private extension Interpreter {
     struct StartupRequest: Encodable {
         let startup: Session.Startup
+        let importPaths: [Runtime.Path]
 
         func encode(to encoder: inout Encoder) throws {
             switch startup {
             case let .source(source):
                 try encoder.encode(source, forKey: "source")
-            case let .module(module), let .project(_, module):
+            case let .module(module):
                 try encoder.encode(module, forKey: "module")
+            case let .project(directory, module):
+                try encoder.encode(directory, forKey: "project")
+                try encoder.encode(module, forKey: "module")
+                try encoder.encode(importPaths.map(\.string), forKey: "import_paths")
             }
         }
     }

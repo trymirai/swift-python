@@ -40,8 +40,8 @@ public struct Runtime: Sendable {
 
     /// Prepares dependencies and returns a session that starts Python on first use.
     ///
-    /// A project supplies dependencies through `requirements.txt` or `pyproject.toml` beside
-    /// its import package. Pass a stable `environmentDirectory` to reuse local packages
+    /// A project supplies dependencies through `requirements.txt` or `pyproject.toml` at its root.
+    /// Pass a stable `environmentDirectory` to reuse local packages
     /// across sessions. Call `Session.initialize(redirecting:)` to start Python explicitly.
     ///
     /// `directory` and `importPaths` grant read access alongside project and package roots.
