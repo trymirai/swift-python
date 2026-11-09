@@ -40,9 +40,13 @@ struct ParameterExpansion {
 
         let name = parameter.secondName?.text ?? parameter.firstName.text
         let pName = name == "_" ? "arg\(index)" : name
-        metadataSource = ".init(\(String(reflecting: pName)), as: \(type), hasDefaultValue: \(parameter.defaultValue != nil))"
+        let isUnlabeled = parameter.firstName.text == "_"
+        metadataSource = """
+        .init(\(String(reflecting: pName)), as: \(type),
+              hasDefaultValue: \(parameter.defaultValue != nil), isUnlabeled: \(isUnlabeled))
+        """
 
-        let label = parameter.firstName.text == "_" ? "" : "\(parameter.firstName.trimmedDescription): "
+        let label = isUnlabeled ? "" : "\(parameter.firstName.trimmedDescription): "
         argumentSource = "\(label)\(isMutableSpan ? "&" : "")__value\(index)"
     }
 

@@ -256,13 +256,14 @@ public actor Session {
 
     nonisolated func withExecution<Result: Sendable>(
         timeout: Duration? = nil,
+        scope: (any Sendable)? = nil,
         output: Control.OutputHandler? = nil,
         onInterruption: Control.InterruptionHandler<Result>? = nil,
         settling: Control.Settlement<Result>? = nil,
         _ operation: @Sendable (isolated Session, Control) async throws -> Result,
     ) async throws -> Result {
         try await withOperation { session in
-            let execution = try Control(timeout: timeout, output: output)
+            let execution = try Control(timeout: timeout, scope: scope, output: output)
 
             session.activeExecution.withLock { $0 = execution }
             defer { session.activeExecution.withLock { $0 = nil } }

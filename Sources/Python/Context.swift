@@ -12,14 +12,22 @@ internal import libcpython
 public struct Context: Sendable {
     let references: Reference.Store
     private weak var session: Session?
+    private weak var execution: Session.Control?
 
     init(storage: Interpreter.Storage) {
         references = storage.references
         session = storage.session
+        execution = storage.execution
     }
 
     init() throws {
         self.init(storage: try Interpreter.Storage.requireCurrent())
+    }
+
+    /// Swift data for the execution that supplied this context.
+    /// The value becomes nil when that execution finishes its callbacks.
+    public var scope: (any Sendable)? {
+        execution?.scope
     }
 
     public borrowing func get<T: Decodable & ~Copyable>(

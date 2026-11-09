@@ -22,6 +22,7 @@ extension Interpreter.Storage {
                 path: unsafe FilePath(platformString: path),
                 operation: .init(operation, mode: mode, options: options),
                 exists: exists,
+                scope: storage.execution?.scope,
             )
             return storage.authorizeFileAccess(request)
         }, context, fileAccess.descriptors)

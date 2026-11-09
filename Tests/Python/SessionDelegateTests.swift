@@ -76,10 +76,15 @@ func sessionDelegateChecksNativeFileOpens() async throws {
         else:
             raise AssertionError('expected delegate to veto truncation')
         assert protected.read_text() == 'keep'
-        """)
+        """, scope: "file access")
 
         let base: String = try await session.get("base")
-        try await checkFileAccessRequests(delegate.requests, relativeTo: FilePath(base))
+        let requests = await delegate.requests
+        try checkFileAccessRequests(requests, relativeTo: FilePath(base))
+        #expect(requests.allSatisfy { $0.scope as? String == "file access" })
+
+        _ = try await session.evaluate("assert readable.read_text() == 'readable'")
+        #expect(await delegate.requests.last?.scope == nil)
     }
 }
 

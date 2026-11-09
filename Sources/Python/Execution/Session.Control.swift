@@ -40,6 +40,7 @@ extension Session {
 
         init(
             timeout: Duration?,
+            scope: (any Sendable)? = nil,
             output: OutputHandler? = nil,
         ) throws {
             try Self.validateTimeout(timeout)
@@ -48,8 +49,12 @@ extension Session {
             self.hasOutputHandler = output != nil
             self.timeout = timeout
 
-            self.state = .init(State(outputHandler: output))
+            self.state = .init(State(scope: scope, outputHandler: output))
             (self.incomingCalls, self.submissions) = AsyncStream.makeStream()
+        }
+
+        var scope: (any Sendable)? {
+            state.withLock { $0.scope }
         }
 
         static func validateTimeout(_ timeout: Duration?) throws {
@@ -79,6 +84,8 @@ extension Session {
             settling: Settlement<Result>? = nil,
             _ operation: (isolated Session) async throws -> Result,
         ) async throws -> Result {
+            defer { _ = state.withLock { exchange(&$0.scope, with: nil) } }
+
             let deadline = timeout.map { ContinuousClock.now + $0 }
             state.withLock { $0.start(until: deadline) }
 
@@ -269,6 +276,7 @@ private extension Session.Control {
         var phase: Phase = .ready
         var evaluatingInterpreter: UInt?
 
+        var scope: (any Sendable)?
         var outputHandler: OutputHandler?
         var calls: [CallID: Invocation] = [:]
 

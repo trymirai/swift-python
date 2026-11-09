@@ -37,9 +37,10 @@ public extension _ExportFunction {
             _ name: String,
             as type: T.Type,
             hasDefaultValue: Bool = false,
+            isUnlabeled: Bool = false,
         ) {
             let kind: Kind = if ObjectIdentifier(type) == ObjectIdentifier(Context.self) {
-                .context
+                .context(isUnlabeled: isUnlabeled)
             } else {
                 .argument(
                     annotation: _ExportFunction.pAnnotation(for: type),
@@ -80,7 +81,7 @@ public extension _ExportFunction {
 extension _ExportFunction.Parameter {
     enum Kind: Sendable {
         case receiver
-        case context
+        case context(isUnlabeled: Bool)
         case argument(annotation: String?, Default)
     }
 }

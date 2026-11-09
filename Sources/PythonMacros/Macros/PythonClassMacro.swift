@@ -105,7 +105,6 @@ extension PythonClassMacro: ExtensionMacro {
         return [try ExtensionDeclSyntax("""
         extension \(type): Python::_PClass {
             public nonisolated var _pIdentity: Python::Object.Identity { __p_identity! }
-            public nonisolated var _pContext: Python::Context { self.context }
         }
         """)]
     }

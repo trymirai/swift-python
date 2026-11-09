@@ -8,7 +8,6 @@
 @_documentation(visibility: internal)
 public protocol _PClass: AnyObject, SendableMetatype, Encodable, Decodable {
     var _pIdentity: Object.Identity { get }
-    var _pContext: Context { get }
 }
 
 public extension _PClass {

@@ -10,7 +10,7 @@ public struct Managed<Instance: _PClass>: Sendable {
     private let reference: Reference
 
     public init(_ instance: borrowing Instance) throws {
-        let context = instance._pContext
+        let context = try Context()
         session = try context.requireSession()
         reference = try context.encode(instance).retain(in: context)
     }

@@ -67,12 +67,13 @@ extension _PClass {
 
     @_lifetime(borrow self)
     private func pFields() throws -> Object {
-        let context = _pContext
-        let storage = try context.checkAccess()
+        let storage = try Interpreter.Storage.requireCurrent()
         let identity = _pIdentity
 
         let wrapper: Object
         if let weak = identity.wrapper {
+            try identity.claim(self, in: storage)
+            let context = Context(storage: storage)
             guard let bound = try context.object(weak) else {
                 throw Exception(
                     name: "ReferenceError",

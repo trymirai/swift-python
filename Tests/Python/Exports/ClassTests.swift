@@ -36,7 +36,6 @@ private enum CounterLifetime {
 
 @PythonClass("Counter", module: CounterModule.self)
 private class Counter {
-    let context: Python::Context
     private var secret = 0
 
     @PythonProperty
@@ -56,7 +55,6 @@ private class Counter {
 
     @PythonInit
     init(_ value: Int = 0, linkToSelf: Bool = false, in context: Python::Context) throws {
-        self.context = context
         CounterLifetime.instanceCount.withLock { $0 += 1 }
         try self.$value(value)
         try self.$default(7)
@@ -93,11 +91,10 @@ private class Counter {
     }
 
     @PythonFunction
-    func invoke() throws -> Int {
+    func invoke(_ context: Python::Context) throws -> Int {
         guard let reference = try self.callback else {
             return -1
         }
-        let context = self.context
         let function = try context.object(reference)
         return try function.call().decode()
     }
@@ -148,22 +145,16 @@ private final class LabeledCounter: Counter {
 
 @PythonClass(module: LabeledCounterModule.self)
 private final class ExistingInstance: Sendable {
-    let context: Python::Context
-
     @PythonProperty
     var note: String?
 
     @PythonProperty
     let number = 42
 
-    init(in context: Python::Context) {
-        self.context = context
-    }
-
     @PythonFunction
-    func asynchronous() async -> Int {
+    func asynchronous(_ context: Python::Context) async -> Int {
         await Task.yield()
-        return number
+        return number + (context.scope as? Int ?? 0)
     }
 }
 
@@ -310,7 +301,7 @@ func classIdentityAndSessionGenerations() async throws {
     let session = try await runtime.session(modules: [LabeledCounterModule.self])
     let other = try await runtime.session(modules: [LabeledCounterModule.self])
 
-    let peer = try await session.enqueue { ExistingInstance(in: $0) }
+    let peer = ExistingInstance()
     try await session.set(peer, forKey: "peer")
     let decoded = try await session.get("peer", as: ExistingInstance.self)
     #expect(decoded === peer)
@@ -324,11 +315,13 @@ func classIdentityAndSessionGenerations() async throws {
     await #expect(throws: (any Swift::Error).self) { try await other.set(peer, forKey: "peer") }
 
     let managed = try await session.enqueue { _ in try Python::Managed(peer) }
+    _ = try await session.evaluate("assert await peer.asynchronous() == 43", scope: 1)
     _ = try await session.evaluate("assert await peer.asynchronous() == 42")
     try await session.set(42, forKey: "value")
     let value: Int = try await managed { peer in
         await Task.yield()
-        return try await peer.context.get("value")
+        #expect(peer.number == 42)
+        return try await session.get("value")
     }
     #expect(value == 42)
 
@@ -348,8 +341,6 @@ private enum CheckpointModule {}
 
 @PythonClass("Peer", module: CheckpointModule.self)
 private final class CheckpointPeer {
-    let context: Python::Context
-
     @PythonProperty
     let value: Int
 
@@ -357,9 +348,8 @@ private final class CheckpointPeer {
     private var reference: Python::Reference?
 
     @PythonInit
-    init(_ value: Int = 0, in context: Python::Context) {
+    init(_ value: Int = 0) {
         self.value = value
-        self.context = context
     }
 
     @PythonFunction

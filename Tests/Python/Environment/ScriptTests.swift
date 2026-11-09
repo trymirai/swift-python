@@ -105,6 +105,7 @@ func scriptAuthorizationUsesTheApprovedSourceWithoutGrantingSiblingReads() async
         try await FileSystem.shared.createSymbolicLink(at: link, withDestination: script)
 
         let delegate = FileAccessDelegate { request in
+            #expect(request.scope as? String == "script access")
             guard request.path.lastComponent == script.lastComponent else {
                 return false
             }
@@ -118,6 +119,7 @@ func scriptAuthorizationUsesTheApprovedSourceWithoutGrantingSiblingReads() async
         let runtime = try await Python::Runtime()
         let result = try await runtime.run(
             script: link.string,
+            scope: "script access",
             arguments: [sibling.string],
             delegate: delegate,
         )

@@ -174,13 +174,11 @@ extension Module {
             for export in exports {
                 switch export {
                 case let .method(owner, function):
-                    guard !function.parameters.contains(where: \.isInjected) else {
-                        throw Self.failure("An exported method uses the class's stored Context.")
-                    }
+                    try Self.validateContext(in: function, at: 1)
                     classes[owner]?.methods.append(function)
                 case let .initializer(owner, function):
-                    guard function.parameters.count(where: \.isInjected) == 1 else {
-                        throw Self.failure("A PythonInit requires one Context parameter.")
+                    guard function.parameters.count(where: \.isInjected) <= 1 else {
+                        throw Self.failure("A PythonInit can take at most one Context parameter.")
                     }
                     if classes[owner]?.initializer != nil {
                         throw Self.failure("A class has more than one PythonInit.")
@@ -207,19 +205,30 @@ extension Module {
             return functions
         }
 
+        private static func validateContext(
+            in function: Module.Function,
+            at contextIndex: Int,
+        ) throws {
+            for (index, parameter) in function.parameters.enumerated() {
+                if
+                    case let .context(isUnlabeled) = parameter.kind,
+                    index != contextIndex || !isUnlabeled
+                {
+                    throw failure("A PythonFunction Context must be the first unlabeled parameter.")
+                }
+            }
+        }
+
         private static func makeModule(
             _ type: any ModuleHost.Type,
             name: String,
             functions: [Module.Function],
             classes: [Module.Class],
         ) throws -> Module {
-            guard !functions.contains(where: { $0.parameters.contains(where: \.isInjected) }) else {
-                throw failure("A module function cannot take a Python Context.")
-            }
-
             let functions = functions.sorted { $0.name < $1.name }
             var names = Set<String>()
             for function in functions {
+                try validateContext(in: function, at: 0)
                 guard names.insert(function.name).inserted else {
                     throw Self
                         .failure("Python export '\(name).\(function.name)' was declared twice.")

@@ -13,8 +13,11 @@ public extension Session {
     ///
     /// Output redirections append to absolute paths for this block. Implicit startup
     /// captures its own output.
+    ///
+    /// The scope is available to Swift exports and the file access delegate during the block.
     nonisolated func evaluate(
         _ source: String,
+        scope: (any Sendable)? = nil,
         filename: String? = nil,
         timeout: Duration? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
@@ -22,6 +25,7 @@ public extension Session {
     ) async throws -> Execution {
         try await run(
             .interactive(source),
+            scope: scope,
             filename: filename,
             timeout: timeout,
             redirecting: redirects,
@@ -30,8 +34,11 @@ public extension Session {
     }
 
     /// Runs startup when the session is idle. The redirections apply to startup.
-    nonisolated func initialize(redirecting redirects: [Stream: FilePath] = [:]) async throws {
-        try await withExecution { session, execution in
+    nonisolated func initialize(
+        scope: (any Sendable)? = nil,
+        redirecting redirects: [Stream: FilePath] = [:],
+    ) async throws {
+        try await withExecution(scope: scope) { session, execution in
             let redirects = try redirects.mapValues(Runtime.Path.init)
             try session.openInterpreterIfNeeded(execution: execution, redirecting: redirects)
         }
@@ -42,6 +49,7 @@ public extension Session {
     /// If publication fails after sealing, restore those changes before throwing.
     nonisolated func evaluate(
         _ source: String,
+        scope: (any Sendable)? = nil,
         filename: String? = nil,
         timeout: Duration? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
@@ -50,6 +58,7 @@ public extension Session {
     ) async throws -> Execution {
         try await run(
             .interactive(source),
+            scope: scope,
             filename: filename,
             timeout: timeout,
             redirecting: redirects,
@@ -70,9 +79,10 @@ public extension Session {
     /// Runs synchronously on this session's interpreter thread in the operation queue.
     /// Scoped Python objects and views cannot escape the closure or cross an await.
     nonisolated func enqueue<R: Sendable & ~Copyable>(
+        scope: (any Sendable)? = nil,
         _ body: @Sendable (borrowing Context) throws -> R,
     ) async throws -> R {
-        try await enqueue(in: nil, body)
+        try await enqueue(in: nil, scope: scope, body)
     }
 
     /// Runs asynchronous Swift work with a context bound to the current generation.
@@ -88,9 +98,10 @@ public extension Session {
 extension Session {
     nonisolated func enqueue<R: Sendable & ~Copyable>(
         in generation: Reference.Store?,
+        scope: (any Sendable)? = nil,
         _ body: @Sendable (borrowing Context) throws -> R,
     ) async throws -> R {
-        let result = try await withExecution { session, execution in
+        let result = try await withExecution(scope: scope) { session, execution in
             try session
                 .withInterpreter(execution: execution, generation: generation) { interpreter in
                     Session.Transfer(try interpreter.withContext(body, execution: execution))
@@ -101,6 +112,7 @@ extension Session {
 
     nonisolated func run(
         _ source: Interpreter.Source,
+        scope: (any Sendable)?,
         filename: String?,
         timeout: Duration?,
         redirecting redirects: [Stream: FilePath],
@@ -114,6 +126,7 @@ extension Session {
         let settlement = transactional ? Self.checkpointSettlement(committing: committing) : nil
         return try await withExecution(
             timeout: timeout,
+            scope: scope,
             output: output,
             onInterruption: Self.interruptedExecution,
             settling: settlement,

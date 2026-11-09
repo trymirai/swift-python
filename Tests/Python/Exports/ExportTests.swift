@@ -80,8 +80,13 @@ private final class ConfiguredModule {
     private init(prefix: String) {}
 
     @PythonFunction
-    static func greeting(_ name: String, prefix: String) async -> String {
+    static func greeting(
+        _ context: Python::Context,
+        _ name: String,
+        prefix: String,
+    ) async -> String {
         await Task.yield()
+        let prefix = context.scope as? String ?? prefix
         return "\(prefix):\(name)"
     }
 }
@@ -91,7 +96,15 @@ private final class ConfiguredModule {
 @PythonModule("invalid_context")
 private enum InvalidContextModule {
     @PythonFunction
-    static func injected(_ context: Python::Context) {}
+    static func injected(_ value: Int, _ context: Python::Context) {}
+}
+
+// MARK: - LabeledContextModule
+
+@PythonModule("labeled_context")
+private enum LabeledContextModule {
+    @PythonFunction
+    static func injected(in context: Python::Context) {}
 }
 
 // MARK: - InitializedModule
@@ -102,12 +115,9 @@ from initialized.child import increment
 result = increment(seed())
 """)
 private enum InitializedModule {
-    @TaskLocal
-    static var seedValue = 0
-
     @PythonFunction
-    static func seed() -> Int {
-        seedValue
+    static func seed(_ context: Python::Context) -> Int {
+        context.scope as? Int ?? 0
     }
 }
 
@@ -174,9 +184,7 @@ func moduleSourceUsesSwiftExportsBeforeStartup() async throws {
     )
 
     try await withSession(session) { session in
-        try await InitializedModule.$seedValue.withValue(41) {
-            try await session.initialize()
-        }
+        try await session.initialize(scope: 41)
     }
 }
 
@@ -194,8 +202,24 @@ func staticModuleDoesNotRequireAnInstance() async throws {
     assert await configured.greeting('x', prefix='first') == 'first:x'
     """)
 
-    let error = try await #require(throws: Python::Exception.self) {
-        try await runtime.session(modules: [InvalidContextModule.self])
+    _ = try await session.evaluate(
+        "assert await configured.greeting('x', prefix='first') == 'second:x'",
+        scope: "second",
+    )
+    let retained = try await session.enqueue(scope: 42) { context in
+        #expect(context.scope as? Int == 42)
+        return context
     }
-    #expect(error.message.contains("cannot take a Python Context"))
+    #expect(retained.scope == nil)
+
+    let invalidModules: [any Python::ModuleHost.Type] = [
+        InvalidContextModule.self,
+        LabeledContextModule.self,
+    ]
+    for module in invalidModules {
+        let error = try await #require(throws: Python::Exception.self) {
+            try await runtime.session(modules: [module])
+        }
+        #expect(error.message.contains("first unlabeled parameter"))
+    }
 }

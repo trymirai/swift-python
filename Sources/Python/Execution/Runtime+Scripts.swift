@@ -14,11 +14,13 @@ public extension Runtime {
     /// The delegate checks the resolved source before reading it. Approval covers that file.
     /// Pass `importPaths` to grant additional reads. Without a delegate, the caller authorizes
     /// the source and its directory becomes a readable import root.
+    /// The same scope is available when checking the source and running the script.
     ///
     /// The timeout starts after reading the source and preparing dependencies. Omit
     /// `environmentDirectory` for a temporary environment. The session closes on every outcome.
     func run(
         script path: String,
+        scope: (any Sendable)? = nil,
         arguments: [String] = [],
         environmentDirectory: String? = nil,
         importPaths: [String] = [],
@@ -30,7 +32,7 @@ public extension Runtime {
     ) async throws -> Execution {
         try Session.Control.validateTimeout(timeout)
         let definitions = try Module.Catalog.resolve(modules)
-        let script = try await Self.readScript(at: path, delegate: delegate)
+        let script = try await Self.readScript(at: path, scope: scope, delegate: delegate)
         let requirements = try await scriptRequirements(script.source)
 
         let session = try await makeSession(
@@ -45,6 +47,7 @@ public extension Runtime {
         defer { await session.close() }
         return try await session.run(
             .script(script.source, arguments: arguments),
+            scope: scope,
             filename: script.filename,
             timeout: timeout,
             redirecting: redirects,
@@ -56,6 +59,7 @@ public extension Runtime {
 extension Runtime {
     private static func readScript(
         at path: String,
+        scope: (any Sendable)?,
         delegate: (any Session.Delegate)?,
     ) async throws -> (filename: String, source: String, importDirectory: Path?) {
         let file = try Path(path).file
@@ -72,6 +76,7 @@ extension Runtime {
             path: target.path,
             operation: .open(mode: .readOnly, options: []),
             exists: target.exists,
+            scope: scope,
         )
 
         try Task.checkCancellation()

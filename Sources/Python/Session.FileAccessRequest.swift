@@ -15,6 +15,9 @@ public extension Session {
         /// Whether the entry existed when the request was made.
         public let exists: Bool
 
+        /// Swift data supplied by the caller for this operation.
+        public let scope: (any Sendable)?
+
         public enum Operation: Sendable, Equatable {
             case open(mode: FileDescriptor.AccessMode, options: FileDescriptor.OpenOptions)
 

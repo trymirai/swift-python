@@ -18,6 +18,7 @@ public macro PythonModule(
 )
 
 /// Exports the method as a Python function, preserving asynchronous calls.
+/// An optional first unlabeled `Context` parameter receives the current Swift callback context.
 @attached(peer, names: prefixed(__p_))
 public macro PythonFunction(
     _ name: String? = nil,
@@ -33,8 +34,7 @@ public macro PythonFunction(
 @attached(
     extension,
     conformances: _PClass,
-    names: named(_pIdentity),
-    named(_pContext)
+    names: named(_pIdentity)
 )
 public macro PythonClass(
     _ name: String? = nil,
@@ -42,7 +42,7 @@ public macro PythonClass(
     documentation: String? = nil,
 ) = #externalMacro(module: "PythonMacros", type: "PythonClassMacro")
 
-/// Selects a synchronous, non-failable initializer with a `Context` parameter.
+/// Selects a synchronous, non-failable initializer. It may receive a `Context` parameter.
 @attached(peer, names: prefixed(__p_))
 public macro PythonInit(documentation: String? = nil) = #externalMacro(
     module: "PythonMacros",
