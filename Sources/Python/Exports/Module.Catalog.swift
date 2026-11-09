@@ -229,6 +229,7 @@ extension Module {
             var module = Module(
                 name,
                 documentation: type._pModuleDocumentation,
+                source: type._pModuleSource,
                 functions: functions,
             )
 

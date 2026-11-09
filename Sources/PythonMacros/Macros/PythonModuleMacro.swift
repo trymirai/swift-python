@@ -49,6 +49,11 @@ extension PythonModuleMacro: MemberMacro {
                 type: "Swift::String?",
                 value: attribute.documentationSource,
             ),
+            metadata(
+                "_pModuleSource",
+                type: "Swift::String?",
+                value: attribute.argument(named: "source") ?? "nil",
+            ),
         ]
     }
 }

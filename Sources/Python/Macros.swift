@@ -3,9 +3,16 @@
 //
 
 /// Defines an importable module that the host selects through `modules`.
-@attached(member, names: named(_pModuleName), named(_pModuleDocumentation))
+///
+/// Optional source runs in the module's namespace after Swift exports are installed
+/// and before session startup.
+@attached(member, names: named(_pModuleName), named(_pModuleDocumentation), named(_pModuleSource))
 @attached(extension, conformances: ModuleHost)
-public macro PythonModule(_ name: String, documentation: String? = nil) = #externalMacro(
+public macro PythonModule(
+    _ name: String,
+    documentation: String? = nil,
+    source: String? = nil,
+) = #externalMacro(
     module: "PythonMacros",
     type: "PythonModuleMacro",
 )

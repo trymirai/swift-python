@@ -94,6 +94,33 @@ private enum InvalidContextModule {
     static func injected(_ context: Python::Context) {}
 }
 
+// MARK: - InitializedModule
+
+@PythonModule("initialized", source: """
+from initialized.child import increment
+
+result = increment(seed())
+""")
+private enum InitializedModule {
+    @TaskLocal
+    static var seedValue = 0
+
+    @PythonFunction
+    static func seed() -> Int {
+        seedValue
+    }
+}
+
+// MARK: - InitializedChildModule
+
+@PythonModule("initialized.child")
+private enum InitializedChildModule {
+    @PythonFunction
+    static func increment(_ value: Int) -> Int {
+        value + 1
+    }
+}
+
 // MARK: - UnselectedModule
 
 @PythonModule("unselected")
@@ -133,6 +160,24 @@ func automaticModuleDiscovery() async throws {
     assert 'def sum(' in inspect.getsource(automatic.sum)
     assert 'unselected' not in sys.modules
     """, modules: [AutomaticModule.self])
+}
+
+@Test
+func moduleSourceUsesSwiftExportsBeforeStartup() async throws {
+    let session = try await Python::Runtime().session(
+        .source("""
+        import initialized
+
+        assert initialized.result == 42
+        """),
+        modules: [InitializedModule.self, InitializedChildModule.self],
+    )
+
+    try await withSession(session) { session in
+        try await InitializedModule.$seedValue.withValue(41) {
+            try await session.initialize()
+        }
+    }
 }
 
 @Test
