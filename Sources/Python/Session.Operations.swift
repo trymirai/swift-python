@@ -64,15 +64,7 @@ extension Session {
         }
 
         private func release() {
-            let next = state.withLock { $0.advance() }
-            switch next {
-            case let .operation(_, continuation):
-                continuation.resume()
-            case let .closing(continuation):
-                continuation.resume()
-            case nil:
-                break
-            }
+            state.withLock { $0.advance() }?.resume()
         }
     }
 }
@@ -106,6 +98,15 @@ private extension Session.Operations {
                 nil
             }
         }
+
+        func resume() {
+            switch self {
+            case let .operation(_, continuation):
+                continuation.resume()
+            case let .closing(continuation):
+                continuation.resume()
+            }
+        }
     }
 }
 
@@ -113,7 +114,7 @@ private extension Session.Operations {
 
 private extension Session.Operations {
     struct State {
-        // A reserved turn can have an empty queue.
+        // nil means idle. An empty queue can still have an active reservation.
         private var waiters: [Waiter]?
 
         mutating func reserve() -> Bool {

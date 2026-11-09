@@ -4,10 +4,11 @@
 
 internal import libcpython
 
-/// A weak reference to a weak-reference-capable Python object.
+/// Resolves to `nil` once the Python object is collected.
 public struct WeakReference: Sendable {
     private let reference: Reference
 
+    /// Throws `TypeError` if the Python object does not support weak references.
     public init(_ object: borrowing Object, in context: borrowing Context) throws {
         try context.checkAccess()
         let weak = unsafe try Object.take(CPython_NewWeakReference(object.pointer), in: context)

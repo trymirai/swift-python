@@ -131,8 +131,11 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
     let host = Python::Module("host", functions: [function])
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(moduleDefinitions: [host])
+    defer { await session.close() }
+
     target.withLock { $0 = session }
 
+    try await session.initialize()
     let timeout: Duration? = interruption == .timeout ? .seconds(2) : nil
     let evaluation = Task {
         try await session.evaluate("""
@@ -169,7 +172,6 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
     42
     """)
     #expect(next.output.stdout == "42\n")
-    await session.close()
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -207,6 +209,8 @@ func cancellingOnePythonAwaitCancelsOnlyItsSwiftCallback() async throws {
     ])
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(moduleDefinitions: [host])
+    defer { await session.close() }
+
     _ = try await session.evaluate("""
     import asyncio, host
     waiting = asyncio.create_task(host.wait())
@@ -221,7 +225,6 @@ func cancellingOnePythonAwaitCancelsOnlyItsSwiftCallback() async throws {
         raise AssertionError("Expected the first callback to be cancelled")
     assert await answer == 42
     """, timeout: .seconds(5))
-    await session.close()
 }
 
 func nextSignal(from stream: AsyncStream<Void>) async -> Void? {

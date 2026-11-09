@@ -26,6 +26,7 @@ public struct Managed<Instance: _PClass>: Sendable {
 }
 
 public extension Managed where Instance: Sendable {
+    /// Resolves the instance on its session before running asynchronous Swift code.
     func callAsFunction<Result: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Instance) async throws -> Result,
     ) async throws -> Result {

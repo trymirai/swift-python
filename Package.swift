@@ -91,6 +91,7 @@ let package = Package(
             dependencies: [
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "_NIOFileSystem", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
 
                 .byName(name: "libcpython"),
                 .byName(name: "PythonMacros"),
@@ -238,6 +239,7 @@ private extension Target {
                 "src/Python/dynload_shlib.c",
                 "src/Python/frozen.c",
                 "src/Python/getplatform.c",
+                "src/Python/import.c",
                 "src/Python/sysmodule.c",
                 "src/Python/bytecodes.c",
                 "src/Python/dup2.c",
@@ -323,7 +325,6 @@ private extension Target {
                 "_struct.c",
                 "_suggestions.c",
                 "_sysconfig.c",
-                "_threadmodule.c",
                 "_tracemalloc.c",
                 "_typesmodule.c",
                 "_typingmodule.c",
@@ -353,7 +354,6 @@ private extension Target {
                 "pyexpat.c",
                 "resource.c",
                 "rotatingtree.c",
-                "selectmodule.c",
                 "sha1module.c",
                 "sha2module.c",
                 "sha3module.c",
@@ -378,6 +378,7 @@ private extension Target {
                 .headerSearchPath("src/Modules/_hacl"),
                 .headerSearchPath("src/Modules/_hacl/include"),
                 .headerSearchPath("src/Modules/expat"),
+                .headerSearchPath("src/Python"),
 
                 // config.c uses these defines to select system-library fallbacks.
                 .define("SWIFT_PYTHON_BUNDLED_OPENSSL", .when(traits: ["OpenSSL"])),

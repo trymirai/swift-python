@@ -2,7 +2,7 @@
 //  Created by Anton Spivak
 //
 
-/// Synthesizes a module from the static functions marked with `PythonFunction`.
+/// Defines an importable module that the host selects through `modules`.
 @attached(member, names: named(_pModuleName), named(_pModuleDocumentation))
 @attached(extension, conformances: ModuleHost)
 public macro PythonModule(_ name: String, documentation: String? = nil) = #externalMacro(
@@ -20,7 +20,7 @@ public macro PythonFunction(
     type: "PythonFunctionMacro",
 )
 
-/// Exports a Swift class. Its base class is inferred from Swift inheritance.
+/// Exports a Swift class. The nearest exported Swift ancestor supplies its Python base.
 @attached(member, names: prefixed(__p_), named(__p_identity))
 @attached(memberAttribute)
 @attached(
@@ -35,7 +35,7 @@ public macro PythonClass(
     documentation: String? = nil,
 ) = #externalMacro(module: "PythonMacros", type: "PythonClassMacro")
 
-/// Selects the synchronous, non-failable initializer callable from Python.
+/// Selects a synchronous, non-failable initializer with a `Context` parameter.
 @attached(peer, names: prefixed(__p_))
 public macro PythonInit(documentation: String? = nil) = #externalMacro(
     module: "PythonMacros",

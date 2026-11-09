@@ -59,6 +59,7 @@ extension Module {
             }
 
             let catalog = Self()
+
             var selectedModules = [ObjectIdentifier: any ModuleHost.Type]()
             for type in moduleTypes {
                 selectedModules[ObjectIdentifier(type)] = type
@@ -75,11 +76,24 @@ extension Module {
                 classes: classes,
                 classesByModule: classesByModule,
             )
-            let functionsByModule = catalog.functionsByModule(in: selectedModules)
 
+            return try assembleModules(
+                selectedModules.values,
+                addingTo: definitions,
+                functionsByModule: catalog.functionsByModule(in: selectedModules),
+                classesByModule: classesByModule,
+            )
+        }
+
+        private static func assembleModules(
+            _ selected: some Sequence<any ModuleHost.Type>,
+            addingTo definitions: [Module],
+            functionsByModule: [ObjectIdentifier: [Module.Function]],
+            classesByModule: [ObjectIdentifier: [Module.Class]],
+        ) throws -> [Module] {
             var result = definitions
             var names = Set(definitions.map(\.name))
-            let sortedModules = selectedModules.values.sorted { $0._pModuleName < $1._pModuleName }
+            let sortedModules = selected.sorted { $0._pModuleName < $1._pModuleName }
             for type in sortedModules {
                 let name = type._pModuleName
                 guard names.insert(name).inserted else {
@@ -112,6 +126,7 @@ extension Module {
                 }
             }
 
+            // Walk through unexported Swift bases to find the Python superclass.
             func exportedSuperclass(of type: AnyClass) -> (any _PClass.Type)? {
                 var superclass: AnyClass? = _getSuperclass(type)
                 while let candidate = superclass {

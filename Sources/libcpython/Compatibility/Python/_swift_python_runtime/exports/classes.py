@@ -26,6 +26,7 @@ class NativeClasses:
 
         self._types = {}
         self._base = None
+
         self._creating = False
 
     def prepare(self, record, module: ModuleType) -> _PreparedClass:

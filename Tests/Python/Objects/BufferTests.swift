@@ -91,6 +91,8 @@ func exportedBufferArgumentsBorrowPythonStorage() async throws {
 func explicitBufferLeaseMutatesAndReadsPythonStorage() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
+    defer { await session.close() }
+
     _ = try await session.evaluate("""
     values = bytearray([6, 12, 18])
     invalid_buffer = [1, 2]
@@ -120,5 +122,4 @@ func explicitBufferLeaseMutatesAndReadsPythonStorage() async throws {
         #expect(sum == 66)
     }
     _ = try await session.evaluate("assert values == bytearray([6, 42, 18])")
-    await session.close()
 }

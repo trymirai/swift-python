@@ -102,21 +102,10 @@ extension Environment.Service {
         execution: Session.Control,
     ) async throws {
         let files = FileSystem.shared
-        let entries = try await files.withDirectoryHandle(atPath: source) { handle in
-            var entries = [DirectoryEntry]()
-            for try await entry in handle.listContents() {
-                let name = entry.name.string
-                if !name.hasPrefix("."), name != "__pycache__" {
-                    entries.append(entry)
-                }
-            }
-            entries.sort { $0.name.string < $1.name.string }
-            return entries
-        }
-
-        func copyEntry(_ entry: DirectoryEntry) async throws {
-            let name = entry.name.string
+        for entry in try await projectEntries(in: source) {
             try execution.checkInterruption()
+
+            let name = entry.name.string
             let target = destination.appending(entry.name)
             guard let info = try await files.info(forFileAt: entry.path) else {
                 throw Exception(name: "FileNotFoundError", message: entry.path.string)
@@ -127,16 +116,26 @@ extension Environment.Service {
                     try await files.info(forFileAt: entry.path, infoAboutSymbolicLink: true)?
                         .type != .symlink
                 else {
-                    return
+                    continue
                 }
                 try await copyDirectory(entry.path, to: target, execution: execution)
             } else if !name.hasSuffix(".pyc") && !name.hasSuffix(".pyo") {
                 try await copyProjectFile(entry.path, to: target)
             }
         }
+    }
 
-        for entry in entries {
-            try await copyEntry(entry)
+    private static func projectEntries(in directory: FilePath) async throws -> [DirectoryEntry] {
+        try await FileSystem.shared.withDirectoryHandle(atPath: directory) { handle in
+            var entries = [DirectoryEntry]()
+            for try await entry in handle.listContents() {
+                let name = entry.name.string
+                if !name.hasPrefix("."), name != "__pycache__" {
+                    entries.append(entry)
+                }
+            }
+            entries.sort { $0.name.string < $1.name.string }
+            return entries
         }
     }
 

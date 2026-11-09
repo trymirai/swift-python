@@ -14,6 +14,8 @@ extension Interpreter {
         private var keysByTypeAddress: [UInt: String] = [:]
         private var wrapperFactory: Reference?
 
+        private var savedWrappers: [ObjectIdentifier: (Object.Identity, WeakReference?)]?
+
         init(modules: [Module]) {
             classKeys = Set(modules.flatMap(\.classes).map(\.key))
         }
@@ -49,6 +51,22 @@ extension Interpreter {
             isInstalled = true
         }
 
+        func beginCheckpoint() {
+            precondition(savedWrappers == nil)
+            savedWrappers = [:]
+        }
+
+        func finishCheckpoint(restoring: Bool) {
+            guard let saved = exchange(&savedWrappers, with: nil) else {
+                preconditionFailure("A Python class checkpoint is not active.")
+            }
+            if restoring {
+                for (identity, wrapper) in saved.values {
+                    identity.restoreWrapper(wrapper)
+                }
+            }
+        }
+
         static func unregistered() -> Exception {
             Module.Catalog.failure("The Swift class's module is not installed in this session.")
         }
@@ -58,7 +76,6 @@ extension Interpreter {
             for instance: any _PClass,
             in context: borrowing Context,
         ) throws -> Object {
-            // CPython_NewPeer takes this retain even if allocating the capsule fails.
             let retained = unsafe Unmanaged.passRetained(instance as AnyObject).toOpaque()
             let capsule = unsafe CPython_NewPeer(retained, { pointer in
                 unsafe Unmanaged<AnyObject>.fromOpaque(pointer).release()
@@ -92,6 +109,7 @@ extension Interpreter {
                 throw Self.unregistered()
             }
 
+            rememberWrapper(for: identity)
             try identity.beginWrapperConstruction()
             defer { identity.endWrapperConstruction() }
 
@@ -101,6 +119,16 @@ extension Interpreter {
 
             let wrapper = try function.call(key, capsule)
             return unsafe Object(owned: wrapper.release(), in: owner)
+        }
+
+        private func rememberWrapper(for identity: Object.Identity) {
+            guard savedWrappers != nil else {
+                return
+            }
+            let id = ObjectIdentifier(identity)
+            if savedWrappers?[id] == nil {
+                savedWrappers?[id] = (identity, identity.wrapper)
+            }
         }
 
         @unsafe

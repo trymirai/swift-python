@@ -2,12 +2,15 @@
 //  Created by Anton Spivak
 //
 
-public import SystemPackage
-
 /// A handle to the process-wide embedded Python runtime.
 public struct Runtime: Sendable {
     private static let startup: Task<Void, any Swift::Error> = .detached {
-        let session = try Session(directory: nil, importPaths: [], modules: [])
+        let session = Session(
+            executor: try Interpreter.Executor(),
+            directory: nil,
+            importPaths: [],
+            modules: [],
+        )
         try await session.initializeRuntime()
     }
 
@@ -35,20 +38,24 @@ public struct Runtime: Sendable {
         self.packaging = packaging
     }
 
-    /// Prepares dependencies and initializes a persistent interactive namespace.
+    /// Prepares dependencies and returns a session that starts Python on first use.
     ///
-    /// A project's requirements.txt or pyproject.toml sits beside its import package.
-    /// The environment directory holds this session's local packages; pass a stable
-    /// location to reuse them after closing the session. File APIs that use the OS
-    /// working directory still observe the process-wide directory.
-    /// The `redirecting` paths apply only to the initial execution of `startup`.
+    /// A project supplies dependencies through `requirements.txt` or `pyproject.toml` beside
+    /// its import package. Pass a stable `environmentDirectory` to reuse local packages
+    /// across sessions. Call `Session.initialize(redirecting:)` to start Python explicitly.
+    ///
+    /// `directory` and `importPaths` grant read access alongside project and package roots.
+    /// The delegate decides other access. Relative OS paths use the process working directory.
+    ///
+    /// Transactional evaluation restores Python state and the positions of session-owned
+    /// descriptors after failure or interruption. Filesystem mutations persist across rollback.
     public func session(
         _ startup: Session.Startup = .source(""),
         directory: String? = nil,
         environmentDirectory: String? = nil,
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
-        redirecting redirects: [Session.Stream: FilePath] = [:],
+        transactional: Bool = false,
         delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
         try await session(
@@ -58,7 +65,7 @@ public struct Runtime: Sendable {
             importPaths: importPaths,
             modules: modules,
             moduleDefinitions: [],
-            redirecting: redirects,
+            transactional: transactional,
             delegate: delegate,
         )
     }
@@ -70,26 +77,55 @@ public struct Runtime: Sendable {
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
         moduleDefinitions: [Module],
-        redirecting redirects: [Session.Stream: FilePath] = [:],
+        transactional: Bool = false,
         delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
         let definitions = try Module.Catalog.resolve(modules, definitions: moduleDefinitions)
-        let session = try Session(
+        return try await makeSession(
+            startup,
             directory: directory.map(Path.init),
+            environmentDirectory: environmentDirectory.map(Path.init),
             importPaths: importPaths.map(Path.init),
             modules: definitions,
-            startup: startup,
-            packaging: packaging,
-            environmentDirectory: environmentDirectory.map(Path.init),
+            transactional: transactional,
             delegate: delegate,
         )
+    }
+
+    func makeSession(
+        _ startup: Session.Startup = .source(""),
+        directory: Path?,
+        environmentDirectory: Path?,
+        importPaths: [Path],
+        modules: [Module],
+        transactional: Bool = false,
+        requirements: [String] = [],
+        delegate: (any Session.Delegate)?,
+    ) async throws -> Session {
+        let environment = Environment(
+            directory: environmentDirectory,
+            projectDirectory: try startup.projectDirectory.map(Path.init),
+            requirements: requirements,
+            packaging: packaging,
+        )
+        let executor: Interpreter.Executor
         do {
-            try await session.prepare(redirecting: redirects)
-            return session
+            try await environment.prepare()
+            executor = try Interpreter.Executor()
         } catch {
-            await session.close()
+            await environment.close()
             throw error
         }
+        return Session(
+            executor: executor,
+            directory: directory,
+            importPaths: importPaths,
+            modules: modules,
+            startup: startup,
+            transactional: transactional,
+            environment: environment,
+            delegate: delegate,
+        )
     }
 
     /// Prepares a project's pure-Python dependencies as an embeddable site-packages ZIP.
@@ -119,9 +155,7 @@ public struct Runtime: Sendable {
             Session.Control,
         ) async throws -> Result,
     ) async throws -> Result {
-        let execution = try Session.Control(timeout: nil)
-        return try await execution.withCancellation {
-            defer { _ = execution.finish() }
+        try await Environment.withPackageOperation { execution in
             let (service, configuration) = try await packaging.open()
             return try await operation(service, configuration, execution)
         }

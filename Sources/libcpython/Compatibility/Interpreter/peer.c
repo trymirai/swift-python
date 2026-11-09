@@ -1,8 +1,11 @@
 #include "../interpreter.h"
+#include "host_value.h"
 
 #include <stdlib.h>
 
 typedef struct {
+    HostValue lifetime;
+
     void *value;
     void (*destroy)(void *);
 } SwiftPeer;
@@ -10,8 +13,9 @@ typedef struct {
 static const char peer_name[] = "swift-python.peer";
 
 static void
-free_peer(SwiftPeer *peer)
+free_peer(HostValue *value)
 {
+    SwiftPeer *peer = (SwiftPeer *)value;
     peer->destroy(peer->value);
     free(peer);
 }
@@ -21,7 +25,7 @@ destroy_peer(PyObject *capsule)
 {
     SwiftPeer *peer = PyCapsule_GetPointer(capsule, peer_name);
     if (peer != NULL) {
-        free_peer(peer);
+        checkpoint_release_host_value(&peer->lifetime);
     }
 }
 
@@ -33,13 +37,9 @@ CPython_NewPeer(void *value, void (*destroy)(void *))
         destroy(value);
         return PyErr_NoMemory();
     }
-    *peer = (SwiftPeer){.value = value, .destroy = destroy};
+    *peer = (SwiftPeer){.lifetime = {.dispose = free_peer}, .value = value, .destroy = destroy};
 
-    PyObject *capsule = PyCapsule_New(peer, peer_name, destroy_peer);
-    if (capsule == NULL) {
-        free_peer(peer);
-    }
-    return capsule;
+    return host_value_capsule(&peer->lifetime, peer_name, destroy_peer);
 }
 
 void *

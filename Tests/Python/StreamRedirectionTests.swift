@@ -9,6 +9,42 @@ import SystemPackage
 import Testing
 
 @Test
+func lazyStartupKeepsItsStreamsSeparateFromEvaluation() async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+        let input = directory.appending("input")
+        let output = directory.appending("output")
+        try await "block input\n".write(toFileAt: input)
+
+        let streamed = Mutex("")
+        let runtime = try await Python::Runtime()
+        let session = try await runtime.session(.source("""
+        import sys
+        assert sys.stdin.read() == ""
+        print("startup")
+        """))
+        try await withSession(session) { session in
+            await #expect {
+                try await session.evaluate("pass", redirecting: [.stdout: FilePath("relative")])
+            } throws: { error in
+                String(describing: error).contains("Expected an absolute UTF-8 Python path")
+            }
+            #expect(await session.startupOutput == nil)
+
+            _ = try await session.evaluate(
+                "print(input())",
+                redirecting: [.stdin: input, .stdout: output],
+            ) {
+                _, text in
+                streamed.withLock { $0 += text }
+            }
+            #expect(await session.startupOutput?.stdout == "startup\n")
+            #expect(streamed.withLock { $0 } == "block input\n")
+            #expect(try await readOutput(at: output) == Array("block input\n".utf8))
+        }
+    }
+}
+
+@Test
 func fileBackedStreamsAppendAndReadFromOffsets() async throws {
     try await FileSystem.shared.withTemporaryDirectory { _, root in
         let input = root.appending("stdin")
@@ -24,10 +60,10 @@ func fileBackedStreamsAppendAndReadFromOffsets() async throws {
             .stderr: stderr,
         ]
         let runtime = try await Python::Runtime()
-        let session = try await runtime.session(
-            .source("print('initialized')"),
-            redirecting: [.stdout: startup],
-        )
+        let session = try await runtime.session(.source("print('initialized')"))
+        defer { await session.close() }
+
+        try await session.initialize(redirecting: [.stdout: startup])
         #expect(await session.startupOutput?.stdout == "")
         #expect(try await readOutput(at: startup) == Array("initialized\n".utf8))
 
@@ -61,7 +97,6 @@ func fileBackedStreamsAppendAndReadFromOffsets() async throws {
         #expect(appended == Array("next\n".utf8))
         #expect(try await readOutput(at: stderr) ==
             Array("first diagnostic\nsecond diagnostic\n".utf8))
-        await session.close()
     }
 }
 
@@ -71,6 +106,8 @@ func fileBackedStreamsUseHostFileAccess() async throws {
         let stdout = root.appending("stdout.log")
         let runtime = try await Python::Runtime()
         let session = try await runtime.session()
+        defer { await session.close() }
+
         _ = try await session.evaluate("""
         import builtins, io
 
@@ -79,6 +116,7 @@ func fileBackedStreamsUseHostFileAccess() async throws {
 
         builtins.open = io.open = managed_open
         """, redirecting: [.stdout: stdout])
+
         _ = try await session.evaluate("""
         print("host stream")
         try:
@@ -89,7 +127,6 @@ func fileBackedStreamsUseHostFileAccess() async throws {
             raise AssertionError("The user file adapter was bypassed")
         """, redirecting: [.stdout: stdout])
         #expect(try await readOutput(at: stdout) == Array("host stream\n".utf8))
-        await session.close()
     }
 }
 
@@ -101,6 +138,8 @@ func redirectedOutputAndTracebackReachHostOnFailure() async throws {
         let streamed = Mutex("")
         let runtime = try await Python::Runtime()
         let session = try await runtime.session()
+        defer { await session.close() }
+
         let error = try await #require(throws: Python::ExecutionError.self) {
             try await session.evaluate(
                 """
@@ -123,7 +162,6 @@ func redirectedOutputAndTracebackReachHostOnFailure() async throws {
         #expect(try await readOutput(at: stderr) == Array(diagnostics.utf8))
         #expect(streamed.withLock { $0 } == diagnostics)
         #expect(try await readOutput(at: stdout) == Array("before failure\n".utf8))
-        await session.close()
     }
 }
 
@@ -131,6 +169,7 @@ func redirectedOutputAndTracebackReachHostOnFailure() async throws {
 func capturedStreamsRecoverAfterCloseAndReadEOFWithoutInput() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
+    defer { await session.close() }
 
     let captured = try await session.evaluate("""
     import sys
@@ -144,7 +183,6 @@ func capturedStreamsRecoverAfterCloseAndReadEOFWithoutInput() async throws {
     } throws: { error in
         (error as? Python::ExecutionError)?.traceback.contains("EOFError") == true
     }
-    await session.close()
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -165,6 +203,8 @@ func readStreamsDuringExecution() async throws {
         let runtime = try await Python::Runtime()
         let host = Python::Module("host", functions: [wait])
         let session = try await runtime.session(moduleDefinitions: [host])
+        defer { await session.close() }
+
         let stdout = root.appending("stdout.log")
         let evaluation = Task {
             try await session.evaluate("""
@@ -186,7 +226,6 @@ func readStreamsDuringExecution() async throws {
         #expect(try await evaluation.value.output.stdout.isEmpty)
         let suffix = try await readOutput(at: stdout, from: Int64(prefix.count))
         #expect(suffix == Array("finished\n".utf8))
-        await session.close()
     }
 }
 

@@ -198,7 +198,7 @@ extension CPythonBuild.Generate {
         workspace: borrowing BuildWorkspace,
     ) async throws {
         let output = workspace.outputDirectory
-        // Included C fragments stay next to their callers without becoming separate translation units.
+        // Keep included C fragments beside their callers so SwiftPM compiles each only once.
         var pending = graph.translationUnits.sorted()
         var index = 0
         while index < pending.count {
@@ -396,7 +396,7 @@ extension CPythonBuild.Generate {
         try await fileSystem.removeItem(at: backup, strategy: .platformDefault, recursively: true)
     }
 
-    // Configure owns the archive membership and generated-file rules. Export only the paths SwiftPM uses.
+    // Configure owns archive membership and generation. Export the paths SwiftPM uses.
     private static let sourceGraph: String = #"""
     use Cwd qw(abs_path);
     use File::Find;

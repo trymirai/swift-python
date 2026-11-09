@@ -27,6 +27,8 @@ public struct Encoder: ~Copyable, ~Escapable {
         try value.encode(to: &self)
     }
 
+    // MARK: Scalar values
+
     public mutating func encodeNil() throws {
         _ = try Interpreter.Storage.requireCurrent()
         unsafe try replace(Py_GetConstant(UInt32(Py_CONSTANT_NONE)))
@@ -81,6 +83,8 @@ public struct Encoder: ~Copyable, ~Escapable {
         unsafe try replace(Object.copyBytes(value))
     }
 
+    // MARK: Containers and fields
+
     public mutating func encode<Element: Encodable>(_ values: borrowing [Element]) throws {
         _ = try Interpreter.Storage.requireCurrent()
         let result = unsafe try Object.take(PyList_New(values.count), in: self)
@@ -107,7 +111,7 @@ public struct Encoder: ~Copyable, ~Escapable {
         unsafe assign(.dictionary(result.release()))
     }
 
-    /// Adds a field to a dictionary produced by this encoder.
+    /// Creates a dictionary on the first field. Throws `TypeError` for a non-dictionary value.
     public mutating func encode<T: Encodable & ~Copyable>(
         _ value: borrowing T,
         forKey key: String,
@@ -123,7 +127,7 @@ public struct Encoder: ~Copyable, ~Escapable {
         )
     }
 
-    /// Encodes a positional record, appending fields in order.
+    /// Appends at the current count or replaces an existing positional field.
     public mutating func encode<T: Encodable & ~Copyable>(
         _ value: borrowing T,
         at index: Int,
@@ -213,6 +217,8 @@ public struct Encoder: ~Copyable, ~Escapable {
             "Unable to set a Python list item.",
         )
     }
+
+    // MARK: Output ownership
 
     @unsafe
     mutating func replace(_ pointer: UnsafeMutablePointer<PyObject>?) throws {

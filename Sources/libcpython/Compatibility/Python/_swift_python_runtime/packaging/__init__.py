@@ -29,7 +29,7 @@ def configure(configuration: dict, sources: list[dict], read) -> dict:
     return description
 
 
-def prepare(request: dict, unused, control) -> dict:
+def prepare(request: dict) -> dict:
     return prepare_distributions(request, _configuration)
 
 

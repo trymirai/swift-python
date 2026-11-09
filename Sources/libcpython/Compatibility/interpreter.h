@@ -2,25 +2,41 @@
 #define SWIFT_PYTHON_LIBCPYTHON_INTERPRETER_H
 
 #include "Python.h"
+#include "file_open.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 PyStatus CPython_InitializeRuntime(void);
-PyStatus CPython_NewThreadState(PyThreadState *_Nullable *_Nonnull state);
-void CPython_EndThreadState(PyThreadState *_Nonnull state);
+typedef struct CPython_Heap CPython_Heap;
+
+// Create a detached interpreter. Request a heap to track its allocations for checkpoints.
+PyStatus CPython_NewThreadState(PyThreadState *_Nullable *_Nonnull state,
+                                CPython_Heap *_Nullable *_Nullable heap);
+void CPython_EndThreadState(PyThreadState *_Nonnull state, CPython_Heap *_Nullable heap);
+void CPython_AttachThreadState(PyThreadState *_Nonnull state, CPython_Heap *_Nullable heap);
+void CPython_DetachThreadState(void);
+
+int CPython_BeginCheckpoint(void);
+void CPython_FinishCheckpoint(bool restoring);
 uintptr_t CPython_InterpreterKey(PyThreadState *_Nullable state);
 
 PyObject *_Nullable CPython_Call3(PyObject *_Nonnull function, PyObject *_Nonnull first,
                                   PyObject *_Nonnull second, PyObject *_Nonnull third);
+
+// Takes ownership of context even if creating the function fails.
 PyObject *_Nullable CPython_NewFunction(
     void *_Nullable context,
     PyObject *_Nullable (*_Nonnull call)(void *_Nullable context, PyObject *_Nullable arguments),
     void (*_Nonnull destroy)(void *_Nullable context));
 
-PyObject *_Nullable CPython_Evaluate(PyObject *_Nonnull function, PyObject *_Nonnull source,
-                                     PyObject *_Nonnull filename, PyObject *_Nonnull control,
-                                     void *_Nullable context,
-                                     bool (*_Nonnull interrupt)(void *_Nullable context));
+PyObject *_Nullable CPython_CallInterruptibly(
+    PyObject *_Nonnull function,
+    PyObject *_Nonnull const *_Nullable arguments,
+    size_t argument_count,
+    void *_Nullable context,
+    bool (*_Nonnull interrupt)(void *_Nullable context));
+
+void CPython_RequestEvaluationInterrupt(PyInterpreterState *_Nonnull interpreter);
 
 void CPython_RaiseSwiftError(const char *_Nonnull name, const char *_Nonnull message);
 void CPython_RaiseKeyboardInterrupt(void);
@@ -45,6 +61,7 @@ bool CPython_IsList(PyObject *_Nonnull object);
 int CPython_BufferIsSupported(PyObject *_Nonnull object, int writable,
                               PyObject *_Nonnull array_type);
 
+// Takes ownership of value even if creating the capsule fails.
 PyObject *_Nullable CPython_NewPeer(void *_Nonnull value, void (*_Nonnull destroy)(void *_Nonnull));
 void *_Nullable CPython_GetPeer(PyObject *_Nonnull capsule);
 int CPython_FreezeType(PyObject *_Nonnull type);
@@ -60,9 +77,5 @@ void CPython_DiscoverExports(void *_Nonnull collector, CPython_ExportConsumer _N
 
 int CPython_NewPipe(int *_Nonnull reader, int *_Nonnull writer);
 int CPython_WaitForCall(int reply_fd, int interruption_fd);
-
-typedef int (*CPython_FileOpenCheck)(void *_Nonnull context, const char *_Nonnull path, int mode,
-                                     int options);
-void CPython_SetFileOpenCheck(CPython_FileOpenCheck _Nullable check, void *_Nullable context);
 
 #endif /* SWIFT_PYTHON_LIBCPYTHON_INTERPRETER_H */

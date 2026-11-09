@@ -1,9 +1,11 @@
 #include "../interpreter.h"
+#include "host_value.h"
 
 #include <pthread.h>
 #include <stdlib.h>
 
 typedef struct {
+    HostValue lifetime;
     pthread_t thread;
 
     void *context;
@@ -14,8 +16,9 @@ typedef struct {
 static const char capsule_name[] = "swift-python.function";
 
 static void
-free_function(SwiftFunction *function)
+free_function(HostValue *value)
 {
+    SwiftFunction *function = (SwiftFunction *)value;
     function->destroy(function->context);
     free(function);
 }
@@ -25,7 +28,7 @@ destroy_function(PyObject *capsule)
 {
     SwiftFunction *function = PyCapsule_GetPointer(capsule, capsule_name);
     if (function != NULL) {
-        free_function(function);
+        checkpoint_release_host_value(&function->lifetime);
     }
 }
 
@@ -60,15 +63,15 @@ CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *ar
         return PyErr_NoMemory();
     }
     *function = (SwiftFunction){
+        .lifetime = {.dispose = free_function},
         .thread = pthread_self(),
         .context = context,
         .call = call,
         .destroy = destroy,
     };
 
-    PyObject *capsule = PyCapsule_New(function, capsule_name, destroy_function);
+    PyObject *capsule = host_value_capsule(&function->lifetime, capsule_name, destroy_function);
     if (capsule == NULL) {
-        free_function(function);
         return NULL;
     }
 

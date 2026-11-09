@@ -6,7 +6,8 @@ internal import libcpython
 
 // MARK: - Reference
 
-/// An owning Python root. Resolve it only in the session generation that created it.
+/// Keeps a Python object alive in its interpreter generation.
+/// Reset, close, or rollback of the creating block invalidates the reference.
 public struct Reference: Sendable {
     final class Storage: Sendable {
         let references: Reference.Store

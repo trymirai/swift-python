@@ -1,0 +1,595 @@
+--- a/FileIO.c
++++ b/FileIO.c
+@@ -1,3 +1,5 @@
++#include "file_open.h"
++
+ /* Author: Daniel Stutzbach */
+ 
+ #include "Python.h"
+@@ -136,7 +138,7 @@
+         /* fd is accessible and someone else may have closed it */
+         Py_BEGIN_ALLOW_THREADS
+         _Py_BEGIN_SUPPRESS_IPH
+-        err = close(fd);
++        err = CPython_CloseFileDescriptor(fd);
+         if (err < 0)
+             save_errno = errno;
+         _Py_END_SUPPRESS_IPH
+@@ -404,6 +406,10 @@
+     }
+ 
+     if (fd >= 0) {
++    if (CPython_RequireFileDescriptor(fd, !closefd) < 0) {
++        PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, nameobj);
++        goto error;
++    }
+         self->fd = fd;
+         self->closefd = closefd;
+     }
+@@ -418,17 +424,11 @@
+         errno = 0;
+         if (opener == Py_None) {
+             do {
+-                Py_BEGIN_ALLOW_THREADS
+-#ifdef MS_WINDOWS
+-                self->fd = _wopen(widename, flags, 0666);
+-#else
+-                self->fd = open(name, flags, 0666);
+-#endif
+-                Py_END_ALLOW_THREADS
++                self->fd = CPython_OpenFile(name, AT_FDCWD, flags, 0666, nameobj);
+             } while (self->fd < 0 && errno == EINTR &&
+                      !(async_err = PyErr_CheckSignals()));
+ 
+-            if (async_err)
++            if (async_err || PyErr_Occurred())
+                 goto error;
+ 
+             if (self->fd < 0) {
+@@ -456,6 +456,11 @@
+ 
+             self->fd = PyLong_AsInt(fdobj);
+             Py_DECREF(fdobj);
++            if (self->fd >= 0 && CPython_RequireFileDescriptor(self->fd, false) < 0) {
++                self->fd = -1;
++                PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, nameobj);
++                goto error;
++            }
+             if (self->fd < 0) {
+                 if (!PyErr_Occurred()) {
+                     /* The opener returned a negative but didn't set an
+@@ -686,6 +691,28 @@
+ Same as RawIOBase.readinto().
+ [clinic start generated code]*/
+ 
++static Py_ssize_t
++swift_read(int fd, void *data, size_t size)
++{
++    if (CPython_RequireFileDescriptor(fd, true) < 0) {
++        PyErr_SetFromErrno(PyExc_OSError);
++        return -1;
++    }
++    return _Py_read(fd, data, size);
++}
++
++static Py_ssize_t
++swift_write(int fd, const void *data, size_t size)
++{
++    if (CPython_RequireFileDescriptor(fd, true) < 0) {
++        PyErr_SetFromErrno(PyExc_OSError);
++        return -1;
++    }
++    return _Py_write(fd, data, size);
++}
++
++#define _Py_read swift_read
++#define _Py_write swift_write
+ static PyObject *
+ _io_FileIO_readinto_impl(fileio *self, PyTypeObject *cls, Py_buffer *buffer)
+ /*[clinic end generated code: output=97f0f3d69534db34 input=fd20323e18ce1ec8]*/
+@@ -967,6 +994,9 @@
+ {
+     Py_off_t pos, res;
+     int fd = self->fd;
++    if (fd >= 0 && CPython_RequireFileDescriptor(fd, true) < 0) {
++        return PyErr_SetFromErrno(PyExc_OSError);
++    }
+ 
+ #ifdef SEEK_SET
+     /* Turn 0, 1, 2 into SEEK_{SET,CUR,END} */
+@@ -1134,7 +1164,7 @@
+ #ifdef MS_WINDOWS
+     ret = _chsize_s(fd, pos);
+ #else
+-    ret = ftruncate(fd, pos);
++    ret = CPython_TruncateFileDescriptor(fd, pos);
+ #endif
+     _Py_END_SUPPRESS_IPH
+     Py_END_ALLOW_THREADS
+--- a/PosixModule.c
++++ b/PosixModule.c
+@@ -1,3 +1,6 @@
++#include "Modules/posixmodule-compat.h"
++#include "file_open.h"
++
+ /* POSIX module implementation */
+ 
+ /* This file is also used for Windows NT/MS-Win.  In that case the
+@@ -2889,6 +2892,8 @@
+ /* POSIX methods */
+ 
+ 
++#include "Modules/posix_files.h"
++
+ static PyObject *
+ posix_do_stat(PyObject *module, const char *function_name, path_t *path,
+               int dir_fd, int follow_symlinks)
+@@ -2909,6 +2914,15 @@
+         dir_fd_and_fd_invalid("stat", dir_fd, path->fd) ||
+         fd_and_follow_symlinks_invalid("stat", path->is_fd, follow_symlinks))
+         return NULL;
++    if (CPython_RestrictedFiles()) {
++        if (!path->is_fd) {
++            return swift_stat(module, path->narrow, dir_fd, follow_symlinks, path->object);
++        }
++        if (CPython_RequireFileDescriptor(path->fd, false) < 0) {
++            return path_error(path);
++        }
++    }
++
+ 
+     Py_BEGIN_ALLOW_THREADS
+     if (path->is_fd) {
+@@ -3749,6 +3763,22 @@
+                int effective_ids, int follow_symlinks)
+ /*[clinic end generated code: output=cf84158bc90b1a77 input=c33565f7584b99e4]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        CPython_FileTarget *target = CPython_CheckFile(path->narrow, dir_fd,
++            (mode & W_OK ? O_WRONLY : O_RDONLY) | (follow_symlinks ? 0 : O_NOFOLLOW),
++            CPython_FileMetadata, path->object);
++        if (target == NULL) {
++            if (PyErr_ExceptionMatches(PyExc_FileNotFoundError) ||
++                PyErr_ExceptionMatches(PyExc_PermissionError)) {
++                PyErr_Clear();
++                return 0;
++            }
++            return -1;
++        }
++        int result = CPython_AccessFileTarget(target, mode, effective_ids);
++        CPython_FreeFileTarget(target);
++        return result == 0;
++    }
+     int return_value;
+ 
+ #ifdef MS_WINDOWS
+@@ -4077,6 +4107,9 @@
+               int follow_symlinks)
+ /*[clinic end generated code: output=5cf6a94915cc7bff input=7b6e2eeadd8bf199]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        return CPython_UnsupportedNativeOperation();
++    }
+     int result;
+ 
+ #ifdef HAVE_FCHMODAT
+@@ -5007,6 +5040,21 @@
+ #ifdef HAVE_FDOPENDIR
+     int fd = -1;
+ #endif
++    if (CPython_RestrictedFiles()) {
++        int pinned = swift_open_directory(path);
++        if (pinned < 0) {
++            return NULL;
++        }
++        dirp = fdopendir(pinned);
++        if (dirp == NULL) {
++            int error = errno;
++            close(pinned);
++            errno = error;
++            return path_error(path);
++        }
++        return_str = path->object == NULL || !PyBytes_Check(path->object);
++        goto opened_directory;
++    }
+ 
+     errno = 0;
+ #ifdef HAVE_FDOPENDIR
+@@ -5047,6 +5095,7 @@
+         Py_END_ALLOW_THREADS
+     }
+ 
++opened_directory:
+     if (dirp == NULL) {
+         path_error(path);
+         list = NULL;
+@@ -6175,6 +6224,19 @@
+ os_mkdir_impl(PyObject *module, path_t *path, int mode, int dir_fd)
+ /*[clinic end generated code: output=a70446903abe821f input=30270d369599634b]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        CPython_FileTarget *target = CPython_CheckFile(path->narrow, dir_fd, O_WRONLY | O_CREAT | O_NOFOLLOW,
++                                                       CPython_FileCreateDirectory, path->object);
++        if (target == NULL) {
++            return NULL;
++        }
++        int result = CPython_MakeDirectoryTarget(target, mode);
++        CPython_FreeFileTarget(target);
++        if (result < 0) {
++            return path_error(path);
++        }
++        Py_RETURN_NONE;
++    }
+     int result;
+ #ifdef MS_WINDOWS
+     int error = 0;
+@@ -6360,6 +6422,9 @@
+ static PyObject *
+ internal_rename(path_t *src, path_t *dst, int src_dir_fd, int dst_dir_fd, int is_replace)
+ {
++    if (CPython_RestrictedFiles()) {
++        return swift_rename(src, dst, src_dir_fd, dst_dir_fd);
++    }
+     const char *function_name = is_replace ? "replace" : "rename";
+     int dir_fd_specified;
+ 
+@@ -6496,6 +6561,9 @@
+ os_rmdir_impl(PyObject *module, path_t *path, int dir_fd)
+ /*[clinic end generated code: output=080eb54f506e8301 input=84325211e33a98e0]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        return swift_remove(path, dir_fd, AT_REMOVEDIR);
++    }
+     int result;
+ #ifdef HAVE_UNLINKAT
+     int unlinkat_unavailable = 0;
+@@ -6677,6 +6745,9 @@
+ os_unlink_impl(PyObject *module, path_t *path, int dir_fd)
+ /*[clinic end generated code: output=621797807b9963b1 input=1a2ef2579207eab1]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        return swift_remove(path, dir_fd, 0);
++    }
+     int result;
+ #ifdef HAVE_UNLINKAT
+     int unlinkat_unavailable = 0;
+@@ -10766,6 +10837,9 @@
+ os_waitpid_impl(PyObject *module, pid_t pid, int options)
+ /*[clinic end generated code: output=5c37c06887a20270 input=0bf1666b8758fda3]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        return CPython_UnsupportedNativeOperation();
++    }
+     pid_t res;
+     int async_err = 0;
+     WAIT_TYPE status;
+@@ -11001,6 +11075,23 @@
+ os_readlink_impl(PyObject *module, path_t *path, int dir_fd)
+ /*[clinic end generated code: output=d21b732a2e814030 input=03d10130870dbca8]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        CPython_FileTarget *target = CPython_CheckFile(path->narrow, dir_fd, O_NOFOLLOW,
++                                                       CPython_FileMetadata, path->object);
++        if (target == NULL) {
++            return NULL;
++        }
++        char value[MAXPATHLEN];
++        ssize_t count = CPython_ReadLinkTarget(target, value, sizeof(value));
++        CPython_FreeFileTarget(target);
++        if (count < 0) {
++            return path_error(path);
++        }
++        if (PyBytes_Check(path->object)) {
++            return PyBytes_FromStringAndSize(value, count);
++        }
++        return PyUnicode_DecodeFSDefaultAndSize(value, count);
++    }
+ #if defined(HAVE_READLINK)
+     char buffer[MAXPATHLEN+1];
+     ssize_t length;
+@@ -11805,6 +11896,13 @@
+     if (PySys_Audit("open", "OOi", path->object, Py_None, flags) < 0) {
+         return -1;
+     }
++    if (CPython_RestrictedFiles()) {
++        fd = CPython_OpenFile(path->narrow, dir_fd, flags, mode, path->object);
++        if (fd < 0 && !PyErr_Occurred()) {
++            PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, path->object);
++        }
++        return fd;
++    }
+ 
+     _Py_BEGIN_SUPPRESS_IPH
+     do {
+@@ -11872,7 +11970,7 @@
+      */
+     Py_BEGIN_ALLOW_THREADS
+     _Py_BEGIN_SUPPRESS_IPH
+-    res = close(fd);
++    res = CPython_CloseFileDescriptor(fd);
+     _Py_END_SUPPRESS_IPH
+     Py_END_ALLOW_THREADS
+     if (res < 0)
+@@ -12093,6 +12191,10 @@
+ os_lseek_impl(PyObject *module, int fd, Py_off_t position, int how)
+ /*[clinic end generated code: output=971e1efb6b30bd2f input=32ea0788da7cb44b]*/
+ {
++    if (CPython_RequireFileDescriptor(fd, false) < 0) {
++        PyErr_SetFromErrno(PyExc_OSError);
++        return -1;
++    }
+     Py_off_t result = -1;
+ 
+ #ifdef SEEK_SET
+@@ -12140,6 +12242,9 @@
+ os_read_impl(PyObject *module, int fd, Py_ssize_t length)
+ /*[clinic end generated code: output=dafbe9a5cddb987b input=1df2eaa27c0bf1d3]*/
+ {
++    if (CPython_RequireFileDescriptor(fd, false) < 0) {
++        return PyErr_SetFromErrno(PyExc_OSError);
++    }
+     if (length < 0) {
+         errno = EINVAL;
+         return posix_error();
+@@ -12485,6 +12590,10 @@
+ os_write_impl(PyObject *module, int fd, Py_buffer *data)
+ /*[clinic end generated code: output=e4ef5bc904b58ef9 input=3207e28963234f3c]*/
+ {
++    if (CPython_RequireFileDescriptor(fd, false) < 0) {
++        PyErr_SetFromErrno(PyExc_OSError);
++        return -1;
++    }
+     return _Py_write(fd, data->buf, data->len);
+ }
+ 
+@@ -12784,6 +12893,9 @@
+ os_fstat_impl(PyObject *module, int fd)
+ /*[clinic end generated code: output=efc038cb5f654492 input=27e0e0ebbe5600c9]*/
+ {
++    if (CPython_RequireFileDescriptor(fd, false) < 0) {
++        return PyErr_SetFromErrno(PyExc_OSError);
++    }
+     STRUCT_STAT st;
+     int res;
+     int async_err = 0;
+@@ -12820,6 +12932,9 @@
+ os_isatty_impl(PyObject *module, int fd)
+ /*[clinic end generated code: output=6a48c8b4e644ca00 input=08ce94aa1eaf7b5e]*/
+ {
++    if (CPython_RequireFileDescriptor(fd, false) < 0) {
++        return 0;
++    }
+     int return_value;
+     Py_BEGIN_ALLOW_THREADS
+     _Py_BEGIN_SUPPRESS_IPH
+@@ -13540,6 +13655,9 @@
+ os_ftruncate_impl(PyObject *module, int fd, Py_off_t length)
+ /*[clinic end generated code: output=fba15523721be7e4 input=63b43641e52818f2]*/
+ {
++    if (CPython_RequireFileDescriptor(fd, false) < 0) {
++        return PyErr_SetFromErrno(PyExc_OSError);
++    }
+     int result;
+     int async_err = 0;
+ 
+@@ -13583,6 +13701,20 @@
+ os_truncate_impl(PyObject *module, path_t *path, Py_off_t length)
+ /*[clinic end generated code: output=43009c8df5c0a12b input=ce33fd7808a511c4]*/
+ {
++    if (CPython_RestrictedFiles() && !path->is_fd) {
++        int fd = CPython_OpenFile(path->narrow, DEFAULT_DIR_FD, O_WRONLY, 0, path->object);
++        if (fd < 0) {
++            return PyErr_Occurred() ? NULL : path_error(path);
++        }
++        int result = ftruncate(fd, length);
++        int error = errno;
++        CPython_CloseFileDescriptor(fd);
++        if (result < 0) {
++            errno = error;
++            return path_error(path);
++        }
++        Py_RETURN_NONE;
++    }
+     int result;
+ #ifdef MS_WINDOWS
+     int fd;
+@@ -16487,6 +16619,11 @@
+     if (!PyUnicode_FSConverter(self->path, &ub))
+         return NULL;
+     const char *path = PyBytes_AS_STRING(ub);
++    if (CPython_RestrictedFiles()) {
++        PyObject *result = swift_stat(module, path, self->dir_fd, follow_symlinks, self->path);
++        Py_DECREF(ub);
++        return result;
++    }
+     if (self->dir_fd != DEFAULT_DIR_FD) {
+ #ifdef HAVE_FSTATAT
+       if (HAVE_FSTATAT_RUNTIME) {
+@@ -17039,6 +17176,8 @@
+     // there are reads in progress.
+     PyMutex read_mutex;
+     uint8_t closed;
++    PyObject *snapshot;
++    Py_ssize_t snapshot_index;
+ } ScandirIterator;
+ 
+ #define ScandirIterator_CAST(op)    ((ScandirIterator *)(op))
+@@ -17144,6 +17283,7 @@
+ ScandirIterator_closedir(ScandirIterator *iterator)
+ {
+     DIR *dirp = NULL;
++    Py_CLEAR(iterator->snapshot);
+ 
+     _Py_atomic_store_uint8(&iterator->closed, 1);
+     if (PyMutex_LockFast(&iterator->read_mutex)) {
+@@ -17170,6 +17310,13 @@
+ {
+     ScandirIterator *iterator = ScandirIterator_CAST(op);
+     struct dirent *direntp;
++    if (iterator->snapshot != NULL) {
++        if (iterator->snapshot_index == PyList_GET_SIZE(iterator->snapshot)) {
++            ScandirIterator_closedir(iterator);
++            return NULL;
++        }
++        return Py_NewRef(PyList_GET_ITEM(iterator->snapshot, iterator->snapshot_index++));
++    }
+     Py_ssize_t name_len = 0;
+     int is_dot;
+     int found = 0;
+@@ -17401,6 +17548,8 @@
+         return NULL;
+ 
+     iterator->read_mutex = (PyMutex){0};
++    iterator->snapshot = NULL;
++    iterator->snapshot_index = 0;
+     iterator->closed = 1;
+ #ifdef MS_WINDOWS
+     iterator->handle = INVALID_HANDLE_VALUE;
+@@ -17411,6 +17560,41 @@
+     /* Move the ownership to iterator->path */
+     memcpy(&iterator->path, path, sizeof(path_t));
+     memset(path, 0, sizeof(path_t));
++    if (CPython_RestrictedFiles()) {
++        int pinned = swift_open_directory(&iterator->path);
++        if (pinned < 0) {
++            goto error;
++        }
++        iterator->dirp = fdopendir(pinned);
++        if (iterator->dirp == NULL) {
++            int error = errno;
++            close(pinned);
++            errno = error;
++            path_error(&iterator->path);
++            goto error;
++        }
++        iterator->closed = 0;
++        PyObject *entries = PyList_New(0);
++        if (entries == NULL) {
++            goto error;
++        }
++        PyObject *entry;
++        while ((entry = ScandirIterator_iternext((PyObject *)iterator)) != NULL) {
++            int status = PyList_Append(entries, entry);
++            Py_DECREF(entry);
++            if (status < 0) {
++                Py_DECREF(entries);
++                goto error;
++            }
++        }
++        if (PyErr_Occurred()) {
++            Py_DECREF(entries);
++            goto error;
++        }
++        iterator->snapshot = entries;
++        iterator->closed = 0;
++        return (PyObject *)iterator;
++    }
+ 
+ #ifdef MS_WINDOWS
+     iterator->first_time = 1;
+@@ -19048,6 +19232,9 @@
+ static int
+ posixmodule_exec(PyObject *m)
+ {
++    if (CPython_RestrictPOSIXModule(m) < 0) {
++        return -1;
++    }
+     _posixstate *state = get_posix_state(m);
+ 
+ #if defined(HAVE_PWRITEV)
+--- a/Import.c
++++ b/Import.c
+@@ -1,3 +1,5 @@
++#include "file_open.h"
++
+ /* Module definition and import implementation */
+ 
+ #include "Python.h"
+@@ -2511,6 +2513,9 @@
+     PyObject *spec,
+     PyModInitFunction initfunc)
+ {
++    if (CPython_AllowBuiltin(name) < 0) {
++        return NULL;
++    }
+     struct _Py_ext_module_loader_info info;
+     if (_Py_ext_module_loader_info_init_for_builtin(&info, name) < 0) {
+         return NULL;
+@@ -5432,6 +5437,10 @@
+ _imp_create_dynamic_impl(PyObject *module, PyObject *spec, PyObject *file)
+ /*[clinic end generated code: output=83249b827a4fde77 input=c31b954f4cf4e09d]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        PyErr_SetString(PyExc_ImportError, "Dynamic modules are unavailable in a restricted Python session.");
++        return NULL;
++    }
+     FILE *fp = NULL;
+     PyObject *mod = NULL;
+     PyThreadState *tstate = _PyThreadState_GET();
+--- a/SocketModule.c
++++ b/SocketModule.c
+@@ -1,3 +1,11 @@
++#ifdef __APPLE__
++// Import inet_aton before CPython's weak pragma so Clang modules see the declaration.
++#define __APPLE_USE_RFC_3542 1
++#include "pyconfig.h"
++#include <arpa/inet.h>
++#endif
++#include "file_open.h"
++
+ /* Socket module */
+ 
+ /*
+@@ -6580,6 +6588,9 @@
+ _socket_close(PyObject *module, PyObject *fdobj)
+ /*[clinic end generated code: output=1d62092e6fc365dc input=b9fc18380117ee4b]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        return CPython_UnsupportedNativeOperation();
++    }
+     SOCKET_T fd;
+     int res;
+ 
+@@ -6618,6 +6629,9 @@
+ _socket_dup(PyObject *module, PyObject *fdobj)
+ /*[clinic end generated code: output=7e9c4485cf5a76c0 input=d1d74c320feb3d04]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        return CPython_UnsupportedNativeOperation();
++    }
+     SOCKET_T fd, newfd;
+     PyObject *newfdobj;
+ #ifdef MS_WINDOWS
+@@ -6689,6 +6703,9 @@
+ _socket_socketpair_impl(PyObject *module, int family, int type, int proto)
+ /*[clinic end generated code: output=c012ae1f558bb0ca input=59695511a31a2d52]*/
+ {
++    if (CPython_RestrictedFiles()) {
++        return CPython_UnsupportedNativeOperation();
++    }
+     PySocketSockObject *s0 = NULL, *s1 = NULL;
+     SOCKET_T sv[2];
+     socket_state *state = get_module_state(module);
+--- a/SelectModule.c
++++ b/SelectModule.c
+@@ -1,3 +1,5 @@
++#include "file_open.h"
++
+ /* select - Module containing unix select(2) call.
+    Under Unix, the file descriptors are small integers.
+    Under Win32, select only exists for sockets, and sockets may
+@@ -2738,6 +2740,14 @@
+ #endif
+     }
+ #endif /* HAVE_POLL */
++    if (CPython_RestrictedFiles()) {
++#ifdef HAVE_SYS_DEVPOLL_H
++        if (PyDict_PopString(PyModule_GetDict(m), "devpoll", NULL) < 0) {
++            return -1;
++        }
++#endif
++        return 0;
++    }
+ 
+ #ifdef HAVE_SYS_DEVPOLL_H
+     state->devpoll_Type = (PyTypeObject *)PyType_FromModuleAndSpec(

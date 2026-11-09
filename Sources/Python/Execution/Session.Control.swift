@@ -2,8 +2,8 @@
 //  Created by Anton Spivak
 //
 
+internal import libcpython
 import Synchronization
-internal import SystemPackage
 
 // MARK: - Session.Control
 
@@ -15,6 +15,12 @@ extension Session {
             Swift::Result<Result, any Swift::Error>,
         ) -> Result
 
+        typealias Settlement<Result> = @Sendable (
+            isolated Session,
+            Control,
+            Swift::Result<Result, any Swift::Error>,
+        ) async -> Swift::Result<Result, any Swift::Error>
+
         @TaskLocal
         static var sessionPath: [ObjectIdentifier] = []
 
@@ -24,11 +30,10 @@ extension Session {
         }
 
         let hasOutputHandler: Bool
-        let redirects: Stream.Redirects
         private let timeout: Duration?
 
-        let pipe: Pipe
         private let state: Mutex<State>
+        let pipe: Pipe
 
         private let incomingCalls: AsyncStream<Invocation>
         private let submissions: AsyncStream<Invocation>.Continuation
@@ -36,10 +41,8 @@ extension Session {
         init(
             timeout: Duration?,
             output: OutputHandler? = nil,
-            redirecting redirects: [Stream: FilePath] = [:],
         ) throws {
             try Self.validateTimeout(timeout)
-            self.redirects = try Stream.Redirects(redirects)
             self.pipe = try Pipe()
 
             self.hasOutputHandler = output != nil
@@ -73,14 +76,16 @@ extension Session {
         func run<Result>(
             on session: isolated Session,
             onInterruption: InterruptionHandler<Result>? = nil,
+            settling: Settlement<Result>? = nil,
             _ operation: (isolated Session) async throws -> Result,
         ) async throws -> Result {
             let deadline = timeout.map { ContinuousClock.now + $0 }
             state.withLock { $0.start(until: deadline) }
 
-            async let callbacks: Void = runCalls(until: deadline)
+            async let callbacks: Void = runCalls()
+            async let _: Void = watchDeadline(deadline)
 
-            let result: Swift::Result<Result, any Swift::Error>
+            var result: Swift::Result<Result, any Swift::Error>
             do {
                 try checkInterruption()
                 result = .success(try await operation(session))
@@ -88,7 +93,13 @@ extension Session {
                 result = .failure(error)
             }
 
-            // Close callback admission, then join the already admitted calls.
+            if let settling {
+                finishCalls(state.withLock { $0.settleCalls() })
+                await callbacks
+                result = await settling(session, self, result)
+            }
+
+            // Callbacks may still be cleaning up when Python returns after an interruption.
             let interruption = finish()
             await callbacks
 
@@ -102,17 +113,21 @@ extension Session {
         }
 
         @concurrent
-        private func runCalls(until deadline: ContinuousClock.Instant?) async {
-            await withDiscardingTaskGroup { group in
-                if let deadline {
-                    group.addTask {
-                        do {
-                            try await ContinuousClock().sleep(until: deadline)
-                            self.requestInterruption(.timedOut)
-                        } catch {}
-                    }
-                }
+        private func watchDeadline(_ deadline: ContinuousClock.Instant?) async {
+            guard let deadline else {
+                return
+            }
+            do {
+                try await ContinuousClock().sleep(until: deadline)
+                requestInterruption(.timedOut)
+            } catch {}
+        }
 
+        // MARK: Callback dispatch
+
+        @concurrent
+        private func runCalls() async {
+            await withDiscardingTaskGroup { group in
                 for await call in incomingCalls {
                     guard state.withLock({ $0.phase.isRunning }) else {
                         break
@@ -162,6 +177,16 @@ extension Session {
             return try outcome.get()
         }
 
+        // MARK: Interruption and settlement
+
+        func beginEvaluation(in interpreter: UInt) {
+            state.withLock { $0.evaluatingInterpreter = interpreter }
+        }
+
+        func endEvaluation() {
+            state.withLock { $0.evaluatingInterpreter = nil }
+        }
+
         @discardableResult
         func requestInterruption(_ reason: Interruption) -> Bool {
             interrupt(reason).changed
@@ -176,7 +201,18 @@ extension Session {
             reason: Interruption?,
             changed: Bool,
         ) {
-            let (reason, calls) = state.withLock { $0.interrupt(requested) }
+            let (reason, calls) = state.withLock { state in
+                let transition = state.interrupt(requested)
+                // Keep the interpreter attached until the pending call is enqueued.
+                if
+                    requested != nil, transition.calls != nil,
+                    let key = state.evaluatingInterpreter,
+                    let interpreter = unsafe OpaquePointer(bitPattern: key)
+                {
+                    unsafe CPython_RequestEvaluationInterrupt(interpreter)
+                }
+                return transition
+            }
             if let calls {
                 pipe.signal()
                 finishCalls(calls)
@@ -227,12 +263,13 @@ extension Session {
 
 private extension Session.Control {
     struct State {
-        // A snapshot is present only when the transition changes the phase.
+        // A call snapshot tells the caller to close admission for this transition.
         typealias Transition = (reason: Interruption?, calls: [CallID: Invocation]?)
 
         var phase: Phase = .ready
-        var outputHandler: OutputHandler?
+        var evaluatingInterpreter: UInt?
 
+        var outputHandler: OutputHandler?
         var calls: [CallID: Invocation] = [:]
 
         mutating func start(until deadline: ContinuousClock.Instant?) {
@@ -253,7 +290,7 @@ private extension Session.Control {
 
         mutating func interrupt(_ requested: Interruption?) -> Transition {
             switch phase {
-            case .ready, .running:
+            case .ready, .running, .settling:
                 guard let reason = phase.expiration ?? requested else {
                     return (nil, nil)
                 }
@@ -270,6 +307,13 @@ private extension Session.Control {
             }
             phase = .interrupted(reason, delivered: true)
             return true
+        }
+
+        mutating func settleCalls() -> [CallID: Invocation] {
+            if case let .running(deadline) = phase {
+                phase = .settling(deadline)
+            }
+            return exchange(&calls, with: [:])
         }
 
         mutating func finish() -> Transition {
@@ -290,6 +334,7 @@ private extension Session.Control {
     enum Phase {
         case ready
         case running(ContinuousClock.Instant?)
+        case settling(ContinuousClock.Instant?)
         case interrupted(Interruption, delivered: Bool)
         case finished(Interruption?)
 
@@ -307,15 +352,16 @@ private extension Session.Control {
                 reason
             case let .finished(reason):
                 reason
-            case .ready, .running:
+            case .ready, .running, .settling:
                 nil
             }
         }
 
         var expiration: Interruption? {
-            if case let .running(deadline?) = self, .now >= deadline {
-                .timedOut
-            } else {
+            switch self {
+            case let .running(deadline?), let .settling(deadline?):
+                ContinuousClock.now >= deadline ? .timedOut : nil
+            default:
                 nil
             }
         }

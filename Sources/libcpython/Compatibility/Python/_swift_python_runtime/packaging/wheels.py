@@ -137,6 +137,7 @@ class WheelCache:
         if target.is_dir():
             return target
 
+        # Stage beside the digest directory so publication is a single rename.
         stage = Path(tempfile.mkdtemp(prefix=".install-", dir=parent))
 
         try:
@@ -151,7 +152,7 @@ class WheelCache:
                 shutil.rmtree(stage)
 
 
-def archive(request: dict, unused, control) -> None:
+def archive(request: dict) -> None:
     source = absolute_path(request["directory"])
     destination = absolute_path(request["output"])
 

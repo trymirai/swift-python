@@ -9,6 +9,12 @@ struct StandardLibraryBuilder: ~Copyable {
     let jobCount: Int
 
     func run() async throws {
+        try await workspace.fileSystem.createDirectory(
+            at: workspace.outputDirectory,
+            withIntermediateDirectories: true,
+        )
+        try await writePatchedSources()
+
         let freezer = try await buildFreezer()
         let library = try await collectLibrary()
 
@@ -17,7 +23,6 @@ struct StandardLibraryBuilder: ~Copyable {
         try await writeFrozenModules(library, using: freezer)
         try await writeResources(library)
         try await writeGetPath()
-        try await writeFileOpenHooks()
 
         workspace.logger.info(
             "Embedded \(library.modules.count) modules and \(library.resources.count) source/resource files",

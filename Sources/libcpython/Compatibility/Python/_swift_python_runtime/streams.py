@@ -4,8 +4,7 @@ import contextlib
 import io
 import sys
 
-# Host-selected streams stay outside a consumer's managed-file transactions.
-# Save the original opener before extension modules can replace ordinary open().
+# Borrow host-opened descriptors through the original io.open even if user code replaces it.
 _open = io.open
 
 
@@ -24,9 +23,13 @@ class _MemoryOutput(io.RawIOBase):
 
 
 class _Output(io.TextIOWrapper):
-    def __init__(self, path: str | None, control=None, stream: str | None = None) -> None:
-        self.memory = _MemoryOutput() if path is None else None
-        raw = self.memory if self.memory is not None else _open(path, "ab", buffering=0)
+    def __init__(self, descriptor: int | None, control=None, stream: str | None = None) -> None:
+        self.memory = _MemoryOutput() if descriptor is None else None
+        raw = (
+            self.memory
+            if self.memory is not None
+            else _open(descriptor, "ab", buffering=0, closefd=False)
+        )
 
         try:
             super().__init__(
@@ -110,11 +113,11 @@ _stdout = _Stream(sys.stdout)
 _stderr = _Stream(sys.stderr)
 
 
-def _input_stream(path: str | None) -> io.TextIOBase:
-    if path is None:
+def _input_stream(descriptor: int | None) -> io.TextIOBase:
+    if descriptor is None:
         return io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
 
-    return _open(path, "r", encoding="utf-8")
+    return _open(descriptor, "r", encoding="utf-8", closefd=False)
 
 
 def install() -> None:
@@ -124,8 +127,7 @@ def install() -> None:
 
 
 @contextlib.contextmanager
-def capture(control):
-    configuration = control("streams")
+def capture(control, configuration: dict[str, int]):
     callback = control if control("capture") else None
 
     with contextlib.ExitStack() as stack:
@@ -140,6 +142,7 @@ def capture(control):
             (sys, "__stdout__", _stdout),
             (sys, "stderr", _stderr),
             (sys, "__stderr__", _stderr),
+
             (_stdout, "target", stdout),
             (_stderr, "target", stderr),
         )

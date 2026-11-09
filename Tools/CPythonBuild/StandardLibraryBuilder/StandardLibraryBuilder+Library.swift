@@ -49,7 +49,7 @@ extension StandardLibraryBuilder {
             resources.append(Resource(path: filename, source: path))
         }
 
-        // The C lookup uses strcmp, so catalogs must follow byte order rather than Unicode collation.
+        // Sort by UTF-8 bytes to match strcmp in the C catalog lookup.
         resources.sort { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
         let modules = resources.compactMap(Module.init(resource:))
             .sorted { $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) }

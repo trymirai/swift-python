@@ -1,0 +1,19 @@
+--- a/ThreadModule.c
++++ b/ThreadModule.c
+@@ -238,9 +238,13 @@
+     self->state = THREAD_HANDLE_NOT_STARTED;
+     self->refcount = 1;
+ 
+-    HEAD_LOCK(&_PyRuntime);
+-    llist_insert_tail(&_PyRuntime.threads.handles, &self->node);
+-    HEAD_UNLOCK(&_PyRuntime);
++    // The process-wide list repairs OS thread handles after fork. A
++    // subinterpreter without thread creation has no such handles to repair.
++    if (_PyInterpreterState_HasFeature(_PyInterpreterState_GET(), Py_RTFLAGS_THREADS)) {
++        HEAD_LOCK(&_PyRuntime);
++        llist_insert_tail(&_PyRuntime.threads.handles, &self->node);
++        HEAD_UNLOCK(&_PyRuntime);
++    }
+ 
+     return self;
+ }

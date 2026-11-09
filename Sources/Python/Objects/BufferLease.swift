@@ -191,7 +191,7 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
 // MARK: BufferLease.Mutable
 
 public extension BufferLease {
-    /// A buffer pinned with write access. Mutable views exclude overlapping aliases and Python reentry.
+    /// Pins a writable buffer. A mutable view excludes overlapping aliases and Python reentry.
     struct Mutable: ~Copyable, ~Escapable {
         private let lease: BufferLease<Element>
 

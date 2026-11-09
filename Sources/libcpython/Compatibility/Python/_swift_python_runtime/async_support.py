@@ -39,3 +39,25 @@ async def await_block(coroutine, control):
         task.cancel()
         stop.cancel()
         await asyncio.gather(task, stop, return_exceptions=True)
+
+
+def configure_restricted_loop() -> None:
+    import asyncio
+    from selectors import DefaultSelector
+
+    class Loop(asyncio.SelectorEventLoop):
+        # All Python tasks live on this interpreter thread. Swift callbacks and
+        # interruption wake it through their existing pipes.
+        def __init__(self):
+            super().__init__(selector=DefaultSelector())
+
+        def _make_self_pipe(self):
+            pass
+
+        def _close_self_pipe(self):
+            pass
+
+        def _write_to_self(self):
+            pass
+
+    asyncio.events.new_event_loop = asyncio.new_event_loop = Loop

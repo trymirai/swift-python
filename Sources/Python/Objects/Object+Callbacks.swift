@@ -24,7 +24,6 @@ extension Object {
         _ body: any Callable,
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
-        // CPython takes this retain on every path, including allocation failure.
         let context = unsafe Unmanaged.passRetained(Callback(body)).toOpaque()
         return unsafe try take(CPython_NewFunction(
             context,

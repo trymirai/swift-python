@@ -21,7 +21,7 @@ def _archive_hook(archives, *, at_root: bool = False):
     return find
 
 
-def install(sources: list[dict], read, unused=None) -> list[str]:
+def install(sources: list[dict], read) -> list[str]:
     """Install one session's explicitly selected application package sources."""
     archives = []
     paths = []

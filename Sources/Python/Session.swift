@@ -3,7 +3,6 @@
 //
 
 import Synchronization
-internal import SystemPackage
 
 // MARK: - Session
 
@@ -11,20 +10,21 @@ internal import SystemPackage
 public actor Session {
     private nonisolated let executor: Interpreter.Executor
     private nonisolated let operations: Operations = .init()
+
     private nonisolated let activeExecution: Mutex<Control?> = .init(nil)
 
     private let directory: Runtime.Path?
-    private let projectDirectory: Runtime.Path?
     private var importPaths: [Runtime.Path]
 
     private let startup: Startup
+    nonisolated let transactional: Bool
     private let modules: [Module]
     private var delegate: (any Delegate)?
 
     private(set) var environment: Environment?
     private var state: State = .idle
 
-    /// Streams produced by the most recent successful initialization.
+    /// Output from startup. Reset clears it, and close preserves the last captured value.
     public var startupOutput: Output? {
         switch state {
         case .idle:
@@ -41,33 +41,23 @@ public actor Session {
     }
 
     init(
+        executor: Interpreter.Executor,
         directory: Runtime.Path?,
         importPaths: [Runtime.Path],
         modules: [Module],
         startup: Startup = .source(""),
-        packaging: Environment.Service.Lazy? = nil,
-        environmentDirectory: Runtime.Path? = nil,
-        requirements: [String] = [],
+        transactional: Bool = false,
+        environment: sending Environment? = nil,
         delegate: (any Delegate)? = nil,
-    ) throws {
+    ) {
+        self.executor = executor
         self.directory = directory
         self.importPaths = importPaths
-
-        let projectDirectory = try startup.projectDirectory.map(Runtime.Path.init)
-        self.projectDirectory = projectDirectory
-        self.environment = packaging.map {
-            Environment(
-                directory: environmentDirectory,
-                projectDirectory: projectDirectory,
-                requirements: requirements,
-                packaging: $0,
-            )
-        }
-
         self.modules = modules
         self.startup = startup
+        self.transactional = transactional
+        self.environment = environment
         self.delegate = delegate
-        self.executor = try Interpreter.Executor()
     }
 
     isolated deinit {
@@ -82,7 +72,7 @@ public actor Session {
 
     private var resolvedImportPaths: [String] {
         var paths = [String]()
-        if let projectDirectory {
+        if let projectDirectory = environment?.projectDirectory {
             paths.append(projectDirectory.string)
         }
         if let directory {
@@ -95,7 +85,10 @@ public actor Session {
         return paths
     }
 
-    private func openInterpreterIfNeeded(execution: Control) throws {
+    func openInterpreterIfNeeded(
+        execution: Control,
+        redirecting redirects: [Stream: Runtime.Path] = [:],
+    ) throws {
         guard state.isIdle else {
             return
         }
@@ -106,13 +99,13 @@ public actor Session {
             importPaths: resolvedImportPaths,
             modules: modules,
             packages: environment?.packaging.packages ?? [],
+            transactional: transactional,
             scheduleRelease: { [weak self] in Task { await self?.releasePendingReferences() } },
-            sessionOrigin: ObjectIdentifier(executor),
             session: self,
             delegate: delegate,
         )
 
-        let output = try opened.initialize(startup, execution: execution)
+        let output = try opened.initialize(startup, redirecting: redirects, execution: execution)
         state = .ready(consume opened, output)
     }
 
@@ -141,6 +134,10 @@ public actor Session {
         }
     }
 
+    func finishCheckpoint(_ outcome: Interpreter.CheckpointOutcome) {
+        withOpenInterpreter { $0.finishCheckpoint(outcome) }
+    }
+
     @discardableResult
     private func withOpenInterpreter<Result: ~Copyable>(
         _ body: (borrowing Interpreter) throws -> Result,
@@ -164,8 +161,8 @@ public actor Session {
         activeExecution.withLock { $0 != nil }
     }
 
-    /// Closes the interpreter. The next execution repeats initialization with the
-    /// current packages; dependency operations can run before that re-import.
+    /// Discards the interpreter and invalidates its references. Package changes can run before
+    /// the next execution starts a new interpreter.
     public nonisolated func reset() async throws {
         try await withOperation { session in
             session.state = .idle
@@ -176,7 +173,9 @@ public actor Session {
         state.isIdle
     }
 
-    /// Changes explicitly supplied import roots without changing installed packages.
+    /// Replaces the host-supplied import roots and their read permissions.
+    /// Invalidated source modules are loaded again on their next import. Reset the
+    /// session to replace a loaded module whose loader does not support invalidation.
     public nonisolated func replaceImportPaths(
         _ paths: [String],
         invalidatingModules modules: [String] = [],
@@ -240,31 +239,35 @@ public actor Session {
         !Control.sessionPath.isEmpty || Interpreter.Storage.current()?.sessionOrigin != nil
     }
 
+    nonisolated var origin: ObjectIdentifier {
+        ObjectIdentifier(executor)
+    }
+
     private nonisolated var isInOwnCallback: Bool {
-        let identity = ObjectIdentifier(executor)
+        let identity = origin
         return Control.sessionPath.contains(identity)
             || Interpreter.Storage.current()?.sessionOrigin == identity
     }
 
     nonisolated func withExecution<Result: Sendable>(
         timeout: Duration? = nil,
-        redirecting redirects: [Stream: FilePath] = [:],
         output: Control.OutputHandler? = nil,
         onInterruption: Control.InterruptionHandler<Result>? = nil,
+        settling: Control.Settlement<Result>? = nil,
         _ operation: @Sendable (isolated Session, Control) async throws -> Result,
     ) async throws -> Result {
         try await withOperation { session in
-            let execution = try Control(
-                timeout: timeout,
-                output: output,
-                redirecting: redirects,
-            )
+            let execution = try Control(timeout: timeout, output: output)
 
             session.activeExecution.withLock { $0 = execution }
             defer { session.activeExecution.withLock { $0 = nil } }
 
             return try await execution.withCancellation {
-                try await execution.run(on: session, onInterruption: onInterruption) { session in
+                try await execution.run(
+                    on: session,
+                    onInterruption: onInterruption,
+                    settling: settling,
+                ) { session in
                     try await operation(session, execution)
                 }
             }

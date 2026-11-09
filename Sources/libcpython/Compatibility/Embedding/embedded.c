@@ -70,7 +70,7 @@ is_resource_file(PyObject *Py_UNUSED(self), PyObject *argument)
     return PyBool_FromLong(find_resource(path) != NULL);
 }
 
-// Compare against path followed by '/' so files with the same prefix sort correctly.
+// Include the separator so a sibling with the same prefix falls outside the directory range.
 static int
 compare_directory(const char *entry, const char *path, size_t length)
 {

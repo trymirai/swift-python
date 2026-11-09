@@ -20,18 +20,18 @@ struct FunctionExpansion {
         let documentation = attribute.documentationSource
         let isAsynchronous = requiresAwait
 
-        let signature = declaration.signature
-        let isThrowing = signature.effectSpecifiers?.throwsClause != nil
-        let returnType = signature
+        let returnType = declaration.signature
             .returnClause
             .map { $0.type.concreteSpelling(owner: owner.name) } ?? "Swift::Void"
         let parameters = try expandParameters(hasReceiver: isInstanceMethod)
         let metadata = (isInstanceMethod ? [".receiver"] : []) + parameters.map(\.metadataSource)
 
-        let arguments = parameters.map(\.argumentSource).joined(separator: ", ")
-        let prefix = (isThrowing ? "try " : "") + (isAsynchronous ? "await " : "")
         let receiver = isInstanceMethod ? "__self" : owner.name
-        let invocation = "\(prefix)\(receiver).\(declaration.name.trimmedDescription)(\(arguments))"
+        let invocation = invocationSource(
+            receiver: receiver,
+            parameters: parameters,
+            isAsynchronous: isAsynchronous,
+        )
         let receiverBinding = isInstanceMethod
             ? "let __self = try arguments.receiver(as: \(owner.name).self)"
             : ""
@@ -88,6 +88,17 @@ struct FunctionExpansion {
         }
     }
 
+    private func invocationSource(
+        receiver: String,
+        parameters: [ParameterExpansion],
+        isAsynchronous: Bool,
+    ) -> String {
+        let isThrowing = declaration.signature.effectSpecifiers?.throwsClause != nil
+        let prefix = (isThrowing ? "try " : "") + (isAsynchronous ? "await " : "")
+        let arguments = parameters.map(\.argumentSource).joined(separator: ", ")
+        return "\(prefix)\(receiver).\(declaration.name.trimmedDescription)(\(arguments))"
+    }
+
     private func callBody(
         invoking invocation: String,
         returning returnType: String,
@@ -119,7 +130,7 @@ struct FunctionExpansion {
             """
         }
 
-        // Validate every argument before any borrowed buffer is opened.
+        // Prepare arguments first because borrowing a buffer prevents Python reentry.
         let preparation = parameters.map(\.preparationSource).joined(separator: "\n")
         return """
         call: { arguments, _, encoder in

@@ -15,24 +15,43 @@ public extension Session {
     }
 }
 
-// MARK: - Session.Stream.Redirects
+// MARK: - Session.Stream.Descriptors
 
 extension Session.Stream {
-    struct Redirects: Encodable, Sendable {
-        private let stdin: Runtime.Path?
-        private let stdout: Runtime.Path?
-        private let stderr: Runtime.Path?
+    // Python borrows these descriptors for the duration of one call.
+    struct Descriptors: ~Copyable {
+        private var files: [Session.Stream: FileDescriptor] = [:]
 
-        init(_ paths: [Session.Stream: FilePath]) throws {
-            stdin = try paths[.stdin].map(Runtime.Path.init)
-            stdout = try paths[.stdout].map(Runtime.Path.init)
-            stderr = try paths[.stderr].map(Runtime.Path.init)
+        static func open(_ paths: [Session.Stream: Runtime.Path]) throws -> Descriptors {
+            var descriptors = Descriptors()
+            for stream in [Session.Stream.stdout, .stderr, .stdin] {
+                guard let path = paths[stream]?.file else {
+                    continue
+                }
+                let descriptor: FileDescriptor = if stream == .stdin {
+                    try .open(path, .readOnly, options: .closeOnExec)
+                } else {
+                    try .open(
+                        path,
+                        .writeOnly,
+                        options: [.append, .create, .closeOnExec],
+                        permissions: .init(rawValue: 0o666),
+                    )
+                }
+                descriptors.files[stream] = descriptor
+            }
+            return descriptors
         }
 
-        func encode(to encoder: inout Encoder) throws {
-            try encoder.encode(stdin?.string, forKey: Session.Stream.stdin.rawValue)
-            try encoder.encode(stdout?.string, forKey: Session.Stream.stdout.rawValue)
-            try encoder.encode(stderr?.string, forKey: Session.Stream.stderr.rawValue)
+        var numbers: [String: Int32] {
+            Dictionary(uniqueKeysWithValues: files.lazy
+                .map { ($0.key.rawValue, $0.value.rawValue) })
+        }
+
+        deinit {
+            for descriptor in files.values {
+                try? descriptor.close()
+            }
         }
     }
 }

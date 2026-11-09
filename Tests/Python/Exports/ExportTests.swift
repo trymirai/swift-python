@@ -139,6 +139,8 @@ func automaticModuleDiscovery() async throws {
 func staticModuleDoesNotRequireAnInstance() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [ConfiguredModule.self])
+    defer { await session.close() }
+
     _ = try await session.evaluate("""
     import configured, inspect
     assert inspect.iscoroutinefunction(configured.greeting)
@@ -151,5 +153,4 @@ func staticModuleDoesNotRequireAnInstance() async throws {
         try await runtime.session(modules: [InvalidContextModule.self])
     }
     #expect(error.message.contains("cannot take a Python Context"))
-    await session.close()
 }

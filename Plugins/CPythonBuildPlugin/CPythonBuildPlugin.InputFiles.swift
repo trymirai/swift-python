@@ -13,8 +13,7 @@ import Musl
 // MARK: - CPythonBuildPlugin.InputFiles
 
 extension CPythonBuildPlugin {
-    // Build-tool plugins cannot import package products such as NIOFileSystem.
-    // Visit directories with libc so edits to any upstream input invalidate generation.
+    // Build-tool plugins use libc here because they cannot import package products.
     struct InputFiles: ~Copyable {
         let packageDirectory: String
 
@@ -34,13 +33,15 @@ extension CPythonBuildPlugin {
                 "Submodules/python-packages",
             ]
 
-            // The manifest and tool are tracked by SwiftPM; enumerate the files the build tool reads.
+            // SwiftPM tracks the manifest and tool. The plugin lists their source inputs.
             var inputs = [String]()
             for path in directories {
                 try visit(path, into: &inputs)
             }
 
             inputs.append(contentsOf: [
+                "Tools/CPythonPatches/FileAccess.patch",
+                "Tools/CPythonPatches/ThreadHandles.patch",
                 "Submodules/cpython/Tools/freeze/flag.py",
                 "Submodules/cpython/configure",
                 "Submodules/cpython/Makefile.pre.in",
@@ -52,6 +53,7 @@ extension CPythonBuildPlugin {
         }
 
         private func visit(_ path: String, into inputs: inout [String]) throws {
+            // Track directories as inputs so adding a source also invalidates generation.
             inputs.append(path)
             guard let directory = opendir(packageDirectory + "/" + path) else {
                 throw MissingInputError(path: path)
@@ -69,7 +71,7 @@ extension CPythonBuildPlugin {
                     break
                 }
 
-                // dirent belongs to readdir until the next call; decode its name inside that borrow.
+                // Read d_name before readdir can reuse the entry buffer.
                 let capacity = MemoryLayout.size(ofValue: entry.pointee.d_name)
                 let name = withUnsafePointer(to: entry.pointee.d_name) {
                     $0.withMemoryRebound(to: CChar.self, capacity: capacity) { String(cString: $0) }

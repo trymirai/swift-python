@@ -5,14 +5,14 @@
 // MARK: - Session.Startup
 
 public extension Session {
-    /// Prepares the persistent namespace before the first interactive block.
+    /// Chooses how the session initializes its namespace on first use and after reset.
     enum Startup: Sendable {
         case source(String)
 
-        /// A flat-layout project and the package to import from its root.
+        /// Imports a flat-layout project package and resolves dependencies from its root.
         case project(directory: String, module: String)
 
-        /// A module already supplied by the application's package sources.
+        /// Uses the imported module's globals as the interactive namespace.
         case module(String)
 
         var projectDirectory: String? {

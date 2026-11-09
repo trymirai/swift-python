@@ -6,7 +6,7 @@ internal import libcpython
 
 // MARK: - Value
 
-/// Data transferred across the Swift and Python boundary.
+/// Copied Python scalars and containers that can outlive the interpreter.
 public enum Value: Sendable {
     case none
     case bool(Bool)

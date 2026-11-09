@@ -22,24 +22,27 @@ struct ProjectFixture {
         .project(directory: project, module: Self.projectModule)
     }
 
-    var environment: String {
-        environmentRoot.string
-    }
-
     var environmentRoot: FilePath {
         root.appending("environment")
+    }
+
+    var environment: String {
+        environmentRoot.string
     }
 
     var manifest: FilePath {
         environmentRoot.appending("environment.json")
     }
 
+    // MARK: Session fixtures
+
     static func withFixture(_ test: @Sendable (Self) async throws -> Void) async throws {
         try await FileSystem.shared.withTemporaryDirectory { _, root in
             let builderRuntime = try await Python::Runtime(
                 cacheDirectory: root.appending("fixture-cache").string,
             )
-            let builder = try await builderRuntime.session()
+            let builder = try await builderRuntime
+                .session(delegate: FileAccessDelegate { $0.path.starts(with: root) })
             try await withSession(builder) { builder in
                 try await builder.set(root.string, forKey: "root_path")
                 _ = try await builder.evaluate(Self.setup)
@@ -52,14 +55,18 @@ struct ProjectFixture {
 
     func withProject(
         environmentDirectory: String? = nil,
+        delegate: (any Python::Session.Delegate)? = nil,
         _ test: (Python::Session) async throws -> Void,
     ) async throws {
         let session = try await runtime.session(
             projectStartup,
             environmentDirectory: environmentDirectory ?? environment,
+            delegate: delegate,
         )
         try await withSession(session, test)
     }
+
+    // MARK: Package artifacts
 
     func readManifest() async throws -> [UInt8] {
         try await [UInt8](contentsOf: manifest, maximumSizeAllowed: .unlimited)
@@ -121,6 +128,8 @@ struct ProjectFixture {
             packageIndex: fileURL(for: root.appending("simple"), using: builder),
         )
     }
+
+    // MARK: Fixture source
 
     private static let setup = #"""
     import base64

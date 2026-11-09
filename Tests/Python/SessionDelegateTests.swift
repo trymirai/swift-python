@@ -7,45 +7,46 @@ import Python
 import SystemPackage
 import Testing
 
-// MARK: - RecordingFileOpenDelegate
+// MARK: - RecordingFileAccessDelegate
 
-private actor RecordingFileOpenDelegate: Python::Session.Delegate {
+private actor RecordingFileAccessDelegate: Python::Session.Delegate {
     static let readableName: String = "delegate-readable.txt"
     static let protectedName: String = "delegate-protected.txt"
+    static let scriptName: String = "script.py"
 
-    private(set) var requests: [Python::Session.FileOpenRequest] = []
+    private(set) var requests: [Python::Session.FileAccessRequest] = []
 
-    func session(
-        _ session: Python::Session,
-        shouldOpenFile request: Python::Session.FileOpenRequest,
-    ) async throws -> Bool {
+    func shouldAllowFileAccess(_ request: Python::Session.FileAccessRequest) async throws -> Bool {
         guard
+            case let .open(mode, _) = request.operation,
             let name = request.path.lastComponent?.string,
-            name == Self.readableName || name == Self.protectedName
+            name == Self.readableName || name == Self.protectedName || name == Self.scriptName
         else {
             return true
         }
         await Task.yield()
         preconditionIsolated()
         requests.append(request)
-        return name != Self.protectedName || request.mode == .readOnly
+        return name != Self.protectedName || mode == .readOnly
     }
 }
 
 @Test(.timeLimit(.minutes(1)))
 func sessionDelegateChecksNativeFileOpens() async throws {
     try await FileSystem.shared.withTemporaryDirectory { _, directory in
-        let readableName = RecordingFileOpenDelegate.readableName
-        let protectedName = RecordingFileOpenDelegate.protectedName
+        let readableName = RecordingFileAccessDelegate.readableName
+        let protectedName = RecordingFileAccessDelegate.protectedName
         let readable = directory.appending(readableName)
         let protected = directory.appending(protectedName)
 
         try await "readable".write(toFileAt: readable)
         try await "keep".write(toFileAt: protected)
 
-        let delegate = RecordingFileOpenDelegate()
+        let delegate = RecordingFileAccessDelegate()
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(delegate: delegate)
+        defer { await session.close() }
+
         try await session.set(directory.string, forKey: "directory")
         _ = try await session.evaluate("""
         import errno, io, os, sys
@@ -78,36 +79,119 @@ func sessionDelegateChecksNativeFileOpens() async throws {
         """)
 
         let base: String = try await session.get("base")
-        try await checkFileOpenRequests(delegate.requests, relativeTo: FilePath(base))
-
-        let ordinary = try await runtime.session()
-        try await ordinary.set(protected.string, forKey: "protected")
-        _ = try await ordinary
-            .evaluate("with open(protected, 'w') as f: f.write('ordinary session')")
-        await ordinary.close()
-        await session.close()
+        try await checkFileAccessRequests(delegate.requests, relativeTo: FilePath(base))
     }
 }
 
-private func checkFileOpenRequests(
-    _ requests: [Python::Session.FileOpenRequest],
-    relativeTo root: FilePath,
-) throws {
-    let readable = root.appending(RecordingFileOpenDelegate.readableName)
-    let protected = root.appending(RecordingFileOpenDelegate.protectedName)
+@Test(.timeLimit(.minutes(1)))
+func hostStreamsBypassPathOpenDelegate() async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+        let input = directory.appending(RecordingFileAccessDelegate.readableName)
+        let log = directory.appending(RecordingFileAccessDelegate.protectedName)
+        try await "input\n".write(toFileAt: input)
+        try await "previous\n".write(toFileAt: log)
 
-    #expect(requests.map(\.path) == [readable, readable, readable, protected, protected])
-    #expect(requests.map(\.mode) == [.readOnly, .readOnly, .readWrite, .writeOnly, .readOnly])
+        let delegate = RecordingFileAccessDelegate()
+        let runtime = try await Python::Runtime()
+        let session = try await runtime.session(
+            .source("print('startup')"),
+            delegate: delegate,
+        )
+        defer { await session.close() }
 
-    let append = try #require(requests.dropFirst(2).first)
-    #expect(append.options.contains(.append))
-    let truncate = try #require(requests.dropFirst(3).first)
-    #expect(truncate.options.contains([.create, .truncate]))
+        try await session.initialize(redirecting: [.stdout: log])
+        try await session.set(log.string, forKey: "log")
+        let execution = try await session.evaluate(
+            #"""
+            import sys
+
+            assert sys.stdin.read() == "input\n"
+            print("stdout")
+            _ = sys.stderr.buffer.write(b"stderr\n")
+            sys.stderr.buffer.flush()
+            try:
+                open(log, "a")
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("Expected ordinary append to reach the delegate")
+            """#,
+            redirecting: [.stdin: input, .stdout: log, .stderr: log],
+        )
+
+        #expect(execution.end == .finished)
+        #expect(execution.output.stdout.isEmpty && execution.output.stderr.isEmpty)
+        #expect(try await String(contentsOf: log, maximumSizeAllowed: .unlimited) ==
+            "previous\nstartup\nstdout\nstderr\n")
+
+        let requests = await delegate.requests
+        #expect(requests.count == 1)
+        #expect(requests.first?.path == log)
+        #expect(requests.first?.operation.openOptions?.contains(.append) == true)
+    }
 }
 
-// MARK: - SuspendedFileOpenDelegate
+@Test(.timeLimit(.minutes(1)))
+func standaloneScriptUsesOneDelegateForSourceAndPythonFileAccess() async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+        let script = directory.appending(RecordingFileAccessDelegate.scriptName)
+        let protected = directory.appending(RecordingFileAccessDelegate.protectedName)
+        try await "keep".write(toFileAt: protected)
+        try await """
+        import sys
 
-private actor SuspendedFileOpenDelegate: Python::Session.Delegate {
+        with open(sys.argv[1], "w") as file:
+            file.write("unexpected")
+        """.write(toFileAt: script)
+
+        let delegate = RecordingFileAccessDelegate()
+        let runtime = try await Python::Runtime()
+        let error = try await #require(throws: Python::ExecutionError.self) {
+            try await runtime.run(
+                script: script.string,
+                arguments: [protected.string],
+                delegate: delegate,
+            )
+        }
+        #expect(error.traceback.contains("PermissionError"))
+        #expect(try await String(contentsOf: protected, maximumSizeAllowed: .unlimited) == "keep")
+
+        let requests = await delegate.requests
+        #expect(requests.map(\.path.lastComponent) == [
+            script.lastComponent,
+            protected.lastComponent,
+        ])
+        #expect(requests.first?.operation == .open(mode: .readOnly, options: []))
+        #expect(requests.last?.operation.openMode == .writeOnly)
+        #expect(requests.last?.operation.openOptions?.contains(.truncate) == true)
+    }
+}
+
+private func checkFileAccessRequests(
+    _ requests: [Python::Session.FileAccessRequest],
+    relativeTo root: FilePath,
+) throws {
+    let readable = root.appending(RecordingFileAccessDelegate.readableName)
+    let protected = root.appending(RecordingFileAccessDelegate.protectedName)
+
+    #expect(requests.map(\.path) == [readable, readable, readable, protected, protected])
+    #expect(requests.compactMap(\.operation.openMode) == [
+        .readOnly,
+        .readOnly,
+        .readWrite,
+        .writeOnly,
+        .readOnly,
+    ])
+
+    let append = try #require(requests.dropFirst(2).first)
+    #expect(append.operation.openOptions?.contains(.append) == true)
+    let truncate = try #require(requests.dropFirst(3).first)
+    #expect(truncate.operation.openOptions?.contains([.create, .truncate]) == true)
+}
+
+// MARK: - SuspendedFileAccessDelegate
+
+private actor SuspendedFileAccessDelegate: Python::Session.Delegate {
     let path: FilePath
     let entered: AsyncStream<Void>.Continuation
 
@@ -118,10 +202,7 @@ private actor SuspendedFileOpenDelegate: Python::Session.Delegate {
         self.entered = entered
     }
 
-    func session(
-        _ session: Python::Session,
-        shouldOpenFile request: Python::Session.FileOpenRequest,
-    ) async throws -> Bool {
+    func shouldAllowFileAccess(_ request: Python::Session.FileAccessRequest) async throws -> Bool {
         guard request.path == path else {
             return true
         }
@@ -147,9 +228,11 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
         let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         defer { entered.continuation.finish() }
 
-        let delegate = SuspendedFileOpenDelegate(path: path, entered: entered.continuation)
+        let delegate = SuspendedFileAccessDelegate(path: path, entered: entered.continuation)
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(delegate: delegate)
+        defer { await session.close() }
+
         try await session.set(path.string, forKey: "path")
 
         let source = """
@@ -171,11 +254,14 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
 
         if interruption != .timeout {
             _ = try await #require(nextSignal(from: entered.stream))
-            if interruption == .stop {
-                #expect(session.stop())
-            } else {
-                evaluation.cancel()
-            }
+        }
+        switch interruption {
+        case .cancelParent:
+            evaluation.cancel()
+        case .stop:
+            #expect(session.stop())
+        case .timeout:
+            break
         }
 
         let execution = try await evaluation.value
@@ -185,6 +271,54 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
         #expect(await delegate.cancelled)
         #expect(try await FileSystem.shared.info(forFileAt: path) == nil)
         #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")
+    }
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func closingASessionPreservesItsFileAccessPolicy(hasDelegate: Bool) async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+        let protected = directory.appending(RecordingFileAccessDelegate.protectedName)
+        try await "keep".write(toFileAt: protected)
+
+        let delegate = RecordingFileAccessDelegate()
+        let runtime = try await Python::Runtime()
+        let session = try await runtime.session(delegate: hasDelegate ? delegate : nil)
+        defer { await session.close() }
+        try await session.set(protected.string, forKey: "protected")
+        let execution = try await session.evaluate("""
+        import atexit
+
+        def cleanup(path, open_file=open):
+            try:
+                with open_file(path, "w") as file:
+                    file.write("exit handler")
+            except PermissionError:
+                pass
+
+        atexit.register(cleanup, protected)
+        """)
+        #expect(execution.end == .finished)
+
+        // The exit handler attempts its write during close, outside any execution block.
         await session.close()
+        let actual = try await String(contentsOf: protected, maximumSizeAllowed: .unlimited)
+        #expect(actual == "keep")
+        #expect(await delegate.requests.isEmpty)
+    }
+}
+
+private extension Python::Session.FileAccessRequest.Operation {
+    var openMode: FileDescriptor.AccessMode? {
+        guard case let .open(mode, _) = self else {
+            return nil
+        }
+        return mode
+    }
+
+    var openOptions: FileDescriptor.OpenOptions? {
+        guard case let .open(_, options) = self else {
+            return nil
+        }
+        return options
     }
 }

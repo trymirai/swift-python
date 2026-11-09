@@ -118,13 +118,13 @@ extension Session.Control {
 extension Session.Control {
     enum Invocation: Sendable {
         case export(Call<any Encodable & Sendable>)
-        case fileOpen(Call<Bool>)
+        case fileAccess(Call<Bool>)
 
         func run() async {
             switch self {
             case let .export(call):
                 await call.run()
-            case let .fileOpen(call):
+            case let .fileAccess(call):
                 await call.run()
             }
         }
@@ -133,7 +133,7 @@ extension Session.Control {
             switch self {
             case let .export(call):
                 call.cancel()
-            case let .fileOpen(call):
+            case let .fileAccess(call):
                 call.cancel()
             }
         }
@@ -142,8 +142,8 @@ extension Session.Control {
 
 extension Session.Control {
     /// Waits on the interpreter thread without its Python thread state attached.
-    func waitForFileOpen(_ call: Call<Bool>, id: CallID) throws -> Bool {
-        try submit(.fileOpen(call), id: id)
+    func waitForFileAccess(_ call: Call<Bool>, id: CallID) throws -> Bool {
+        try submit(.fileAccess(call), id: id)
         defer { cancelCall(id) }
 
         let status = try CPython_WaitForCall(
@@ -155,7 +155,7 @@ extension Session.Control {
             throw Errno(rawValue: status)
         }
         guard let outcome = call.take() else {
-            throw Runtime.Failure("The file open decision has not completed.")
+            throw Runtime.Failure("The file access decision has not completed.")
         }
         return try outcome.get()
     }

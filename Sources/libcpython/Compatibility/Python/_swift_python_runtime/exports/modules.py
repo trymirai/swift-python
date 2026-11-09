@@ -12,7 +12,7 @@ def install(modules, invoke) -> None:
     functions = FunctionFactory(invoke)
     classes = NativeClasses(invoke, functions)
 
-    # Declaring a submodule also installs any implicit parents.
+    # Track explicit declarations separately from parents created on demand.
     installed = {}
     declared = set()
 

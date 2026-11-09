@@ -80,6 +80,7 @@ func typedRecordsAndOptionalsRoundTripThroughTheNamespace() async throws {
 func integersRoundTripAtTheirWidthAndRejectOverflow() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
+    defer { await session.close() }
 
     try await session.set(UInt64.max, forKey: "maximum")
     try await session.set(UInt128.max, forKey: "wide_maximum")
@@ -96,6 +97,7 @@ func integersRoundTripAtTheirWidthAndRejectOverflow() async throws {
 
     #expect(try await session.get("maximum", as: UInt64.self) == .max)
     #expect(try await session.get("wide_maximum", as: UInt128.self) == .max)
+
     let overflow = try await #require(throws: Python::Exception.self) {
         try await session.get("maximum", as: Int8.self)
     }
@@ -104,7 +106,6 @@ func integersRoundTripAtTheirWidthAndRejectOverflow() async throws {
         try await session.get("wide_subclass", as: UInt128.self)
     }
     #expect(subclass.name == "TypeError")
-    await session.close()
 }
 
 @Test
@@ -288,15 +289,17 @@ func asynchronousContextOperationsUseSeparateQueueTurns() async throws {
 func dictionaryKeyCollisionsThrow() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(.source(#"data = {'\u00e9': None, 'e\u0301': 2}"#))
+    defer { await session.close() }
+
     let typed = try await #require(throws: Python::Exception.self) {
         try await session.get("data", as: [String: Int?].self)
     }
     #expect(typed.name == "ValueError")
+
     let dynamic = try await #require(throws: Python::Exception.self) {
         try await session.get("data", as: Python::Value.self)
     }
     #expect(dynamic.name == "ValueError")
-    await session.close()
 }
 
 // MARK: - RecoveringEncoding
@@ -320,12 +323,13 @@ private struct RecoveringEncoding: Python::Encodable {
 func encoderCanRecoverFromAnInvalidContainerShape() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(.source("pair = (0, 1)"))
+    defer { await session.close() }
+
     try await session.enqueue { context in
         let tuple = try context.object("pair").retain(in: context)
         try context.set(RecoveringEncoding(tuple: tuple), forKey: "result")
         #expect(try context.get("result", as: Int.self) == 42)
     }
-    await session.close()
 }
 
 @Test

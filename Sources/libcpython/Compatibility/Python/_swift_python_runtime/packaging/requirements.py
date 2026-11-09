@@ -25,6 +25,10 @@ def _requirements(values: list[str]) -> list[Requirement]:
     return result
 
 
+def _requirement_strings(values: list[str]) -> list[str]:
+    return [str(requirement) for requirement in _requirements(values)]
+
+
 def _requirements_txt(text: str) -> list[str]:
     lines = []
     pending = ""
@@ -59,7 +63,7 @@ def _check_python(specifier: str | None, origin: str) -> None:
         )
 
 
-def project(request: dict, unused, control) -> list[str]:
+def project(request: dict) -> list[str]:
     manifest = request.get("pyproject")
     requirements_text = request.get("requirements")
     metadata = tomllib.loads(manifest).get("project", {}) if manifest is not None else {}
@@ -68,12 +72,12 @@ def project(request: dict, unused, control) -> list[str]:
 
     if requirements_text is not None:
         requirements = _requirements_txt(requirements_text)
+    elif "dependencies" in metadata.get("dynamic", []):
+        raise ValueError("Project dependencies must be declared in pyproject.toml")
     else:
-        if "dependencies" in metadata.get("dynamic", []):
-            raise ValueError("Project dependencies must be declared in pyproject.toml")
         requirements = metadata.get("dependencies", [])
 
-    return [str(value) for value in _requirements(requirements)]
+    return _requirement_strings(requirements)
 
 
 def _script_metadata(source: str) -> dict | None:
@@ -94,7 +98,7 @@ def _script_metadata(source: str) -> dict | None:
     return tomllib.loads(content)
 
 
-def script(request: dict, unused, control) -> list[str]:
+def script(request: dict) -> list[str]:
     metadata = _script_metadata(request["source"])
     if metadata is None:
         return []
@@ -112,21 +116,21 @@ def script(request: dict, unused, control) -> list[str]:
 
         _check_python(requires_python, "script")
 
-    return [str(requirement) for requirement in _requirements(requirements)]
+    return _requirement_strings(requirements)
 
 
-def normalize(request: dict, unused, control) -> list[dict]:
+def normalize(request: dict) -> list[dict]:
     return [
         {"name": canonicalize_name(value.name), "declaration": str(value)}
         for value in _requirements(request["requirements"])
     ]
 
 
-def names(request: dict, unused, control) -> list[str]:
+def names(request: dict) -> list[str]:
     return [canonicalize_name(value) for value in request["names"]]
 
 
-def module_name(request: dict, unused, control) -> str:
+def module_name(request: dict) -> str:
     parts = request["module"].split(".")
     if not all(part.isidentifier() for part in parts):
         raise ValueError("Expected an importable module name")

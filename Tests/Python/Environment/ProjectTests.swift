@@ -8,6 +8,41 @@ import SystemPackage
 import Testing
 
 @Test
+func projectPreparesPackagesBeforeStartupAndKeepsModuleGlobals() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        _ = try await fixture.write("""
+        import sampleextra
+        from .helpers import plus
+
+        base = 23
+        counter = 1
+
+        def answer():
+            return plus(base, counter) + sampleextra.VALUE
+
+        print("project")
+        """, to: "project/assistant/__init__.py")
+
+        try await fixture.withProject { session in
+            #expect(await session.startupOutput == nil)
+            #expect(try await session.packages.installed()["sampledep"] == "1.0")
+            #expect(try await session.packages.install(requirements: ["sampleextra"]) == .applied)
+            #expect(await session.startupOutput == nil)
+
+            let first = try await session.evaluate("counter = 10; answer()")
+            #expect(first.output.stdout == "42\n")
+            #expect(await session.startupOutput?.stdout == "project\n")
+
+            try await session.reset()
+            #expect(await session.startupOutput == nil)
+            let restarted = try await session.evaluate("answer()")
+            #expect(restarted.output.stdout == "33\n")
+            #expect(await session.startupOutput?.stdout == "project\n")
+        }
+    }
+}
+
+@Test
 func projectEnvironmentRequiresAnExclusiveLease() async throws {
     try await ProjectFixture.withFixture { fixture in
         try await fixture.withProject { _ in
@@ -62,38 +97,40 @@ func packageChangesRequireResetAndPublishOneSlot() async throws {
     try await ProjectFixture.withFixture { fixture in
         try await fixture.withProject { session in
             let root = fixture.environmentRoot
-            let files = FileSystem.shared
-            let installed = try await session.packages.installed()
             let cache = fixture.root.appending("cache/installed")
+            let alternateSlot = root.appending("site-packages-b")
+            let files = FileSystem.shared
+            let packages = session.packages
+
+            let installed = try await packages.installed()
             let unpacked = try await ProjectFixture.directoryNames(at: cache)
             #expect(installed == ["sampledep": "1.0", "sampleleaf": "1.0", "sharedbase": "1.0"])
             #expect(try await session.evaluate("counter = 41; answer()").output.stdout == "42\n")
             let previous = try await fixture.readManifest()
 
-            #expect(try await session.packages
-                .install(requirements: ["sampleextra"]) == .requiresReset)
+            #expect(try await packages.install(requirements: ["sampleextra"]) == .requiresReset)
             try await fixture.addDependencyUpdate()
-            #expect(try await session.packages.update() == .requiresReset)
+            #expect(try await packages.update() == .requiresReset)
             #expect(try await ProjectFixture.directoryNames(at: cache) == unpacked)
-            #expect(try await session.packages.installed() == installed)
+            #expect(try await packages.installed() == installed)
             #expect(try await fixture.readManifest() == previous)
-            #expect(try await files.info(forFileAt: root.appending("site-packages-b")) == nil)
+            #expect(try await files.info(forFileAt: alternateSlot) == nil)
             #expect(try await session.evaluate("answer()").output.stdout == "42\n")
 
             try await session.reset()
-            #expect(try await session.packages.update() == .applied)
-            #expect(try await session.packages.install(requirements: ["sampleextra"]) == .applied)
-            #expect(try await session.packages.installed()["sampledep"] == "2.0")
+            #expect(try await packages.update() == .applied)
+            #expect(try await packages.install(requirements: ["sampleextra"]) == .applied)
+            #expect(try await packages.installed()["sampledep"] == "2.0")
             #expect(try await session.evaluate("answer()").output.stdout == "42\n")
-            #expect(try await session.packages.uninstall(["sampleextra"]) == .requiresReset)
+            #expect(try await packages.uninstall(["sampleextra"]) == .requiresReset)
 
             await #expect(throws: Python::Exception.self) {
-                try await session.packages.install(requirements: ["sharedbase>=2"])
+                try await packages.install(requirements: ["sharedbase>=2"])
             }
 
             try await session.reset()
-            #expect(try await session.packages.uninstall(["sampleextra"]) == .applied)
-            #expect(try await session.packages.installed()["sampleextra"] == nil)
+            #expect(try await packages.uninstall(["sampleextra"]) == .applied)
+            #expect(try await packages.installed()["sampleextra"] == nil)
             #expect(try await ProjectFixture.directoryNames(at: root) == [
                 "environment.json",
                 "environment.lock",
@@ -281,25 +318,41 @@ func projectBundleLoadsFromEmbeddedBytesAndDisk() async throws {
         #expect(initial?.lastDataModificationTime == repeated?.lastDataModificationTime)
 
         let bytes = try await [UInt8](contentsOf: archive, maximumSizeAllowed: .unlimited)
+        let resources = fixture.root.appending("resources")
+        try await FileSystem.shared.createDirectory(
+            at: resources,
+            withIntermediateDirectories: false,
+        )
+
+        let cache = fixture.root.appending("bundle-cache")
+        let packageIndex = try await fixture.fileURL(for: "missing-index")
+        let application = Python::Runtime.PackageSource
+            .directory(fixture.root.appending("global").string)
+        let delegate = FileAccessDelegate { $0.path.starts(with: resources) }
         let sources: [Python::Runtime.PackageSource] = [.embedded(bytes), .archive(archive.string)]
         for source in sources {
             let runtime = try await Python::Runtime(
-                packages: [.directory(fixture.root.appending("global").string), source],
-                cacheDirectory: fixture.root.appending("bundle-cache").string,
-                packageIndex: try await fixture.fileURL(for: "missing-index"),
+                packages: [application, source],
+                cacheDirectory: cache.string,
+                packageIndex: packageIndex,
             )
-            let session = try await runtime.session(.module(ProjectFixture.projectModule))
-            try await withSession(session, checkBundledProject(in:))
+            let session = try await runtime.session(
+                .module(ProjectFixture.projectModule),
+                delegate: delegate,
+            )
+            try await withSession(session) { session in
+                try await session.set(resources.string, forKey: "resources_directory")
+                try await checkBundledProject(in: session)
+            }
 
-            #expect(try await FileSystem.shared
-                .info(forFileAt: fixture.root.appending("bundle-cache")) == nil)
+            #expect(try await FileSystem.shared.info(forFileAt: cache) == nil)
         }
     }
 }
 
 private func checkBundledProject(in session: Python::Session) async throws {
     let execution = try await session.evaluate("""
-    import inspect, pkgutil
+    import inspect, pkgutil, tempfile
     from importlib.metadata import version, files as distribution_files, packages_distributions
     from importlib.resources import as_file, files
 
@@ -308,6 +361,7 @@ private func checkBundledProject(in session: Python::Session) async throws {
     assert any(str(path).endswith("__init__.py") for path in distribution_files("sampledep"))
     assert "def answer" in inspect.getsource(answer)
     assert "helpers" in {name for _, name, _ in pkgutil.iter_modules(__path__)}
+    tempfile.tempdir = resources_directory
     with as_file(files("\(ProjectFixture.projectModule)").joinpath("message.txt")) as resource:
         assert resource.read_text() == "embedded resource"
     answer()

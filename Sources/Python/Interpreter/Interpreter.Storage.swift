@@ -10,6 +10,7 @@ import Synchronization
 extension Interpreter {
     // The registry borrows each PThread's storage, and only attached callbacks
     // can look it up. Entries are removed after interpreter destruction completes.
+    @safe
     final class Storage {
         private struct BufferBorrow {
             let id: UInt64
@@ -34,11 +35,13 @@ extension Interpreter {
 
         let key: UInt
         let references: Reference.Store
+        let fileAccess: Interpreter.FileAccess?
+
         private var isClosed: Bool = false
+        var checkpoint: CheckpointState = .inactive
 
         var sessionOrigin: ObjectIdentifier?
         weak var session: Session?
-        var fileOpenDelegate: (any Session.Delegate)?
 
         var execution: Session.Control?
         private var nextCallID: Int = 0
@@ -48,6 +51,7 @@ extension Interpreter {
 
         var classRegistry: Interpreter.ClassRegistry?
         var defaultArgumentMarker: UInt = 0
+
         private var constructedWrappers: [Reference] = []
 
         private var borrowedBuffers: [BufferBorrow] = []
@@ -57,8 +61,13 @@ extension Interpreter {
         private var pendingBufferReleases: [UInt] = []
         private var pendingObjectReleases: [UInt] = []
 
-        init(key: UInt, schedule: @escaping @Sendable () -> Void) {
+        init(
+            key: UInt,
+            fileAccess: Interpreter.FileAccess?,
+            schedule: @escaping @Sendable () -> Void,
+        ) {
             self.key = key
+            self.fileAccess = fileAccess
             self.references = Reference.Store(schedule: schedule)
 
             let pointer = unsafe UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque())
@@ -80,6 +89,12 @@ extension Interpreter {
             guard let state = current(), !state.isClosed else {
                 throw Session.Error.closed
             }
+            guard state.checkpoint != .settling else {
+                throw Exception(
+                    name: "RuntimeError",
+                    message: "The interpreter is restoring its execution state.",
+                )
+            }
             guard state.borrowedBuffers.isEmpty else {
                 throw Exception(
                     name: "RuntimeError",
@@ -87,6 +102,13 @@ extension Interpreter {
                 )
             }
             return state
+        }
+
+        func settleCheckpoint(_ body: () -> Void) {
+            precondition(checkpoint == .active)
+            checkpoint = .settling
+            body()
+            checkpoint = .inactive
         }
 
         func allocateCallID() -> Session.Control.CallID {
@@ -214,5 +236,15 @@ extension Interpreter.Storage {
         unsafe PyBuffer_Release(pointer)
         unsafe pointer.deinitialize(count: 1)
         unsafe pointer.deallocate()
+    }
+}
+
+// MARK: - Interpreter.Storage.CheckpointState
+
+extension Interpreter.Storage {
+    enum CheckpointState {
+        case inactive
+        case active
+        case settling
     }
 }

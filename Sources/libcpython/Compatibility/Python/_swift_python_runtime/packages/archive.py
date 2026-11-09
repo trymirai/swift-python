@@ -59,6 +59,7 @@ class Reader(io.RawIOBase):
 class Archive:
     def __init__(self, root: str, reader) -> None:
         self.root = root
+
         self.zip = zipfile.ZipFile(reader)
         self.names = frozenset(self.zip.namelist())
 

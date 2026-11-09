@@ -22,6 +22,27 @@ extension Environment {
 }
 
 extension Environment {
+    func prepare() async throws {
+        guard needsPreparation else {
+            return
+        }
+        try await Self.withPackageOperation { execution in
+            _ = try await apply(.resolve, canReplacePackages: true, execution: execution)
+        }
+    }
+
+    static func withPackageOperation<Result>(
+        _ operation: (Session.Control) async throws -> Result,
+    ) async throws -> Result {
+        let execution = try Session.Control(timeout: nil)
+        return try await execution.withCancellation {
+            defer { _ = execution.finish() }
+            let result = try await operation(execution)
+            try execution.finishCheckingInterruption()
+            return result
+        }
+    }
+
     func apply(
         _ change: Change,
         canReplacePackages: Bool,
@@ -31,9 +52,7 @@ extension Environment {
             return .applied
         }
 
-        let (service, configuration) = try await packaging.open()
-        try await open(using: service, configuration: configuration)
-
+        let (service, configuration) = try await open()
         let previous = manifest ?? Manifest(abi: configuration.abi)
 
         let project: [String] = if let projectDirectory {
@@ -59,8 +78,6 @@ extension Environment {
         let preparation = try await service.request(request, execution: execution)
         try execution.checkInterruption()
 
-        var next = previous
-        next.local = local.byName
         let resolution: Preparation.Resolution?
         switch preparation {
         case .unchanged:
@@ -69,8 +86,13 @@ extension Environment {
             return .requiresReset
         case let .resolved(resolved):
             resolution = resolved
-            next.fingerprint = resolved.fingerprint
-            next.packages = resolved.distributions.mapValues(\.record)
+        }
+
+        var next = previous
+        next.local = local.byName
+        if let resolution {
+            next.fingerprint = resolution.fingerprint
+            next.packages = resolution.distributions.mapValues(\.record)
         }
 
         let replacesFiles = !next.hasSameWheels(as: previous)

@@ -41,6 +41,8 @@ func callbackCannotAwaitItsOwnSession() async throws {
     let module = Python::Module("reentry", functions: functions)
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(moduleDefinitions: [module])
+    defer { await session.close() }
+
     target.withLock { $0 = session }
 
     _ = try await session.evaluate("""
@@ -56,7 +58,6 @@ func callbackCannotAwaitItsOwnSession() async throws {
     assert value == 42
     """)
     #expect(try await session.get("value", as: Int.self) == 42)
-    await session.close()
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -78,6 +79,11 @@ func callbackChainCannotAwaitAnAncestor() async throws {
     let runtime = try await Python::Runtime()
     let first = try await runtime.session(moduleDefinitions: [.init("chain", functions: [forward])])
     let second = try await runtime.session(moduleDefinitions: [.init("chain", functions: [back])])
+    defer {
+        await first.close()
+        await second.close()
+    }
+
     targets.withLock { $0 = (first, second) }
     _ = try await first.evaluate("""
     import chain
@@ -90,8 +96,6 @@ func callbackChainCannotAwaitAnAncestor() async throws {
         raise AssertionError("Expected the callback to reject reentry into its ancestor")
     """)
     #expect(try await first.get("value", as: Int.self) == 42)
-    await first.close()
-    await second.close()
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -116,8 +120,13 @@ func callbackDoesNotWaitForAnotherBusySession() async throws {
         }
     }
     let caller = try await runtime.session(moduleDefinitions: [.init("probe", functions: [read])])
+    defer {
+        await caller.close()
+        await target.close()
+    }
 
     let active = Task { try await target.evaluate("import blocked; await blocked.hold()") }
+    // Release the target even if the caller incorrectly waits for its queue.
     let watchdog = Task {
         try? await Task.sleep(for: .seconds(5))
         release.finish()
@@ -127,6 +136,7 @@ func callbackDoesNotWaitForAnotherBusySession() async throws {
         release.finish()
         active.cancel()
     }
+
     for await _ in entered {}
     let queued = Task { try await target.get("value", as: Int.self) }
     queued.cancel()
@@ -138,6 +148,4 @@ func callbackDoesNotWaitForAnotherBusySession() async throws {
     release.finish()
     _ = try await active.value
     #expect(try await target.get("value", as: Int.self) == 42)
-    await caller.close()
-    await target.close()
 }

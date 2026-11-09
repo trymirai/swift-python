@@ -7,7 +7,7 @@ import Synchronization
 // MARK: - Environment.Service
 
 extension Environment {
-    // A private installer interpreter, without a REPL namespace or Swift exports.
+    // The runtime shares this trusted installer interpreter across its sessions.
     actor Service {
         private static let moduleName = "_swift_python_runtime.packaging"
 
@@ -63,7 +63,7 @@ extension Environment {
             return try await request(inputs, execution: execution)
         }
 
-        // The caller owns interruption and publication, including completion of its Session.Control.
+        // The caller finishes the control after any environment publication.
         func request<Reply: Decodable & Sendable>(
             _ request: Request<Reply>,
             execution: Session.Control,
@@ -72,10 +72,10 @@ extension Environment {
 
             return try withModule { module, attachment in
                 let function = try module.attribute(request.function)
-                let result = try function.evaluate(
-                    request,
-                    execution: execution,
-                    in: attachment,
+                let argument = try Object(encoding: request, in: attachment)
+                let result = unsafe try function.callInterruptibly(
+                    [argument.pointer],
+                    using: execution,
                 )
                 return try result.decode(as: Reply.self)
             }

@@ -230,7 +230,7 @@ def install() -> None:
     sys.path[:] = [_ROOT if path == normalized_root else path for path in sys.path]
     sys.path_hooks.insert(0, _path_hook)
 
-    # Bootstrap modules now belong to the embedded sys.path entry.
+    # Let sys.path choose between embedded modules and host-supplied overrides.
     if FrozenImporter in sys.meta_path:
         sys.meta_path.remove(FrozenImporter)
 

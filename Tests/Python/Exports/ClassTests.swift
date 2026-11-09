@@ -338,3 +338,197 @@ func classIdentityAndSessionGenerations() async throws {
     await session.close()
     await other.close()
 }
+
+// MARK: - CheckpointModule
+
+@PythonModule("checkpoint_fixture")
+private enum CheckpointModule {}
+
+// MARK: - CheckpointPeer
+
+@PythonClass("Peer", module: CheckpointModule.self)
+private final class CheckpointPeer {
+    let context: Python::Context
+
+    @PythonProperty
+    let value: Int
+
+    private var peer: CheckpointPeer?
+    private var reference: Python::Reference?
+
+    @PythonInit
+    init(_ value: Int = 0, in context: Python::Context) {
+        self.value = value
+        self.context = context
+    }
+
+    @PythonFunction
+    func retain(_ peer: CheckpointPeer) {
+        self.peer = peer
+    }
+
+    @PythonFunction
+    func recall() -> CheckpointPeer? {
+        peer
+    }
+
+    @PythonFunction
+    func remember(_ reference: Python::Reference) {
+        self.reference = reference
+    }
+
+    @PythonFunction
+    func remembered() -> Python::Reference? {
+        reference
+    }
+}
+
+@Test(.timeLimit(.minutes(3)))
+func checkpointedEvaluationRestoresOriginalPythonAndSwiftObjects() async throws {
+    let python = try await Python::Runtime()
+    let session = try await python.session(modules: [CheckpointModule.self], transactional: true)
+    defer { await session.close() }
+
+    let prepared = try await session.evaluate("""
+    import sys
+    from checkpoint_fixture import Peer
+
+    holder = Peer()
+    child = Peer(17)
+    holder.retain(child)
+    values = [{"nested": [1]}]
+    holder.remember(values)
+    alias = values
+    nested = values[0]["nested"]
+
+    root_count = sys.getrefcount(values)
+    original_ids = id(child), id(values), id(nested)
+    """)
+    #expect(prepared.end == .finished)
+
+    let error = try await #require(throws: Python::ExecutionError.self) {
+        try await session.evaluate("""
+        del child
+        replacement = holder.recall()
+        assert id(replacement) != original_ids[0]
+        assert replacement.value == 17
+        nested.extend([2, 3])
+        values.append(4)
+        holder.remember(values)
+        print("diagnostic")
+        raise ValueError("checkpoint fixture")
+        """, filename: "r2")
+    }
+    #expect(error.traceback.contains("checkpoint fixture"))
+    #expect(error.traceback.contains("r2"))
+    #expect(error.output.stdout == "diagnostic\n")
+
+    let restored = try await session.evaluate("""
+    assert (id(child), id(values), id(nested)) == original_ids
+    assert holder.recall() is child and child.value == 17
+    assert alias is values and nested is values[0]["nested"]
+    assert values == [{"nested": [1]}]
+    assert "replacement" not in globals()
+    assert sys.getrefcount(values) == root_count - 1
+    try:
+        holder.remembered()
+    except ReferenceError:
+        pass
+    else:
+        raise AssertionError("A speculative Swift reference escaped rollback")
+    """)
+    #expect(restored.end == .finished)
+}
+
+@Test(.timeLimit(.minutes(3)))
+func rollbackKeepsAnotherInterpreterAlive() async throws {
+    enum PublicationError: Swift::Error, Equatable { case failed }
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(transactional: true)
+    let other = try await runtime.session()
+    defer {
+        await session.close()
+        await other.close()
+    }
+    try await session.initialize()
+
+    await #expect(throws: PublicationError.failed) {
+        try await session.evaluate("""
+        import threading
+        speculative_thread = threading.Thread()
+        """, committing: { _ in
+            // Start a peer after the snapshot to exercise registry links owned by the peer.
+            try await other.initialize()
+            throw PublicationError.failed
+        })
+    }
+    #expect(try await session.evaluate("'speculative_thread' in globals()")
+        .output
+        .stdout == "False\n")
+    await session.close()
+    #expect(try await other.evaluate("6 * 7").output.stdout == "42\n")
+}
+
+@Test(.timeLimit(.minutes(3)))
+func checkpointedEvaluationWaitsForHostPublication() async throws {
+    enum PublicationError: Swift::Error, Equatable { case failed }
+    let python = try await Python::Runtime()
+    let session = try await python.session(.source("values = [1]"), transactional: true)
+    defer { await session.close() }
+
+    await #expect(throws: PublicationError.failed) {
+        try await session.evaluate("values.append(2)", committing: { seal in
+            try seal.seal()
+            throw PublicationError.failed
+        })
+    }
+
+    #expect(try await stopDuringPublication(in: session) == .stopped)
+
+    let attemptedPublication = Mutex(false)
+    let expired = try await session.evaluate(
+        "values.append(5)",
+        timeout: .milliseconds(500),
+        committing: { seal in
+            attemptedPublication.withLock { $0 = true }
+            try await Task.sleep(for: .seconds(1))
+            try seal.seal()
+        },
+    )
+    #expect(attemptedPublication.withLock { $0 })
+    #expect(expired.end == .timedOut)
+
+    let committed = try await session.evaluate("""
+    assert values == [1]
+    values.append(4)
+    print("ready")
+    """, committing: { seal in
+        try seal.seal()
+        #expect(!session.stop())
+    })
+    #expect(committed.end == .finished)
+    #expect(committed.output.stdout == "ready\n")
+    #expect(try await session.evaluate("assert values == [1, 4]").end == .finished)
+}
+
+private func stopDuringPublication(in session: Python::Session) async throws -> Python::Execution
+    .End
+{
+    let (entered, signal) = AsyncStream<Void>.makeStream()
+    let (resume, gate) = AsyncStream<Void>.makeStream()
+    defer {
+        signal.finish()
+        gate.finish()
+    }
+
+    async let evaluation = session.evaluate("values.append(3)", committing: { seal in
+        signal.yield(())
+        _ = await nextSignal(from: resume)
+        try seal.seal()
+    })
+    _ = await nextSignal(from: entered)
+    #expect(session.stop())
+    gate.yield(())
+
+    return try await evaluation.end
+}

@@ -15,7 +15,8 @@ internal import Musl
 
 // MARK: - Environment
 
-// Access is serialized by the Session operation queue. The lease survives interpreter resets.
+// After preparation, access is serialized by the owning session's operation queue.
+// The lease survives interpreter resets.
 final class Environment {
     private let directory: Runtime.Path?
     let projectDirectory: Runtime.Path?
@@ -62,9 +63,10 @@ final class Environment {
         }
     }
 
-    func open(using service: Service, configuration: Configuration) async throws {
+    func open() async throws -> (Service, Configuration) {
+        let (service, configuration) = try await packaging.open()
         guard let root = directory?.file, storage == nil else {
-            return
+            return (service, configuration)
         }
 
         let files = FileSystem.shared
@@ -87,7 +89,7 @@ final class Environment {
 
             try await Self.prepareSlots(in: opened, claimed: claimed)
 
-            // A new lease can claim the staging paths once they have been checked.
+            // Mark the lease after checking reserved paths so future opens can reap staging safely.
             if !claimed {
                 _ = try opened.lease.writeAll(toAbsoluteOffset: 0, [Self.leaseMarker])
             }
@@ -98,18 +100,31 @@ final class Environment {
             try? opened.lease.close()
             throw error
         }
+        return (service, configuration)
     }
 
     func installed() async throws -> [String: String] {
         guard needsPreparation || manifest != nil else {
             return [:]
         }
-        let (service, configuration) = try await packaging.open()
-        try await open(using: service, configuration: configuration)
+        let (_, configuration) = try await open()
 
         let localVersions = manifest?.packages.mapValues(\.version) ?? [:]
         return configuration.baseVersions.merging(localVersions) { _, local in local }
     }
+
+    func close() async {
+        if let storage {
+            self.storage = nil
+            try? storage.lease.close()
+        }
+        if let temporary {
+            self.temporary = nil
+            await Self.discard(temporary)
+        }
+    }
+
+    // MARK: Package publication
 
     func save(
         _ next: Manifest,
@@ -163,18 +178,6 @@ final class Environment {
         let stagedManifest = storage.stagedManifestPath
         defer { try? Self.unlinkIfPresent(stagedManifest) }
 
-        func stageManifest() async throws {
-            let publication = Publication(active: active, manifest: next)
-            let json = try await service.encodePublication(publication)
-            try await FileSystem.shared.withFileHandle(
-                forWritingAt: stagedManifest,
-                options: .newFile(replaceExisting: false, permissions: .ownerReadWrite),
-            ) { handle in
-                try await handle.write(contentsOf: json.utf8, toAbsoluteOffset: 0)
-                try await handle.synchronize()
-            }
-        }
-
         try await Self.discardOnFailure(staged) {
             if let staged, let resolution {
                 try await FileSystem.shared.removeItem(at: staged)
@@ -186,7 +189,8 @@ final class Environment {
                 )
             }
 
-            try await stageManifest()
+            let publication = Publication(active: active, manifest: next)
+            try await Self.writePublication(publication, to: stagedManifest, using: service)
             try execution.finishCheckingInterruption()
 
             // Publishing the manifest switches both the active slot and its package records.
@@ -240,16 +244,7 @@ final class Environment {
         }
     }
 
-    func close() async {
-        if let storage {
-            self.storage = nil
-            try? storage.lease.close()
-        }
-        if let temporary {
-            self.temporary = nil
-            await Self.discard(temporary)
-        }
-    }
+    // MARK: Filesystem operations
 
     static func identifier() -> String {
         let value = String(UInt128.random(in: .min ... .max), radix: 16)
@@ -286,10 +281,13 @@ final class Environment {
     }
 }
 
+// MARK: - Persistent storage
+
 private extension Environment {
     struct Storage {
         let root: FilePath
         let lease: FileDescriptor
+
         var active: Slot?
 
         var manifestPath: FilePath {
@@ -298,6 +296,21 @@ private extension Environment {
 
         var stagedManifestPath: FilePath {
             root.appending(".environment.json.tmp")
+        }
+    }
+
+    static func writePublication(
+        _ publication: Publication,
+        to path: FilePath,
+        using service: Service,
+    ) async throws {
+        let json = try await service.encodePublication(publication)
+        try await FileSystem.shared.withFileHandle(
+            forWritingAt: path,
+            options: .newFile(replaceExisting: false, permissions: .ownerReadWrite),
+        ) { handle in
+            try await handle.write(contentsOf: json.utf8, toAbsoluteOffset: 0)
+            try await handle.synchronize()
         }
     }
 
@@ -348,7 +361,7 @@ private extension Environment {
     }
 
     static func discard(_ path: FilePath) async {
-        // Cleanup must finish even if the operation was cancelled.
+        // A separate task lets cleanup finish after the operation is cancelled.
         _ = await Task { try? await FileSystem.shared.removeItem(at: path) }.value
     }
 
@@ -420,6 +433,8 @@ private extension Environment.Slot {
     }
 }
 
+// MARK: - Cache and file staging
+
 extension Environment {
     static func clearCache(at root: FilePath) async throws {
         let files = FileSystem.shared
@@ -473,6 +488,7 @@ extension Environment {
         var created = Set([directory])
         func stageMember(_ relative: FilePath, from origin: FilePath) async throws {
             try execution.checkInterruption()
+
             let source = origin.pushing(relative)
             let target = directory.pushing(relative)
             let parent = target.removingLastComponent()
@@ -480,25 +496,7 @@ extension Environment {
                 try await files.createDirectory(at: parent, withIntermediateDirectories: true)
             }
 
-            guard let error = hardLink(source, to: target) else {
-                return
-            }
-
-            switch error {
-            case .improperLink:
-                // A cache and its environment can live on different volumes.
-                do {
-                    try await files.copyItem(at: source, to: target)
-                    return
-                } catch let error as FileSystemError where error.code == .fileAlreadyExists {
-                    break
-                }
-            case .fileExists:
-                break
-            default:
-                throw error
-            }
-            throw invalid("Package file collision: \(relative)")
+            try await linkOrCopyMember(source, to: target, relative: relative)
         }
 
         for (_, distribution) in resolution.distributions.sorted(by: { $0.key < $1.key }) {
@@ -507,6 +505,32 @@ extension Environment {
                 try await stageMember(member.path, from: origin)
             }
         }
+    }
+
+    private static func linkOrCopyMember(
+        _ source: FilePath,
+        to target: FilePath,
+        relative: FilePath,
+    ) async throws {
+        guard let error = hardLink(source, to: target) else {
+            return
+        }
+
+        switch error {
+        case .improperLink:
+            // A cache and its environment can live on different volumes.
+            do {
+                try await FileSystem.shared.copyItem(at: source, to: target)
+                return
+            } catch let error as FileSystemError where error.code == .fileAlreadyExists {
+                break
+            }
+        case .fileExists:
+            break
+        default:
+            throw error
+        }
+        throw invalid("Package file collision: \(relative)")
     }
 
     private static func hardLink(_ source: FilePath, to target: FilePath) -> Errno? {

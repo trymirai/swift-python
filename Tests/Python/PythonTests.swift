@@ -2,8 +2,9 @@
 //  Created by Anton Spivak
 //
 
+import _NIOFileSystem
 internal import libpythontestsupport
-import Python
+@testable import Python
 import Testing
 
 @Test
@@ -19,7 +20,6 @@ func embeddedStandardLibrarySupportsSourceResourcesAndOverrides() async throws {
     from importlib.resources import files
     from importlib.util import find_spec
     from pathlib import Path
-    from tempfile import TemporaryDirectory
 
     assert json.__file__ == "embedded:/stdlib/json/__init__.py"
     assert "def dumps(" in inspect.getsource(json.dumps)
@@ -27,14 +27,7 @@ func embeddedStandardLibrarySupportsSourceResourcesAndOverrides() async throws {
     assert "def dumps(" in resources.joinpath("__init__.py").read_text()
     assert "decoder.py" in {entry.name for entry in resources.iterdir()}
 
-    with TemporaryDirectory() as directory:
-        override = Path(directory) / "this.py"
-        override.touch()
-        sys.path.insert(0, directory)
-        try:
-            assert find_spec("this").origin == str(override)
-        finally:
-            sys.path.pop(0)
+    assert find_spec("this").origin == str(Path(override_path))
 
     assert not _swift_python.is_directory("jso")
     assert _swift_python.children("").count("json") == 1
@@ -51,12 +44,20 @@ func embeddedStandardLibrarySupportsSourceResourcesAndOverrides() async throws {
     assert sys.is_remote_debug_enabled() is \#(remoteDebugging)
     assert sysconfig.get_config_var("Py_REMOTE_DEBUG") == int(\#(remoteDebugging))
     """#
-    try await evaluateInFreshSession(code)
+    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+        let override = directory.appending("this.py")
+        try await "".write(toFileAt: override)
+        let session = try await Python::Runtime().session(directory: directory.string)
+        try await withSession(session) { session in
+            try await session.set(override.string, forKey: "override_path")
+            _ = try await session.evaluate(code)
+        }
+    }
 }
 
 @Test
 func bundledNativeModulesAreUsable() async throws {
-    try await evaluateInFreshSession("""
+    let source = """
     import _decimal, bz2, ctypes, lzma, sqlite3, ssl, zlib
     from compression import zstd
     from xml.parsers import expat
@@ -75,7 +76,17 @@ func bundledNativeModulesAreUsable() async throws {
         database.execute("CREATE VIRTUAL TABLE documents USING fts5(text)")
         assert database.serialize()
 
-    """)
+    """
+    _ = try await Python::Runtime()
+    let thread = try Python::PThread()
+    try thread.withAttached { attachment in
+        try Python::Object.installImporter(in: attachment)
+        let builtins = try Python::Object.import(module: "builtins", in: attachment)
+        let run = try builtins.attribute("exec")
+        let code = try Python::Object(encoding: source, in: attachment)
+        let namespace = try Python::Object(encoding: [String: String](), in: attachment)
+        _ = try run.call(code, namespace)
+    }
 }
 
 func evaluateInFreshSession(
@@ -160,6 +171,8 @@ func sourceInitialization() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(.source("counter = 40\nprint('initialized')"))
 
+    #expect(await session.startupOutput == nil)
+    try await session.initialize()
     #expect(await session.startupOutput?.stdout == "initialized\n")
     #expect(try await session.evaluate("counter += 2; counter").output.stdout == "42\n")
 
@@ -167,8 +180,10 @@ func sourceInitialization() async throws {
     #expect(try await session.evaluate("counter").output.stdout == "40\n")
     await session.close()
 
+    let failed = try await runtime.session(.source("raise ValueError('initialization failed')"))
+    defer { await failed.close() }
     let error = try await #require(throws: Python::ExecutionError.self) {
-        try await runtime.session(.source("raise ValueError('initialization failed')"))
+        try await failed.initialize()
     }
     #expect(error.traceback.contains("ValueError: initialization failed"))
     #expect(error.output.stderr == error.traceback)
@@ -178,11 +193,26 @@ func withSession(
     _ session: Python::Session,
     _ test: (Python::Session) async throws -> Void,
 ) async rethrows {
-    do {
-        try await test(session)
-    } catch {
-        await session.close()
-        throw error
+    defer { await session.close() }
+    try await test(session)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func timeoutRemainsActiveWhenPythonReplacesItsTrace() async throws {
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session()
+    try await withSession(session) { session in
+        try await session.initialize()
+        let execution = try await session.evaluate("""
+        import sys, time
+        sys.settrace(None)
+        print("trace replaced")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            pass
+        print("continued past timeout")
+        """, timeout: .seconds(1))
+        #expect(execution.end == .timedOut)
+        #expect(execution.output.stdout == "trace replaced\n")
     }
-    await session.close()
 }

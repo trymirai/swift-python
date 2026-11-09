@@ -68,28 +68,27 @@ extension Object {
 
 extension Object {
     @_lifetime(borrow self)
-    borrowing func evaluate<Source: Encodable>(
-        _ source: borrowing Source,
-        filename: String? = nil,
-        execution: Session.Control,
-        in attachment: borrowing PThread.Attachment,
+    @unsafe
+    borrowing func callInterruptibly(
+        _ arguments: [UnsafeMutablePointer<PyObject>],
+        using execution: Session.Control,
     ) throws -> Object {
-        let source = try Object(encoding: source, in: attachment)
-        let filename = try Object(encoding: filename, in: attachment)
-        let control = try Object.makeFunction(execution, in: attachment)
-
         let context = unsafe Unmanaged.passUnretained(execution).toOpaque()
+        execution.beginEvaluation(in: CPython_InterpreterKey(nil))
         defer {
+            execution.endEvaluation()
             withExtendedLifetime(execution) {}
         }
-        return unsafe try Self.take(CPython_Evaluate(
-            pointer,
-            source.pointer,
-            filename.pointer,
-            control.pointer,
-            context,
-            { context in unsafe Object.interrupt(context) },
-        ), in: self)
+        let result = arguments.withUnsafeBufferPointer { arguments in
+            unsafe CPython_CallInterruptibly(
+                pointer,
+                arguments.baseAddress,
+                arguments.count,
+                context,
+                { context in unsafe Object.interrupt(context) },
+            )
+        }
+        return unsafe try Self.take(result, in: self)
     }
 
     private static func interrupt(_ context: UnsafeMutableRawPointer?) -> Bool {

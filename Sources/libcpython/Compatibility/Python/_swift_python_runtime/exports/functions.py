@@ -40,6 +40,7 @@ def _bind_parameters(parameters, native: bool) -> tuple[str, str, list, list[Par
     names = []
     declarations = []
     defaults = []
+
     visible = []
 
     for parameter, annotation, has_default, default in parameters:

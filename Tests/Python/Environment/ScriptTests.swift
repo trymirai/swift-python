@@ -82,6 +82,71 @@ func plainSessionAndScriptDoNotCreatePackageDirectories() async throws {
 }
 
 @Test
+func scriptAuthorizationUsesTheApprovedSourceWithoutGrantingSiblingReads() async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, root in
+        let script = root.appending("original.py")
+        let replacement = root.appending("replacement.py")
+        let link = root.appending("script.py")
+        let sibling = root.appending("sibling.txt")
+        try await "private".write(toFileAt: sibling)
+        try await "raise AssertionError('unapproved source')\n".write(toFileAt: replacement)
+        try await """
+        import sys
+
+        assert __file__ == sys.argv[0]
+        assert __file__.endswith('/original.py')
+        try:
+            open(sys.argv[1]).close()
+        except PermissionError:
+            print('approved source')
+        else:
+            raise AssertionError('sibling read was granted')
+        """.write(toFileAt: script)
+        try await FileSystem.shared.createSymbolicLink(at: link, withDestination: script)
+
+        let delegate = FileAccessDelegate { request in
+            guard request.path.lastComponent == script.lastComponent else {
+                return false
+            }
+            #expect(request.operation == .open(mode: .readOnly, options: []))
+            #expect(request.exists)
+            // Repoint the link between the access decision and the source read.
+            try await FileSystem.shared.removeItem(at: link)
+            try await FileSystem.shared.createSymbolicLink(at: link, withDestination: replacement)
+            return true
+        }
+        let runtime = try await Python::Runtime()
+        let result = try await runtime.run(
+            script: link.string,
+            arguments: [sibling.string],
+            delegate: delegate,
+        )
+        #expect(result.output.stdout == "approved source\n")
+    }
+}
+
+@Test
+func deniedScriptSourceLeavesTheEnvironmentUntouched() async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, root in
+        let script = root.appending("script.py")
+        let environment = root.appending("environment")
+        try await FileSystem.shared.withFileHandle(forWritingAt: script) { handle in
+            _ = try await handle.write(contentsOf: [UInt8(0xFF)], toAbsoluteOffset: 0)
+        }
+
+        let runtime = try await Python::Runtime()
+        await #expect(throws: Errno.permissionDenied) {
+            try await runtime.run(
+                script: script.string,
+                environmentDirectory: environment.string,
+                delegate: FileAccessDelegate { _ in false },
+            )
+        }
+        #expect(try await FileSystem.shared.info(forFileAt: environment) == nil)
+    }
+}
+
+@Test
 func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
     try await ProjectFixture.withFixture { fixture in
         let cache = fixture.root.appending("cache")
@@ -90,6 +155,10 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
 
         func writeScript(_ source: String, named name: String) async throws -> String {
             try await fixture.write(header + source, to: name)
+        }
+
+        func expectScratchIsEmpty() async throws {
+            #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
         }
 
         let script = try await writeScript("""
@@ -110,6 +179,9 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
             }
             try await fixture.withProject(
                 environmentDirectory: fixture.root.appending("second-environment").string,
+                delegate: FileAccessDelegate {
+                    $0.path == FilePath(path) && $0.operation == .metadata
+                },
             ) { second in
                 try await second.set(path, forKey: "first_package")
                 _ = try await second.evaluate("""
@@ -120,7 +192,7 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
 
             let execution = try await fixture.runtime.run(script: script, arguments: [path])
             #expect(execution.output.stdout == "completed\n")
-            #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
+            try await expectScratchIsEmpty()
             #expect(try await ProjectFixture.directoryNames(at: cache.appending("wheels"))
                 .count == 2)
             #expect(try await ProjectFixture.directoryNames(at: cache.appending("installed"))
@@ -135,7 +207,7 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
             try await fixture.runtime.run(script: failed)
         }
         #expect(error.output.stderr == error.traceback)
-        #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
+        try await expectScratchIsEmpty()
 
         let slow = try await writeScript(
             "print('before timeout')\nwhile True:\n    pass\n",
@@ -144,7 +216,7 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
         let interrupted = try await fixture.runtime.run(script: slow, timeout: .seconds(2))
         #expect(interrupted.end == .timedOut)
         #expect(interrupted.output.stdout == "before timeout\n")
-        #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
+        try await expectScratchIsEmpty()
     }
 }
 

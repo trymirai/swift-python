@@ -55,8 +55,8 @@ class Provider(AbstractProvider):
         self.update = update
 
         self.wheels = WheelCache(configuration.cache)
-        self.index = {}
-        self.metadata = {}
+        self.index_files = {}
+        self.wheel_metadata = {}
 
     def identify(self, requirement_or_candidate: Requirement | Candidate) -> str:
         return canonicalize_name(requirement_or_candidate.name)
@@ -79,8 +79,9 @@ class Provider(AbstractProvider):
         )
 
     def _index_files(self, name: str) -> list[dict]:
-        if name in self.index:
-            return self.index[name]
+        cached = self.index_files.get(name)
+        if cached is not None:
+            return cached
 
         url = urllib.parse.urljoin(self.configuration.index, name + "/")
         if urllib.parse.urlsplit(url).scheme == "file":
@@ -103,7 +104,7 @@ class Provider(AbstractProvider):
         else:
             files = data["files"]
 
-        self.index[name] = files
+        self.index_files[name] = files
         return files
 
     def _index_wheels(self, name: str, requirements: list[Requirement]) -> Iterator[Wheel]:
@@ -164,20 +165,20 @@ class Provider(AbstractProvider):
         return matches()
 
     def get_dependencies(self, candidate: Candidate) -> list[Requirement]:
-        wheel = candidate.distribution
-        if not isinstance(wheel, Wheel):
-            values = self.configuration.base[candidate.name]["requires"]
-        else:
-            if wheel.digest not in self.metadata:
-                self.metadata[wheel.digest] = self.wheels.metadata(wheel)
+        distribution = candidate.distribution
+        if isinstance(distribution, Wheel):
+            metadata = self.wheel_metadata.get(distribution.digest)
+            if metadata is None:
+                metadata = self.wheels.metadata(distribution)
+                self.wheel_metadata[distribution.digest] = metadata
 
-            metadata = self.metadata[wheel.digest]
             if not supports_python(metadata.get("Requires-Python")):
-                # An empty match makes this candidate unavailable without changing
-                # the meaning of the project's requirements.
+                # An impossible requirement makes resolvelib reject this wheel and try another.
                 return [Requirement(candidate.name + "==0,!=0")]
 
             values = metadata.get_all("Requires-Dist", [])
+        else:
+            values = self.configuration.base[candidate.name]["requires"]
 
         return _dependencies_for_extras(values, candidate.extras)
 
@@ -202,29 +203,34 @@ def _resolve_wheels(provider: Provider, roots: list[Requirement]) -> dict[str, W
     }
 
 
-def prepare(request: dict, configuration: Configuration) -> dict:
-    requirements = request["requirements"]
+def _resolution_fingerprint(requirements: list[str], configuration: Configuration) -> str:
     signature = {
         "requirements": requirements,
         "base": configuration.base,
         "abi": ABI,
         "index": configuration.index,
     }
-    fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
+
+
+def prepare(request: dict, configuration: Configuration) -> dict:
+    requirements = request["requirements"]
+    fingerprint = _resolution_fingerprint(requirements, configuration)
     if request.get("fingerprint") == fingerprint and not request["update"]:
         return {"status": "unchanged"}
 
+    installed = request["installed"]
     roots = _requirements(
         requirements
         + [name + "==" + record["version"] for name, record in configuration.base.items()]
     )
-    provider = Provider(configuration, request["installed"], request["update"])
+    provider = Provider(configuration, installed, request["update"])
     wheels = _resolve_wheels(provider, roots)
 
     if not request["replace_files"]:
         selected = {name: wheel.digest for name, wheel in wheels.items()}
-        installed = {name: record["digest"] for name, record in request["installed"].items()}
-        if selected != installed:
+        existing = {name: record["digest"] for name, record in installed.items()}
+        if selected != existing:
             return {"status": "requires_reset"}
 
     distributions = {
