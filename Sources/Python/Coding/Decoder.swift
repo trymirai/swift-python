@@ -43,16 +43,12 @@ public struct Decoder: ~Copyable, ~Escapable {
     }
 
     public borrowing func bool() throws -> Bool {
-        guard try checkedValueType() == CPython_ValueBool else {
-            throw mismatch("bool")
-        }
+        try requireValueType(CPython_ValueBool, expected: "bool")
         return unsafe PyObject_IsTrue(pointer) != 0
     }
 
     public borrowing func integer<T: FixedWidthInteger>(_ type: T.Type = T.self) throws -> T {
-        guard try checkedValueType() == CPython_ValueInteger else {
-            throw mismatch("int")
-        }
+        try requireValueType(CPython_ValueInteger, expected: "int")
 
         if T.bitWidth > 64 {
             let text = unsafe try Object.take(PyObject_Str(pointer), in: self)
@@ -81,15 +77,14 @@ public struct Decoder: ~Copyable, ~Escapable {
         guard kind == CPython_ValueFloat || kind == CPython_ValueInteger else {
             throw mismatch("float")
         }
+
         let value = unsafe PyFloat_AsDouble(pointer)
         try Object.checkError("Unable to decode a Python float.")
         return value
     }
 
     public borrowing func string() throws -> String {
-        guard try checkedValueType() == CPython_ValueString else {
-            throw mismatch("str")
-        }
+        try requireValueType(CPython_ValueString, expected: "str")
         let value = unsafe Object.retaining(pointer, in: self)
         return try value.string()
     }
@@ -100,6 +95,7 @@ public struct Decoder: ~Copyable, ~Escapable {
             guard kind == CPython_ValueSequence || kind == CPython_ValueDictionary else {
                 throw mismatch("list, tuple or dict")
             }
+
             let result = unsafe PyObject_Length(pointer)
             guard result >= 0 else {
                 throw Object.failure("Unable to read a Python container.")
@@ -123,9 +119,7 @@ public struct Decoder: ~Copyable, ~Escapable {
     }
 
     public borrowing func keys() throws -> [String] {
-        guard try checkedValueType() == CPython_ValueDictionary else {
-            throw mismatch("dict")
-        }
+        try requireValueType(CPython_ValueDictionary, expected: "dict")
         let keys = unsafe try Object.take(PyDict_Keys(pointer), in: self)
         return try keys.decode(as: [String].self)
     }
@@ -136,6 +130,7 @@ public struct Decoder: ~Copyable, ~Escapable {
         let keys = try keys()
         var result = [String: Element](minimumCapacity: keys.count)
 
+        // Swift's canonical Unicode equality can merge distinct Python strings.
         for key in keys {
             guard result.index(forKey: key) == nil else {
                 throw Exception(
@@ -156,6 +151,12 @@ public struct Decoder: ~Copyable, ~Escapable {
     private borrowing func checkedValueType() throws -> CPython_ValueType {
         _ = try Interpreter.Storage.requireCurrent()
         return unsafe CPython_ValueTypeOf(pointer)
+    }
+
+    private borrowing func requireValueType(_ type: CPython_ValueType, expected: String) throws {
+        guard try checkedValueType() == type else {
+            throw mismatch(expected)
+        }
     }
 
     func mismatch(_ expected: String) -> Exception {

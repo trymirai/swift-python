@@ -34,8 +34,7 @@ static _Atomic size_t heap_count;
 static Allocation *ledger;
 static size_t capacity;
 static size_t count;
-// Include tombstones when deciding whether to rebuild the table.
-static size_t occupied;
+static size_t occupied; // Includes tombstones, which lengthen lookups.
 
 static Domain domains[3];
 
@@ -66,22 +65,8 @@ find_slot(Allocation *slots, size_t slot_count, uintptr_t address)
 }
 
 static bool
-reserve_slot(void)
+rebuild_ledger(size_t target)
 {
-    if (occupied < capacity / 2) {
-        return true;
-    }
-
-    size_t target = capacity;
-    if (target == 0) {
-        target = 1024;
-    } else if (count >= target / 4) {
-        if (target > SIZE_MAX / sizeof(Allocation) / 2) {
-            return false;
-        }
-        target *= 2;
-    }
-
     Allocation *slots = calloc(target, sizeof(*slots));
     if (slots == NULL) {
         return false;
@@ -97,6 +82,23 @@ reserve_slot(void)
     capacity = target;
     occupied = count;
     return true;
+}
+
+static bool
+reserve_slot(void)
+{
+    if (occupied < capacity / 2) {
+        return true;
+    }
+    if (capacity == 0) {
+        return rebuild_ledger(1024);
+    }
+
+    // Rehash at the current capacity if tombstones account for most of the occupied slots.
+    if (count < capacity / 4) {
+        return rebuild_ledger(capacity);
+    }
+    return capacity <= SIZE_MAX / sizeof(Allocation) / 2 && rebuild_ledger(capacity * 2);
 }
 
 static Allocation *
@@ -362,11 +364,12 @@ copy_private_bytes(PyThreadState *state, CPython_Heap *heap, bool restoring)
     PyInterpreterState *interpreter = PyThreadState_GetInterpreter(state);
     _PyThreadStateImpl *impl = (_PyThreadStateImpl *)state;
 
-    // Preserve live registry links, synchronization state, and separately owned stack pointers.
+    // Rollback preserves live registry links, synchronization state, and separately owned stacks.
     Range excluded[] = {
         FIELD(interpreter, next),
         FIELD(interpreter, id_refcount),
         FIELD(interpreter, requires_idref),
+
         FIELD(interpreter, ceval.pending),
         FIELD(interpreter, _gil),
         FIELD(interpreter, finalization_guards),
@@ -376,11 +379,13 @@ copy_private_bytes(PyThreadState *state, CPython_Heap *heap, bool restoring)
         FIELD(state, holds_gil),
         FIELD(state, gil_requested),
         FIELD(state, state),
+
         FIELD(state, last_profiled_frame),
         FIELD(state, last_profiled_frame_seq),
+        FIELD(state, remote_debugger_support),
+
         {(uintptr_t)&state->datastack_chunk, (uintptr_t)(&state->datastack_cached_chunk + 1)},
         FIELD(state, dict_global_version),
-        FIELD(state, remote_debugger_support),
 
         FIELD(impl, refcount),
     };
@@ -416,6 +421,16 @@ allocate_snapshot(CPython_Heap *heap, PyInterpreterState *interpreter)
     return malloc(bytes == 0 ? 1 : bytes);
 }
 
+static void
+mark_baseline_allocations(CPython_Heap *heap)
+{
+    for (size_t index = 0; index < capacity; index++) {
+        if (ledger[index].owner == heap) {
+            ledger[index].baseline = true;
+        }
+    }
+}
+
 int
 CPython_BeginHeapCheckpoint(PyThreadState *state)
 {
@@ -432,11 +447,7 @@ CPython_BeginHeapCheckpoint(PyThreadState *state)
     }
 
     copy_private_bytes(state, heap, false);
-    for (size_t index = 0; index < capacity; index++) {
-        if (ledger[index].owner == heap) {
-            ledger[index].baseline = true;
-        }
-    }
+    mark_baseline_allocations(heap);
     pthread_mutex_unlock(&ledger_lock);
     return 0;
 }

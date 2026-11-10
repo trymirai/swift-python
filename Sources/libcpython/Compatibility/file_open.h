@@ -4,6 +4,7 @@
 #include "Python.h"
 #include <dirent.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/stat.h>
 
 typedef struct CPython_FileTarget CPython_FileTarget;
@@ -70,5 +71,27 @@ CPython_FileTarget *_Nullable CPython_CheckFile(const char *_Nonnull path, int b
 int CPython_RequireFileDescriptor(int fd, bool borrowing_stream);
 int CPython_CloseFileDescriptor(int fd);
 int CPython_TruncateFileDescriptor(int fd, off_t size);
+
+int CPython_TrackPipe(int reader, int writer);
+int CPython_DuplicateFileDescriptor(int fd);
+uint64_t CPython_PipeIdentity(int fd);
+bool CPython_HasOpenPipe(const CPython_Files *_Nonnull files, uint64_t identity);
+
+typedef struct CPython_Subprocesses CPython_Subprocesses;
+typedef struct CPython_Subprocess CPython_Subprocess;
+
+CPython_Subprocesses *_Nullable CPython_NewSubprocesses(void);
+void CPython_FreeSubprocesses(CPython_Subprocesses *_Nonnull scope);
+void CPython_SetSubprocesses(CPython_Subprocesses *_Nullable scope);
+bool CPython_AllowsSubprocesses(void);
+void CPython_StopSubprocesses(CPython_Subprocesses *_Nonnull scope);
+int CPython_JoinSubprocesses(CPython_Subprocesses *_Nonnull scope);
+bool CPython_SubprocessesHaveOpenPipes(CPython_Subprocesses *_Nonnull scope,
+                                      const CPython_Files *_Nonnull files);
+
+CPython_Subprocess *_Nullable CPython_PrepareSubprocess(int input, int output, int error);
+void CPython_RegisterSubprocess(CPython_Subprocess *_Nonnull process, pid_t pid);
+pid_t CPython_WaitSubprocess(pid_t pid, int *_Nonnull status, int options);
+int CPython_SignalSubprocess(pid_t pid, int signal);
 
 #endif /* SWIFT_PYTHON_LIBCPYTHON_FILE_OPEN_H */

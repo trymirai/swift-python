@@ -71,10 +71,12 @@ extension Environment {
         let request = Service.Request.prepare(
             requirements: project + requirements,
             base: configuration.base,
+
             local: local.ordered,
             removed: local.removed,
             installed: previous.packages,
             fingerprint: previous.fingerprint,
+
             update: change.updatesInstalledVersions,
             replaceFiles: canReplacePackages,
         )
@@ -116,6 +118,7 @@ extension Environment {
     ) async throws -> (byName: [String: String], ordered: [String], removed: [String]) {
         var byName = manifest.local
         var order = byName.keys.sorted()
+
         var removed = [String]()
 
         func remove(_ name: String) throws {
@@ -155,7 +158,7 @@ extension Environment {
             break
         }
 
-        // Among local requirements, saved names precede newly added names.
+        // Preserve the order of newly requested packages after the saved names.
         return (byName, order.compactMap { byName[$0] }, removed)
     }
 }

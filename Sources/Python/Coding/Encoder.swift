@@ -41,13 +41,15 @@ public struct Encoder: ~Copyable, ~Escapable {
     public mutating func encode(_ value: consuming Object) throws {
         _ = try Interpreter.Storage.requireCurrent()
         let pointer = unsafe value.release()
-        if unsafe CPython_ValueTypeOf(pointer) == CPython_ValueDictionary {
-            unsafe assign(.dictionary(pointer))
+
+        let output: Output = if unsafe CPython_ValueTypeOf(pointer) == CPython_ValueDictionary {
+            unsafe .dictionary(pointer)
         } else if unsafe CPython_IsList(pointer) {
-            unsafe assign(.list(pointer))
+            unsafe .list(pointer)
         } else {
-            unsafe assign(.value(pointer))
+            unsafe .value(pointer)
         }
+        unsafe assign(output)
     }
 
     public mutating func encode(_ value: Bool) throws {
@@ -68,14 +70,15 @@ public struct Encoder: ~Copyable, ~Escapable {
 
     public mutating func encodeInteger<T: FixedWidthInteger>(_ value: T) throws {
         _ = try Interpreter.Storage.requireCurrent()
-        if let signed = Int64(exactly: value) {
-            unsafe try replace(PyLong_FromLongLong(signed))
+
+        let pointer = if let signed = Int64(exactly: value) {
+            unsafe PyLong_FromLongLong(signed)
         } else if let unsigned = UInt64(exactly: value) {
-            unsafe try replace(PyLong_FromUnsignedLongLong(unsigned))
+            unsafe PyLong_FromUnsignedLongLong(unsigned)
         } else {
-            let pointer = String(value).withCString { unsafe PyLong_FromString($0, nil, 10) }
-            unsafe try replace(pointer)
+            String(value).withCString { unsafe PyLong_FromString($0, nil, 10) }
         }
+        unsafe try replace(pointer)
     }
 
     public mutating func encodeBytes(_ value: Span<UInt8>) throws {
@@ -93,6 +96,7 @@ public struct Encoder: ~Copyable, ~Escapable {
             let value = try Object(encoding: values[index], in: self)
             unsafe try Self.setListItem(value, at: index, in: result.pointer)
         }
+
         unsafe assign(.list(result.release()))
     }
 
@@ -108,6 +112,7 @@ public struct Encoder: ~Copyable, ~Escapable {
                 errorMessage: "Unable to encode a Python dictionary.",
             )
         }
+
         unsafe assign(.dictionary(result.release()))
     }
 
@@ -175,21 +180,6 @@ public struct Encoder: ~Copyable, ~Escapable {
     }
 
     @unsafe
-    private borrowing func setDictionaryItem<T: Encodable & ~Copyable>(
-        _ value: borrowing T,
-        forKey key: String,
-        in dictionary: UnsafeMutablePointer<PyObject>,
-        errorMessage: String,
-    ) throws {
-        let key = try Object(encoding: key, in: self)
-        let value = try Object(encoding: value, in: self)
-        try Object.check(
-            unsafe PyDict_SetItem(dictionary, key.pointer, value.pointer),
-            errorMessage,
-        )
-    }
-
-    @unsafe
     private mutating func listOutput() throws -> UnsafeMutablePointer<PyObject> {
         switch unsafe output {
         case let .list(list):
@@ -204,6 +194,21 @@ public struct Encoder: ~Copyable, ~Escapable {
                 message: "The encoder already contains a non-list value.",
             )
         }
+    }
+
+    @unsafe
+    private borrowing func setDictionaryItem<T: Encodable & ~Copyable>(
+        _ value: borrowing T,
+        forKey key: String,
+        in dictionary: UnsafeMutablePointer<PyObject>,
+        errorMessage: String,
+    ) throws {
+        let key = try Object(encoding: key, in: self)
+        let value = try Object(encoding: value, in: self)
+        try Object.check(
+            unsafe PyDict_SetItem(dictionary, key.pointer, value.pointer),
+            errorMessage,
+        )
     }
 
     @unsafe

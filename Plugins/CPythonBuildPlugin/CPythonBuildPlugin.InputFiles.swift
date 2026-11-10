@@ -71,12 +71,7 @@ extension CPythonBuildPlugin {
                     break
                 }
 
-                // Read d_name before readdir can reuse the entry buffer.
-                let capacity = MemoryLayout.size(ofValue: entry.pointee.d_name)
-                let name = withUnsafePointer(to: entry.pointee.d_name) {
-                    $0.withMemoryRebound(to: CChar.self, capacity: capacity) { String(cString: $0) }
-                }
-
+                let name = Self.entryName(entry)
                 if Self.excludedNames.contains(name) {
                     continue
                 }
@@ -90,6 +85,14 @@ extension CPythonBuildPlugin {
                 default:
                     break
                 }
+            }
+        }
+
+        private static func entryName(_ entry: UnsafePointer<dirent>) -> String {
+            // Copy the name before readdir reuses the entry buffer.
+            let capacity = MemoryLayout.size(ofValue: entry.pointee.d_name)
+            return withUnsafePointer(to: entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: capacity) { String(cString: $0) }
             }
         }
 

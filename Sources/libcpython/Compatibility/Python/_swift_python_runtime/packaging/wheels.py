@@ -101,11 +101,9 @@ class WheelCache:
 
             if digest != wheel.digest:
                 raise ValueError(f"Cached wheel checksum mismatch: {wheel.name}")
-
             return destination
 
         temporary = cache / (uuid.uuid4().hex + ".download")
-
         try:
             _download(wheel, temporary)
             os.replace(temporary, destination)
@@ -156,14 +154,16 @@ def archive(request: dict) -> None:
     source = absolute_path(request["directory"])
     destination = absolute_path(request["output"])
 
-    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as output:
         for file in sorted(source.rglob("*")):
-            if not file.is_file():
-                continue
+            if file.is_file():
+                _write_archive_member(output, file, file.relative_to(source).as_posix())
 
-            entry = zipfile.ZipInfo(file.relative_to(source).as_posix())
-            entry.compress_type = zipfile.ZIP_DEFLATED
-            entry.external_attr = (file.stat().st_mode & 0o777) << 16
 
-            with file.open("rb") as source_file, archive.open(entry, "w") as entry_stream:
-                shutil.copyfileobj(source_file, entry_stream)
+def _write_archive_member(archive: zipfile.ZipFile, file: Path, name: str) -> None:
+    entry = zipfile.ZipInfo(name)
+    entry.compress_type = zipfile.ZIP_DEFLATED
+    entry.external_attr = (file.stat().st_mode & 0o777) << 16
+
+    with file.open("rb") as source, archive.open(entry, "w") as output:
+        shutil.copyfileobj(source, output)

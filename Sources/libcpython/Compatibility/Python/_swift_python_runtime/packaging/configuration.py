@@ -7,6 +7,7 @@ import tempfile
 import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
+from sysconfig import get_path
 
 from packaging.markers import default_environment
 from packaging.specifiers import SpecifierSet
@@ -35,6 +36,17 @@ def supports_python(specifier: str | None) -> bool:
     return not specifier or SpecifierSet(specifier).contains(PYTHON_VERSION, prereleases=True)
 
 
+def _check_wheel_tags(distribution: importlib.metadata.Distribution, name: str) -> None:
+    wheel = distribution.read_text("WHEEL")
+    if not wheel:
+        return
+
+    metadata = email.parser.Parser().parsestr(wheel)
+    tags = set().union(*(parse_tag(tag) for tag in metadata.get_all("Tag", [])))
+    if tags and not tags.intersection(SUPPORTED_TAGS):
+        raise ValueError(f"Package {name} has incompatible wheel tags")
+
+
 def _distribution(distribution: importlib.metadata.Distribution) -> dict:
     metadata = distribution.metadata
     name = metadata["Name"]
@@ -46,13 +58,7 @@ def _distribution(distribution: importlib.metadata.Distribution) -> dict:
     if not supports_python(requires_python):
         raise ValueError(f"Package {name} requires Python {requires_python}")
 
-    wheel = distribution.read_text("WHEEL")
-    if wheel:
-        wheel_metadata = email.parser.Parser().parsestr(wheel)
-        tags = set().union(*(parse_tag(tag) for tag in wheel_metadata.get_all("Tag", [])))
-        if tags and not tags.intersection(SUPPORTED_TAGS):
-            raise ValueError(f"Package {name} has incompatible wheel tags")
-
+    _check_wheel_tags(distribution, name)
     return {
         "version": str(Version(version)),
         "requires": metadata.get_all("Requires-Dist", []),
@@ -80,6 +86,19 @@ def _check_source_paths(sources: list[dict]) -> None:
 
         if "archive" in source:
             absolute_path(source["archive"])
+
+
+def project_package_source(directory: str) -> str | None:
+    project = absolute_path(directory).resolve()
+    venv = str(project / ".venv")
+    venv_packages = Path(get_path("purelib", scheme="venv", vars={"base": venv, "platbase": venv}))
+
+    for candidate in (project / "site-packages", venv_packages):
+        # A symlink can point outside the project even when the candidate path is under it.
+        path = candidate.resolve()
+        if path.is_relative_to(project) and path.is_dir():
+            return str(path)
+    return None
 
 
 def with_sources(configuration: Configuration, sources: list[dict], read) -> Configuration:

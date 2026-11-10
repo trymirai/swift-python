@@ -101,6 +101,7 @@ private extension Reference.Store {
             guard isActive else {
                 return nil
             }
+
             let token = nextToken
             nextToken += 1
 
@@ -139,6 +140,7 @@ private extension Reference.Store {
             guard let pointer = pointersByToken.removeValue(forKey: token) else {
                 return nil
             }
+
             if checkpoint != nil {
                 // A baseline reference is still included in the saved refcounts.
                 checkpoint?.releases.append(pointer)
@@ -165,13 +167,15 @@ private extension Reference.Store {
             }
 
             let pending = takePendingReleases()
+
             // Rollback already undoes the retains made during the block.
-            if !restoring {
-                pointersByToken.merge(saved.pointersByToken) { _, _ in
-                    preconditionFailure("A Python reference token cannot be reused.")
-                }
-                saved.releases.append(contentsOf: pending)
+            if restoring {
+                return saved.releases
             }
+            pointersByToken.merge(saved.pointersByToken) { _, _ in
+                preconditionFailure("A Python reference token cannot be reused.")
+            }
+            saved.releases.append(contentsOf: pending)
             return saved.releases
         }
 

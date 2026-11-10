@@ -174,8 +174,6 @@ _FUNCTION_TYPE = type(lambda: None)
 
 
 def _fix_functions(values, module_name: str, filename: str) -> None:
-    # Imports required during Py_Initialize ran before our loader was installed.
-    # Give their existing code objects the same virtual filename as later imports.
     for value in values:
         if type(value) is not _FUNCTION_TYPE:
             if isinstance(value, (staticmethod, classmethod)):
@@ -204,6 +202,7 @@ def _rebind_module(name: str, module, spec) -> None:
 
 
 def _rebind_bootstrap_modules() -> None:
+    # Py_Initialize loaded these modules before the virtual loader was available.
     for name, module in tuple(sys.modules.items()):
         if getattr(module, "__loader__", None) is not FrozenImporter:
             continue

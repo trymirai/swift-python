@@ -25,7 +25,10 @@ extension StandardLibraryBuilder {
             ![".pyc", ".pyo", ".so", ".dll", ".exe", ".pyd", ".DS_Store"]
                 .contains { path.hasSuffix($0) }
         }
-        var resources = paths.map { Resource(path: $0, source: library.appending($0)) }
+        var resources = paths.map { path in
+            let directory = path == "subprocess.py" ? output : library
+            return Resource(path: path, source: directory.appending(path))
+        }
 
         let adapters = root.appending("Sources/libcpython/Compatibility/Python")
         for path in try await workspace.paths(adapters, omitting: ["__pycache__"])

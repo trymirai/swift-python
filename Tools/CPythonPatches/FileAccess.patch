@@ -253,17 +253,41 @@
      int result;
  #ifdef HAVE_UNLINKAT
      int unlinkat_unavailable = 0;
-@@ -10766,6 +10837,9 @@
+@@ -10201,7 +10272,10 @@
+         return NULL;
+     }
+ #ifndef MS_WINDOWS
+-    if (kill(pid, (int)signal) == -1) {
++    int result = CPython_RestrictedFiles()
++        ? CPython_SignalSubprocess(pid, (int)signal)
++        : kill(pid, (int)signal);
++    if (result == -1) {
+         return posix_error();
+     }
+ 
+@@ -10766,6 +10840,10 @@
  os_waitpid_impl(PyObject *module, pid_t pid, int options)
  /*[clinic end generated code: output=5c37c06887a20270 input=0bf1666b8758fda3]*/
  {
-+    if (CPython_RestrictedFiles()) {
++    const bool managed = CPython_RestrictedFiles();
++    if (managed && !CPython_AllowsSubprocesses()) {
 +        return CPython_UnsupportedNativeOperation();
 +    }
      pid_t res;
      int async_err = 0;
      WAIT_TYPE status;
-@@ -11001,6 +11075,23 @@
+@@ -10773,7 +10851,9 @@
+ 
+     do {
+         Py_BEGIN_ALLOW_THREADS
+-        res = waitpid(pid, &status, options);
++        res = managed
++            ? CPython_WaitSubprocess(pid, &WAIT_STATUS_INT(status), options)
++            : waitpid(pid, &status, options);
+         Py_END_ALLOW_THREADS
+     } while (res < 0 && errno == EINTR && !(async_err = PyErr_CheckSignals()));
+     if (res < 0)
+@@ -11001,6 +11081,23 @@
  os_readlink_impl(PyObject *module, path_t *path, int dir_fd)
  /*[clinic end generated code: output=d21b732a2e814030 input=03d10130870dbca8]*/
  {
@@ -287,7 +311,7 @@
  #if defined(HAVE_READLINK)
      char buffer[MAXPATHLEN+1];
      ssize_t length;
-@@ -11805,6 +11896,13 @@
+@@ -11805,6 +11902,13 @@
      if (PySys_Audit("open", "OOi", path->object, Py_None, flags) < 0) {
          return -1;
      }
@@ -301,7 +325,7 @@
  
      _Py_BEGIN_SUPPRESS_IPH
      do {
-@@ -11872,7 +11970,7 @@
+@@ -11872,7 +11976,7 @@
       */
      Py_BEGIN_ALLOW_THREADS
      _Py_BEGIN_SUPPRESS_IPH
@@ -310,7 +334,16 @@
      _Py_END_SUPPRESS_IPH
      Py_END_ALLOW_THREADS
      if (res < 0)
-@@ -12093,6 +12191,10 @@
+@@ -11914,7 +12018,7 @@
+ os_dup_impl(PyObject *module, int fd)
+ /*[clinic end generated code: output=486f4860636b2a9f input=6f10f7ea97f7852a]*/
+ {
+-    return _Py_dup(fd);
++    return CPython_RestrictedFiles() ? CPython_DuplicateFileDescriptor(fd) : _Py_dup(fd);
+ }
+ 
+ // dup2() is either provided by libc or dup2.c with AC_REPLACE_FUNCS().
+@@ -12093,6 +12197,10 @@
  os_lseek_impl(PyObject *module, int fd, Py_off_t position, int how)
  /*[clinic end generated code: output=971e1efb6b30bd2f input=32ea0788da7cb44b]*/
  {
@@ -321,7 +354,7 @@
      Py_off_t result = -1;
  
  #ifdef SEEK_SET
-@@ -12140,6 +12242,9 @@
+@@ -12140,6 +12248,9 @@
  os_read_impl(PyObject *module, int fd, Py_ssize_t length)
  /*[clinic end generated code: output=dafbe9a5cddb987b input=1df2eaa27c0bf1d3]*/
  {
@@ -331,7 +364,7 @@
      if (length < 0) {
          errno = EINVAL;
          return posix_error();
-@@ -12485,6 +12590,10 @@
+@@ -12485,6 +12596,10 @@
  os_write_impl(PyObject *module, int fd, Py_buffer *data)
  /*[clinic end generated code: output=e4ef5bc904b58ef9 input=3207e28963234f3c]*/
  {
@@ -342,7 +375,7 @@
      return _Py_write(fd, data->buf, data->len);
  }
  
-@@ -12784,6 +12893,9 @@
+@@ -12784,6 +12899,9 @@
  os_fstat_impl(PyObject *module, int fd)
  /*[clinic end generated code: output=efc038cb5f654492 input=27e0e0ebbe5600c9]*/
  {
@@ -352,7 +385,7 @@
      STRUCT_STAT st;
      int res;
      int async_err = 0;
-@@ -12820,6 +12932,9 @@
+@@ -12820,6 +12938,9 @@
  os_isatty_impl(PyObject *module, int fd)
  /*[clinic end generated code: output=6a48c8b4e644ca00 input=08ce94aa1eaf7b5e]*/
  {
@@ -362,7 +395,33 @@
      int return_value;
      Py_BEGIN_ALLOW_THREADS
      _Py_BEGIN_SUPPRESS_IPH
-@@ -13540,6 +13655,9 @@
+@@ -12844,6 +12965,9 @@
+ os_pipe_impl(PyObject *module)
+ /*[clinic end generated code: output=ff9b76255793b440 input=02535e8c8fa6c4d4]*/
+ {
++    if (CPython_RestrictedFiles() && !CPython_AllowsSubprocesses()) {
++        return CPython_UnsupportedNativeOperation();
++    }
+     int fds[2];
+ #ifdef MS_WINDOWS
+     HANDLE read, write;
+@@ -12932,7 +13056,14 @@
+         return PyErr_SetFromErrno(PyExc_OSError);
+     }
+ #endif /* !MS_WINDOWS */
+-    return Py_BuildValue("(ii)", fds[0], fds[1]);
++    PyObject *result = Py_BuildValue("(ii)", fds[0], fds[1]);
++    if (result == NULL || CPython_TrackPipe(fds[0], fds[1]) < 0) {
++        Py_XDECREF(result);
++        close(fds[0]);
++        close(fds[1]);
++        return NULL;
++    }
++    return result;
+ }
+ #endif  /* HAVE_PIPE */
+ 
+@@ -13540,6 +13671,9 @@
  os_ftruncate_impl(PyObject *module, int fd, Py_off_t length)
  /*[clinic end generated code: output=fba15523721be7e4 input=63b43641e52818f2]*/
  {
@@ -372,7 +431,7 @@
      int result;
      int async_err = 0;
  
-@@ -13583,6 +13701,20 @@
+@@ -13583,6 +13717,20 @@
  os_truncate_impl(PyObject *module, path_t *path, Py_off_t length)
  /*[clinic end generated code: output=43009c8df5c0a12b input=ce33fd7808a511c4]*/
  {
@@ -393,7 +452,7 @@
      int result;
  #ifdef MS_WINDOWS
      int fd;
-@@ -16487,6 +16619,11 @@
+@@ -16487,6 +16635,11 @@
      if (!PyUnicode_FSConverter(self->path, &ub))
          return NULL;
      const char *path = PyBytes_AS_STRING(ub);
@@ -405,7 +464,7 @@
      if (self->dir_fd != DEFAULT_DIR_FD) {
  #ifdef HAVE_FSTATAT
        if (HAVE_FSTATAT_RUNTIME) {
-@@ -17039,6 +17176,8 @@
+@@ -17039,6 +17192,8 @@
      // there are reads in progress.
      PyMutex read_mutex;
      uint8_t closed;
@@ -414,7 +473,7 @@
  } ScandirIterator;
  
  #define ScandirIterator_CAST(op)    ((ScandirIterator *)(op))
-@@ -17144,6 +17283,7 @@
+@@ -17144,6 +17299,7 @@
  ScandirIterator_closedir(ScandirIterator *iterator)
  {
      DIR *dirp = NULL;
@@ -422,7 +481,7 @@
  
      _Py_atomic_store_uint8(&iterator->closed, 1);
      if (PyMutex_LockFast(&iterator->read_mutex)) {
-@@ -17170,6 +17310,13 @@
+@@ -17170,6 +17326,13 @@
  {
      ScandirIterator *iterator = ScandirIterator_CAST(op);
      struct dirent *direntp;
@@ -436,7 +495,7 @@
      Py_ssize_t name_len = 0;
      int is_dot;
      int found = 0;
-@@ -17401,6 +17548,8 @@
+@@ -17401,6 +17564,8 @@
          return NULL;
  
      iterator->read_mutex = (PyMutex){0};
@@ -445,7 +504,7 @@
      iterator->closed = 1;
  #ifdef MS_WINDOWS
      iterator->handle = INVALID_HANDLE_VALUE;
-@@ -17411,6 +17560,41 @@
+@@ -17411,6 +17576,41 @@
      /* Move the ownership to iterator->path */
      memcpy(&iterator->path, path, sizeof(path_t));
      memset(path, 0, sizeof(path_t));
@@ -487,7 +546,7 @@
  
  #ifdef MS_WINDOWS
      iterator->first_time = 1;
-@@ -19048,6 +19232,9 @@
+@@ -19048,6 +19248,9 @@
  static int
  posixmodule_exec(PyObject *m)
  {
@@ -497,6 +556,87 @@
      _posixstate *state = get_posix_state(m);
  
  #if defined(HAVE_PWRITEV)
+--- a/PosixSubprocess.c
++++ b/PosixSubprocess.c
+@@ -1,9 +1,11 @@
++#ifdef SWIFT_PYTHON_PROCESS_MODULES
+ /* Authors: Gregory P. Smith & Jeffrey Yasskin */
+ #ifndef Py_BUILD_CORE_BUILTIN
+ #  define Py_BUILD_CORE_MODULE 1
+ #endif
+ 
+ #include "Python.h"
++#include "file_open.h"
+ #include "pycore_fileutils.h"     // _Py_set_inheritable_async_safe()
+ #include "pycore_interp.h"        // _PyInterpreterState_GetFinalizing()
+ #include "pycore_pystate.h"       // _PyInterpreterState_GET()
+@@ -1023,6 +1025,7 @@
+                           PyObject *preexec_fn)
+ /*[clinic end generated code: output=288464dc56e373c7 input=5e56eac3e036e349]*/
+ {
++    CPython_Subprocess *managed = NULL;
+     PyObject *converted_args = NULL, *fast_args = NULL;
+     PyObject *preexec_fn_args_tuple = NULL;
+     gid_t *extra_groups = NULL;
+@@ -1227,6 +1230,43 @@
+         goto cleanup;
+     }
+ 
++    if (CPython_RestrictedFiles()) {
++        if (!close_fds || pgid_to_set > 0) {
++            PyErr_SetString(PyExc_ValueError,
++                            "Subprocesses require close_fds and an execution-owned process group.");
++            goto cleanup;
++        }
++
++        // Keep the child and its descendants in a group that belongs to this execution.
++        if (!call_setsid) {
++            pgid_to_set = 0;
++        }
++
++        int descriptors[] = {
++            p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite, errpipe_read, errpipe_write
++        };
++        for (size_t i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); ++i) {
++            int fd = descriptors[i];
++            if (fd >= 3 && CPython_RequireFileDescriptor(fd, true) < 0) {
++                PyErr_SetFromErrno(PyExc_OSError);
++                goto cleanup;
++            }
++        }
++        for (Py_ssize_t i = 0; i < fds_to_keep_len; ++i) {
++            if (c_fds_to_keep[i] >= 3 && CPython_RequireFileDescriptor(c_fds_to_keep[i], true) < 0) {
++                PyErr_SetFromErrno(PyExc_OSError);
++                goto cleanup;
++            }
++        }
++
++        managed = CPython_PrepareSubprocess(p2cwrite >= 0 ? p2cwrite : p2cread,
++                                            c2pread >= 0 ? c2pread : c2pwrite,
++                                            errread >= 0 ? errread : errwrite);
++        if (managed == NULL) {
++            goto cleanup;
++        }
++    }
++
+     /* This must be the last thing done before fork() because we do not
+      * want to call PyOS_BeforeFork() if there is any chance of another
+      * error leading to the cleanup: code without calling fork(). */
+@@ -1300,6 +1340,9 @@
+         PyOS_AfterFork_Parent();
+ 
+ cleanup:
++    if (managed != NULL) {
++        CPython_RegisterSubprocess(managed, pid);
++    }
+     if (c_fds_to_keep != NULL) {
+         PyMem_Free(c_fds_to_keep);
+     }
+@@ -1361,3 +1404,4 @@
+ {
+     return PyModuleDef_Init(&_posixsubprocessmodule);
+ }
++#endif
 --- a/Import.c
 +++ b/Import.c
 @@ -1,3 +1,5 @@
@@ -593,3 +733,15 @@
  
  #ifdef HAVE_SYS_DEVPOLL_H
      state->devpoll_Type = (PyTypeObject *)PyType_FromModuleAndSpec(
+--- a/subprocess.py
++++ b/subprocess.py
+@@ -76,6 +76,9 @@
+ 
+ # some platforms do not support subprocesses
+ _can_fork_exec = sys.platform not in {"emscripten", "wasi", "ios", "tvos", "watchos"}
++# Swift Python bundles the native process module for Mac Catalyst.
++if sys.platform == "ios" and getattr(sys.implementation, "_multiarch", "").endswith("-macabi"):
++    _can_fork_exec = True
+ 
+ if _mswindows:
+     import _winapi

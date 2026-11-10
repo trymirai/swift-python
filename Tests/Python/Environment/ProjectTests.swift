@@ -22,16 +22,24 @@ func projectStartupSelectsOnlyProjectModules() async throws {
 
         let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
 
-        func expectStartupError(
-            for module: String?,
-            importPaths: [String] = [],
-            containing diagnostic: String,
+        func withStartup(
+            _ module: String?,
+            importPaths: [String],
+            _ test: (Python::Session) async throws -> Void,
         ) async throws {
             let session = try await runtime.session(
                 .project(directory: project.string, module: module),
                 importPaths: importPaths,
             )
-            try await withSession(session) { session in
+            try await withSession(session, test)
+        }
+
+        func expectStartupError(
+            for module: String?,
+            importPaths: [String] = [],
+            containing diagnostic: String,
+        ) async throws {
+            try await withStartup(module, importPaths: importPaths) { session in
                 let error = try await #require(throws: Python::ExecutionError.self) {
                     try await session.initialize()
                 }
@@ -62,11 +70,7 @@ func projectStartupSelectsOnlyProjectModules() async throws {
             ("reporting", "reporting"),
         ]
         for (module, name) in selections {
-            let session = try await runtime.session(
-                .project(directory: project.string, module: module),
-                importPaths: [sources.string],
-            )
-            try await withSession(session) { session in
+            try await withStartup(module, importPaths: [sources.string]) { session in
                 let loaded = try await session.get("__name__", as: String.self)
                 #expect(loaded == name)
             }
@@ -85,7 +89,7 @@ func projectStartupSelectsOnlyProjectModules() async throws {
 @Test
 func projectPreparesPackagesBeforeStartupAndKeepsModuleGlobals() async throws {
     try await ProjectFixture.withFixture { fixture in
-        _ = try await fixture.write("""
+        try await fixture.write("""
         import sampleextra
         from .helpers import plus
 
@@ -250,11 +254,11 @@ func savedProjectEnvironmentReopensOffline() async throws {
             #expect(try await session.packages.install(requirements: ["sampleextra"]) == .applied)
         }
 
-        _ = try await fixture.write(
+        try await fixture.write(
             "# Project requirements\nsampledep>=1\n",
             to: "project/requirements.txt",
         )
-        _ = try await fixture.write("""
+        try await fixture.write("""
         [project]
         name = "test-assistant"
         version = "1.0"
@@ -289,11 +293,11 @@ func reusedEnvironmentChecksCollisionsWithChangedBasePackages() async throws {
             at: fixture.root.appending("global/overlap-1.0.dist-info"),
             withIntermediateDirectories: false,
         )
-        _ = try await fixture.write(
+        try await fixture.write(
             "Metadata-Version: 2.4\nName: overlap\nVersion: 1.0\n",
             to: "global/overlap-1.0.dist-info/METADATA",
         )
-        _ = try await fixture.write(
+        try await fixture.write(
             "sampledep/__init__.py,,\n",
             to: "global/overlap-1.0.dist-info/RECORD",
         )
@@ -301,7 +305,7 @@ func reusedEnvironmentChecksCollisionsWithChangedBasePackages() async throws {
             at: fixture.root.appending("global/sampledep"),
             withIntermediateDirectories: false,
         )
-        _ = try await fixture.write("VALUE = 0\n", to: "global/sampledep/__init__.py")
+        try await fixture.write("VALUE = 0\n", to: "global/sampledep/__init__.py")
 
         let runtime = try await fixture.rebuildRuntime()
         let error = try await #require(throws: Python::Exception.self) {
@@ -319,7 +323,7 @@ func movingARequirementToLocalInstallPreservesItAcrossReopen() async throws {
     try await ProjectFixture.withFixture { fixture in
         let root = fixture.environmentRoot
         try await fixture.withProject { session in
-            _ = try await fixture.write("""
+            try await fixture.write("""
             [project]
             name = "test-assistant"
             version = "1.0"
@@ -409,6 +413,42 @@ func firstSessionPackageSourceWins(version: String) async throws {
 }
 
 @Test
+func projectDiscoversPreparedPackages() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        func expectSharedPackage(
+            version: String,
+            value: Int,
+            packages: [Python::Runtime.PackageSource] = [],
+        ) async throws {
+            let session = try await fixture.runtime.session(
+                fixture.projectStartup,
+                packages: packages,
+            )
+            try await withSession(session) { session in
+                let installed = try await session.packages.installed()
+                #expect(installed["sharedbase"] == version)
+                let output = try await session
+                    .evaluate("import sharedbase; print(sharedbase.VALUE)")
+                #expect(output.output.stdout == "\(value)\n")
+            }
+        }
+
+        try await fixture.prepareProjectVirtualEnvironment()
+        try await expectSharedPackage(version: "2.0", value: 27)
+
+        _ = try await fixture.preparePackageSource(
+            "project/site-packages",
+            version: "3.0",
+            value: 37,
+        )
+        try await expectSharedPackage(version: "3.0", value: 37)
+
+        let explicit = try await fixture.preparePackageSource("explicit", version: "4.0", value: 47)
+        try await expectSharedPackage(version: "4.0", value: 47, packages: [explicit])
+    }
+}
+
+@Test
 func conflictingRequirementsDoNotFallBackToRuntimePackages() async throws {
     try await ProjectFixture.withFixture { fixture in
         let project = try await fixture.preparePackageSource(
@@ -416,7 +456,7 @@ func conflictingRequirementsDoNotFallBackToRuntimePackages() async throws {
             version: "2.0",
             value: 27,
         )
-        _ = try await fixture.write("sharedbase<2\n", to: "project/requirements.txt")
+        try await fixture.write("sharedbase<2\n", to: "project/requirements.txt")
         let error = try await #require(throws: Python::Exception.self) {
             try await fixture.runtime.session(
                 fixture.projectStartup,
@@ -455,7 +495,7 @@ func conversationInstallationOverridesAndRevealsTheProjectSource() async throws 
             #expect(retained == .applied)
         }
 
-        _ = try await fixture.write("sharedbase<3\n", to: "project/requirements.txt")
+        try await fixture.write("sharedbase<3\n", to: "project/requirements.txt")
         let conflict = try await #require(throws: Python::Exception.self) {
             try await fixture.runtime.session(
                 fixture.projectStartup,

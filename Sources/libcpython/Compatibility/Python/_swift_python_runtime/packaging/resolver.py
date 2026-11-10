@@ -54,6 +54,7 @@ class Provider(AbstractProvider):
         self, configuration: Configuration, installed: dict, update: bool, pinned: set[str]
     ) -> None:
         self.configuration = configuration
+
         self.installed = installed
         self.update = update
         self.pinned = pinned
@@ -158,6 +159,7 @@ class Provider(AbstractProvider):
         yield from (Candidate(wheel, extras) for wheel in wheels)
 
     def find_matches(self, identifier: str, requirements, incompatibilities):
+        # The resolver can advance before it starts consuming the returned generator.
         requirements = list(requirements[identifier])
         extras = frozenset(extra for requirement in requirements for extra in requirement.extras)
         excluded = set(incompatibilities[identifier])
@@ -173,17 +175,19 @@ class Provider(AbstractProvider):
                 ):
                     yield candidate
 
-        # Snapshot the resolver's inputs before it starts consuming candidates.
         return matches()
+
+    def _metadata(self, wheel: Wheel):
+        metadata = self._wheel_metadata.get(wheel.digest)
+        if metadata is None:
+            metadata = self.wheels.metadata(wheel)
+            self._wheel_metadata[wheel.digest] = metadata
+        return metadata
 
     def get_dependencies(self, candidate: Candidate) -> list[Requirement]:
         distribution = candidate.distribution
         if isinstance(distribution, Wheel):
-            metadata = self._wheel_metadata.get(distribution.digest)
-            if metadata is None:
-                metadata = self.wheels.metadata(distribution)
-                self._wheel_metadata[distribution.digest] = metadata
-
+            metadata = self._metadata(distribution)
             if not supports_python(metadata.get("Requires-Python")):
                 # An impossible requirement makes resolvelib reject this wheel and try another.
                 return [Requirement(candidate.name + "==0,!=0")]
@@ -278,6 +282,12 @@ def _check_base_collisions(distributions: dict, base: dict) -> None:
                 raise ValueError(f"Local package file conflicts with the application base: {file}")
 
 
+def _changes_installed_wheels(wheels: dict[str, Wheel], installed: dict) -> bool:
+    selected = {name: wheel.digest for name, wheel in wheels.items()}
+    existing = {name: record["digest"] for name, record in installed.items()}
+    return selected != existing
+
+
 def prepare(request: dict, configuration: Configuration) -> dict:
     overrides, pinned = _select_overrides(request, configuration.base)
     installed = request["installed"]
@@ -296,11 +306,8 @@ def prepare(request: dict, configuration: Configuration) -> dict:
     provider = Provider(effective, installed, request["update"], pinned)
     wheels = _resolve_wheels(provider, roots)
 
-    if not request["replace_files"]:
-        selected = {name: wheel.digest for name, wheel in wheels.items()}
-        existing = {name: record["digest"] for name, record in installed.items()}
-        if selected != existing:
-            return {"status": "requires_reset"}
+    if not request["replace_files"] and _changes_installed_wheels(wheels, installed):
+        return {"status": "requires_reset"}
 
     distributions = {
         name: _prepare_distribution(provider.wheels, wheel)

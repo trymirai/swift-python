@@ -13,20 +13,11 @@ extension Environment.Service {
         configuration: Environment.Configuration,
         execution: Session.Control,
     ) async throws {
-        let requirements = try await projectRequirements(at: project, execution: execution)
-        let preparation = try await request(
-            .prepare(
-                requirements: requirements,
-                base: configuration.base,
-                installed: [:],
-                fingerprint: nil,
-                update: false,
-            ),
+        let resolution = try await resolveBundleDependencies(
+            for: project,
+            configuration: configuration,
             execution: execution,
         )
-        guard case let .resolved(resolution) = preparation else {
-            throw Runtime.Failure("Expected package files for a new bundle.")
-        }
 
         let files = FileSystem.shared
         let destination = output.file
@@ -65,6 +56,28 @@ extension Environment.Service {
         }
 
         try await Self.publishBundle(archive, at: destination, execution: execution)
+    }
+
+    private nonisolated func resolveBundleDependencies(
+        for project: Runtime.Path,
+        configuration: Environment.Configuration,
+        execution: Session.Control,
+    ) async throws -> Environment.Preparation.Resolution {
+        let requirements = try await projectRequirements(at: project, execution: execution)
+        let preparation = try await request(
+            .prepare(
+                requirements: requirements,
+                base: configuration.base,
+                installed: [:],
+                fingerprint: nil,
+                update: false,
+            ),
+            execution: execution,
+        )
+        guard case let .resolved(resolution) = preparation else {
+            throw Runtime.Failure("Expected package files for a new bundle.")
+        }
+        return resolution
     }
 
     private static func publishBundle(

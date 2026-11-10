@@ -65,9 +65,7 @@ extension Module {
                 selectedModules[ObjectIdentifier(type)] = type
             }
 
-            var classes = try catalog.makeClassDefinitions()
-            try catalog.attachMembers(to: &classes)
-
+            let classes = try catalog.makeClassDefinitions()
             let classesByModule = Dictionary(grouping: classes.values) {
                 ObjectIdentifier($0.module)
             }
@@ -143,6 +141,8 @@ extension Module {
                     classes[key]?.superclass = superclass
                 }
             }
+
+            try attachMembers(to: &classes)
             return classes
         }
 

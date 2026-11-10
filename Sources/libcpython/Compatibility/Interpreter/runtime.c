@@ -56,30 +56,29 @@ CPython_NewThreadState(PyThreadState **state, CPython_Heap **heap)
         return PyStatus_NoMemory();
     }
 
-    PyInterpreterConfig config = {
-        .use_main_obmalloc = 0,
-        .check_multi_interp_extensions = 1,
-
-        .allow_fork = 0,
-        .allow_exec = 0,
-        .allow_threads = 0,
-        .allow_daemon_threads = 0,
-
-        .gil = PyInterpreterConfig_OWN_GIL,
-    };
-
     CPython_Heap *tracking = heap == NULL ? NULL : CPython_NewHeap();
     if (heap != NULL && tracking == NULL) {
         delete_bootstrap_state(bootstrap, false);
         return PyStatus_NoMemory();
     }
 
+    PyInterpreterConfig config = {
+        .use_main_obmalloc = 0,
+        .check_multi_interp_extensions = 1,
+        .gil = PyInterpreterConfig_OWN_GIL,
+
+        .allow_fork = 0,
+        .allow_exec = 0,
+        .allow_threads = 0,
+        .allow_daemon_threads = 0,
+    };
+
+    // Bind before creation so a transactional interpreter tracks its first allocations.
     PyEval_RestoreThread(bootstrap);
     CPython_BindHeap(tracking);
-
     PyStatus status = Py_NewInterpreterFromConfig(state, &config);
-
     CPython_BindHeap(NULL);
+
     delete_bootstrap_state(bootstrap, *state != NULL);
 
     if (tracking != NULL) {
@@ -98,6 +97,7 @@ CPython_EndThreadState(PyThreadState *state, CPython_Heap *heap)
     CPython_AttachThreadState(state, heap);
     Py_EndInterpreter(state);
     CPython_BindHeap(NULL);
+
     if (heap != NULL) {
         CPython_FreeHeap(heap);
     }

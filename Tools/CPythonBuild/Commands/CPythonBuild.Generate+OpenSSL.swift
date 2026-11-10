@@ -298,6 +298,21 @@ extension CPythonBuild.Generate {
             try await linkSource(name)
         }
 
+        try await writeModuleMap(
+            for: paths,
+            revision: revision,
+            to: generatedFiles.appending("module.modulemap"),
+            workspace: workspace,
+        )
+        return paths
+    }
+
+    private static func writeModuleMap(
+        for paths: [String],
+        revision: Substring,
+        to destination: FilePath,
+        workspace: borrowing BuildWorkspace,
+    ) async throws {
         let headers = paths
             .filter { $0.hasPrefix("include/openssl/") && $0.hasSuffix(".h") }
 
@@ -309,11 +324,7 @@ extension CPythonBuild.Generate {
             + headers.map { "    textual header \"\($0.dropFirst("include/".count))\"" }
             + ["    export *", "}", ""]
 
-        try await workspace.write(
-            moduleMap.joined(separator: "\n"),
-            to: generatedFiles.appending("module.modulemap"),
-        )
-        return paths
+        try await workspace.write(moduleMap.joined(separator: "\n"), to: destination)
     }
 
     private static func updateExclusions(
@@ -369,6 +380,15 @@ extension CPythonBuild.Generate {
             try await fileSystem.moveItem(at: source.appending(name), to: target.appending(name))
         }
 
+        func restoreDirectories() async throws {
+            for name in replaced.reversed() {
+                try await moveDirectory(name, from: installed, to: candidate)
+            }
+            for name in saved.reversed() {
+                try await moveDirectory(name, from: backup, to: installed)
+            }
+        }
+
         do {
             for name in Self.generatedDirectories {
                 let path = installed.appending(name)
@@ -390,14 +410,7 @@ extension CPythonBuild.Generate {
                 )
             }
         } catch {
-            for name in replaced.reversed() {
-                try await moveDirectory(name, from: installed, to: candidate)
-            }
-
-            for name in saved.reversed() {
-                try await moveDirectory(name, from: backup, to: installed)
-            }
-
+            try await restoreDirectories()
             try await fileSystem.removeItem(at: backup, strategy: .platformDefault)
             throw error
         }

@@ -316,6 +316,8 @@ func classIdentityAndSessionGenerations() async throws {
         .evaluate("import weakref; dead_peer = weakref.ref(peer); peer.note = 'old'")
     try await session.remove("peer")
     _ = try await session.evaluate("import gc; gc.collect(); assert dead_peer() is None")
+
+    // The Swift instance survives collection of the original Python wrapper.
     try await session.set(peer, forKey: "peer")
     _ = try await session.evaluate("assert peer.note is None and peer.number == 42")
     await #expect(throws: (any Swift::Error).self) { try await other.set(peer, forKey: "peer") }
@@ -483,18 +485,7 @@ func checkpointedEvaluationWaitsForHostPublication() async throws {
 
     #expect(try await stopDuringPublication(in: session) == .stopped)
 
-    let attemptedPublication = Mutex(false)
-    let expired = try await session.evaluate(
-        "values.append(5)",
-        timeout: .milliseconds(500),
-        committing: { seal in
-            attemptedPublication.withLock { $0 = true }
-            try await Task.sleep(for: .seconds(1))
-            try seal.seal()
-        },
-    )
-    #expect(attemptedPublication.withLock { $0 })
-    #expect(expired.end == .timedOut)
+    try await checkDeadlineDuringPublication(in: session)
 
     let committed = try await session.evaluate("""
     assert values == [1]
@@ -507,6 +498,21 @@ func checkpointedEvaluationWaitsForHostPublication() async throws {
     #expect(committed.end == .finished)
     #expect(committed.output.stdout == "ready\n")
     #expect(try await session.evaluate("assert values == [1, 4]").end == .finished)
+}
+
+private func checkDeadlineDuringPublication(in session: Python::Session) async throws {
+    let attemptedPublication = Mutex(false)
+    let expired = try await session.evaluate(
+        "values.append(5)",
+        timeout: .milliseconds(500),
+        committing: { seal in
+            attemptedPublication.withLock { $0 = true }
+            try await Task.sleep(for: .seconds(1))
+            try seal.seal()
+        },
+    )
+    #expect(attemptedPublication.withLock { $0 })
+    #expect(expired.end == .timedOut)
 }
 
 private func stopDuringPublication(in session: Python::Session) async throws -> Python::Execution

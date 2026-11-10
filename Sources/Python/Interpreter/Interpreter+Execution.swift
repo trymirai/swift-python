@@ -18,6 +18,7 @@ extension Interpreter {
             redirecting: redirects,
             execution: execution,
         )
+
         let storage = pThread.storage
         try pThread.withAttached(execution: execution) { attachment in
             let namespace = try Context.currentNamespace(in: attachment)
@@ -99,12 +100,7 @@ extension Interpreter {
                 using: execution,
             )
 
-            let reply = try result.decode(as: Reply.self)
-            if !reply.traceback.isEmpty {
-                throw ExecutionError(traceback: reply.traceback, output: reply.output)
-            }
-
-            return reply.output
+            return try result.decode(as: Reply.self).outputOrThrow()
         }
     }
 }
@@ -167,6 +163,13 @@ private extension Interpreter {
                 stderr: try decoder.decode(String.self, at: 1),
             )
             traceback = try decoder.decode(String.self, at: 2)
+        }
+
+        func outputOrThrow() throws -> Output {
+            guard traceback.isEmpty else {
+                throw ExecutionError(traceback: traceback, output: output)
+            }
+            return output
         }
     }
 }

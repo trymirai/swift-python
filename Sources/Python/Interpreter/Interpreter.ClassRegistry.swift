@@ -71,20 +71,6 @@ extension Interpreter {
             Module.Catalog.failure("The Swift class's module is not installed in this session.")
         }
 
-        @_lifetime(borrow context)
-        private func makeCapsule(
-            for instance: any _PClass,
-            in context: borrowing Context,
-        ) throws -> Object {
-            let retained = unsafe Unmanaged.passRetained(instance as AnyObject).toOpaque()
-            let capsule = unsafe CPython_NewPeer(retained, { pointer in
-                unsafe Unmanaged<AnyObject>.fromOpaque(pointer).release()
-            })
-
-            let pointer = unsafe try Object.require(capsule, "Unable to retain a Swift instance.")
-            return unsafe Object(owned: pointer, in: context)
-        }
-
         @_lifetime(borrow owner)
         func wrapper<Owner: ~Copyable & ~Escapable>(
             for instance: any _PClass,
@@ -136,6 +122,20 @@ extension Interpreter {
             return try function.call(key, capsule)
         }
 
+        @_lifetime(borrow context)
+        private func makeCapsule(
+            for instance: any _PClass,
+            in context: borrowing Context,
+        ) throws -> Object {
+            let retained = unsafe Unmanaged.passRetained(instance as AnyObject).toOpaque()
+            let capsule = unsafe CPython_NewPeer(retained, { pointer in
+                unsafe Unmanaged<AnyObject>.fromOpaque(pointer).release()
+            })
+
+            let pointer = unsafe try Object.require(capsule, "Unable to retain a Swift instance.")
+            return unsafe Object(owned: pointer, in: context)
+        }
+
         private func rememberWrapper(for identity: Object.Identity) {
             guard savedWrappers != nil else {
                 return
@@ -162,6 +162,13 @@ extension Interpreter {
                     .failure("The Swift payload belongs to a different Python object.")
             }
             return instance
+        }
+
+        func bind(_ object: borrowing Object) throws {
+            let storage = try Interpreter.Storage.requireCurrent()
+            let context = Context(storage: storage)
+            let instance = unsafe try peer(of: object.pointer, in: storage)
+            try instance._pIdentity.bind(WeakReference(object, in: context))
         }
 
         @unsafe
@@ -192,13 +199,6 @@ extension Interpreter {
             }
             try instance._pIdentity.claim(instance, in: storage)
             return instance
-        }
-
-        func bind(_ object: borrowing Object) throws {
-            let storage = try Interpreter.Storage.requireCurrent()
-            let context = Context(storage: storage)
-            let instance = unsafe try peer(of: object.pointer, in: storage)
-            try instance._pIdentity.bind(WeakReference(object, in: context))
         }
     }
 }

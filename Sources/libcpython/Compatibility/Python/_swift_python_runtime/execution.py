@@ -56,7 +56,6 @@ class _SourceCache:
     def remember(self, code: CodeType, source: str, filename: str) -> None:
         entry = (len(source), None, source.splitlines(keepends=True), filename)
 
-        # Tracebacks can still reference nested code objects after the block returns.
         references = []
         live = 0
 
@@ -68,6 +67,7 @@ class _SourceCache:
                 if linecache.cache.get(filename) is entry:
                     linecache.cache.pop(filename, None)
 
+        # A function defined by the block can outlive the outer code object.
         pending = [code]
         while pending:
             child = pending.pop()
@@ -91,9 +91,6 @@ def configure(paths: list[str]) -> None:
     namespace = sys.modules["__main__"].__dict__
     sources = _SourceCache()
 
-    def current_namespace() -> dict:
-        return namespace
-
     def run_code(code: CodeType, source: str, filename: str, control) -> None:
         sources.remember(code, source, filename)
         result = eval(code, namespace)
@@ -101,6 +98,9 @@ def configure(paths: list[str]) -> None:
             import asyncio
 
             asyncio.run(await_block(result, control))
+
+    def current_namespace() -> dict:
+        return namespace
 
     def initialize(request: dict, unused, control, streams: dict[str, int]) -> tuple[str, str, str]:
         nonlocal namespace
@@ -127,7 +127,8 @@ def configure(paths: list[str]) -> None:
                         )
                     else:
                         module = importlib.import_module(request["module"])
-                    # Functions and later assignments share the module's actual globals.
+
+                    # Functions and later assignments share the startup module's globals.
                     namespace = module.__dict__
             except BaseException as exception:
                 failure = _report_exception(exception, stderr, control)

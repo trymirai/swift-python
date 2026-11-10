@@ -70,20 +70,27 @@ extension StandardLibraryBuilder {
                 try await writeResource(resource, index: index)
             }
 
-            let declaration = "const CPythonEmbeddedResource CPythonEmbeddedResources[] = {\n"
-            try await writer.write(contentsOf: declaration.utf8)
-
-            for (index, resource) in library.resources.enumerated() {
-                let entry = "    {\(resource.path.quotedSourceLiteral), resource_\(index), sizeof(resource_\(index)) - 1},\n"
-                try await writer.write(contentsOf: entry.utf8)
-            }
-
-            try await writer.write(contentsOf: """
-            };
-            const size_t CPythonEmbeddedResourceCount =
-                sizeof(CPythonEmbeddedResources) / sizeof(CPythonEmbeddedResources[0]);
-
-            """.utf8)
+            try await Self.writeResourceCatalog(library.resources, to: &writer)
         }
+    }
+
+    private static func writeResourceCatalog(
+        _ resources: [Resource],
+        to writer: inout BufferedWriter<WriteFileHandle>,
+    ) async throws {
+        let declaration = "const CPythonEmbeddedResource CPythonEmbeddedResources[] = {\n"
+        try await writer.write(contentsOf: declaration.utf8)
+
+        for (index, resource) in resources.enumerated() {
+            let entry = "    {\(resource.path.quotedSourceLiteral), resource_\(index), sizeof(resource_\(index)) - 1},\n"
+            try await writer.write(contentsOf: entry.utf8)
+        }
+
+        try await writer.write(contentsOf: """
+        };
+        const size_t CPythonEmbeddedResourceCount =
+            sizeof(CPythonEmbeddedResources) / sizeof(CPythonEmbeddedResources[0]);
+
+        """.utf8)
     }
 }

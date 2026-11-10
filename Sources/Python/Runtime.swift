@@ -15,13 +15,20 @@ public struct Runtime: Sendable {
     }
 
     let packaging: Environment.Service.Lazy
+    private let options: Options
 
     /// Creates a runtime with immutable application packages and a shared wheel cache.
     public init(
         packages: [PackageSource] = [],
         cacheDirectory: String? = nil,
         packageIndex: String = "https://pypi.org/simple/",
+        options: Options = [],
     ) async throws {
+        #if !(os(macOS) || os(Linux) || targetEnvironment(macCatalyst))
+        if options.contains(.subprocesses) {
+            throw Failure("Python subprocesses are unavailable on this platform.")
+        }
+        #endif
         try await Self.startup.value
 
         let packages = try packages.map { try $0.resolved() }
@@ -37,6 +44,7 @@ public struct Runtime: Sendable {
             _ = try await packaging.open()
         }
         self.packaging = packaging
+        self.options = options
     }
 
     /// Prepares dependencies and returns a session that starts Python on first use.
@@ -45,9 +53,11 @@ public struct Runtime: Sendable {
     /// Pass a stable `environmentDirectory` to reuse local packages
     /// across sessions. Call `Session.initialize(redirecting:)` to start Python explicitly.
     ///
-    /// Local installations take precedence over `packages` in the order supplied,
-    /// followed by the runtime's packages. The first source of each distribution
-    /// supplies its version. Incompatible requirements fail during preparation.
+    /// Local installations take precedence over session packages, followed by the
+    /// runtime's packages. A project with an empty `packages` list uses its
+    /// `site-packages` directory or the matching site-packages in its `.venv`.
+    /// The first source of each distribution supplies its version. Incompatible
+    /// requirements fail during preparation.
     ///
     /// `directory` and `importPaths` grant read access alongside project and package roots.
     /// The delegate decides other access. Relative OS paths use the process working directory.
@@ -136,6 +146,7 @@ public struct Runtime: Sendable {
             modules: modules,
             startup: startup,
             transactional: transactional,
+            allowsSubprocesses: options.contains(.subprocesses),
             environment: environment,
             delegate: delegate,
         )

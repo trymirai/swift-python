@@ -171,17 +171,18 @@ func typedNamesFollowTheSessionLifecycle() async throws {
     try await session.set(1, forKey: "removed")
     try await session.set(2, forKey: "until_reset")
 
-    try await session.remove("removed")
-    let missing = try await #require(throws: Python::Exception.self) {
-        try await session.get("removed", as: Int.self)
+    func expectMissing(_ name: String) async throws {
+        let error = try await #require(throws: Python::Exception.self) {
+            try await session.get(name, as: Int.self)
+        }
+        #expect(error.name == "NameError", "Expected \(name) to be absent.")
     }
-    #expect(missing.name == "NameError")
+
+    try await session.remove("removed")
+    try await expectMissing("removed")
 
     try await session.reset()
-    let reset = try await #require(throws: Python::Exception.self) {
-        try await session.get("until_reset", as: Int.self)
-    }
-    #expect(reset.name == "NameError")
+    try await expectMissing("until_reset")
 
     await session.close()
     await #expect(throws: Python::Session.Error.self) {

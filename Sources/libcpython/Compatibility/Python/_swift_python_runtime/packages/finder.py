@@ -46,8 +46,8 @@ class PathFinder:
                 loader = Loader(self.archive, candidate)
                 return spec_from_file_location(fullname, loader=loader)
 
-        directory = path + "/"
-        if self.archive.has_member_with_prefix(directory):
+        # ZIPs may omit directory entries even when a namespace package has descendants.
+        if self.archive.has_member_with_prefix(path + "/"):
             spec = ModuleSpec(fullname, loader=None, is_package=True)
             spec.submodule_search_locations = [self.archive.root + "/" + path]
             return spec
@@ -77,9 +77,12 @@ class FilteredFinder:
 
     def find_spec(self, fullname: str, target=None) -> ModuleSpec | None:
         spec = self.finder.find_spec(fullname, target)
-        if spec is not None and spec.origin is not None:
-            if os.path.normpath(spec.origin) in self.hidden:
-                return None
+        if (
+            spec is not None
+            and spec.origin is not None
+            and os.path.normpath(spec.origin) in self.hidden
+        ):
+            return None
         return spec
 
     def __getattr__(self, name: str):

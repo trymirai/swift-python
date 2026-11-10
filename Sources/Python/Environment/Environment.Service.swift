@@ -69,6 +69,17 @@ extension Environment {
             }
         }
 
+        func projectPackageSource(
+            at project: Runtime.Path,
+        ) throws -> Runtime.PackageSource.Resolved? {
+            let path = try withModule { module, _ in
+                try module.attribute("project_package_source")
+                    .call(project.string)
+                    .decode(as: String?.self)
+            }
+            return try path.map { .directory(try Runtime.Path($0)) }
+        }
+
         nonisolated func projectRequirements(
             at project: Runtime.Path,
             execution: Session.Control,

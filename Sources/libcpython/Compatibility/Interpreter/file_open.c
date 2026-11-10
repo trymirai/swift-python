@@ -7,8 +7,9 @@
 
 typedef struct {
     int fd;
-
     bool closed;
+    uint64_t pipe;
+
     off_t offset;
 } Descriptor;
 
@@ -16,6 +17,7 @@ struct CPython_Files {
     Descriptor *descriptors;
     size_t count;
     size_t capacity;
+    uint64_t next_pipe;
 
     size_t checkpoint_count;
     bool checkpoint;
@@ -118,11 +120,14 @@ CPython_CloseFileDescriptor(int fd)
     if (entry == NULL) {
         return -1;
     }
-    if (files->checkpoint) {
-        // Keep the number reserved until commit. A restored FileIO must still own it.
+
+    // Newly opened pipes must deliver EOF before the block finishes.
+    if (files->checkpoint &&
+        (entry->pipe == 0 || (size_t)(entry - files->descriptors) < files->checkpoint_count)) {
         entry->closed = true;
         return 0;
     }
+
     *entry = files->descriptors[--files->count];
     return close(fd);
 }
@@ -145,6 +150,9 @@ CPython_BeginFileCheckpoint(void)
 
     for (size_t i = 0; i < files->count; ++i) {
         Descriptor *entry = &files->descriptors[i];
+        if (entry->pipe != 0) {
+            continue;
+        }
         entry->offset = lseek(entry->fd, 0, SEEK_CUR);
         if (entry->offset < 0) {
             return -1;
@@ -173,7 +181,9 @@ CPython_FinishFileCheckpoint(bool restoring)
             continue;
         }
         if (restoring) {
-            (void)lseek(entry.fd, entry.offset, SEEK_SET);
+            if (entry.pipe == 0) {
+                (void)lseek(entry.fd, entry.offset, SEEK_SET);
+            }
             entry.closed = false;
         }
         files->descriptors[remaining++] = entry;
@@ -183,9 +193,9 @@ CPython_FinishFileCheckpoint(bool restoring)
 }
 
 static int
-reserve_descriptor(void)
+reserve_descriptors(size_t additional)
 {
-    if (files->count < files->capacity) {
+    if (additional <= files->capacity - files->count) {
         return 0;
     }
 
@@ -204,6 +214,77 @@ reserve_descriptor(void)
     return 0;
 }
 
+static inline void
+track_reserved_descriptor(int fd, uint64_t pipe)
+{
+    files->descriptors[files->count++] = (Descriptor){.fd = fd, .pipe = pipe};
+}
+
+int
+CPython_TrackPipe(int reader, int writer)
+{
+    if (files == NULL) {
+        return 0;
+    }
+    if (reserve_descriptors(2) < 0) {
+        return -1;
+    }
+
+    uint64_t identity = ++files->next_pipe;
+    track_reserved_descriptor(reader, identity);
+    track_reserved_descriptor(writer, identity);
+    return 0;
+}
+
+uint64_t
+CPython_PipeIdentity(int fd)
+{
+    if (files == NULL || fd < 0) {
+        return 0;
+    }
+    Descriptor *entry = require_descriptor(fd);
+    return entry == NULL ? 0 : entry->pipe;
+}
+
+bool
+CPython_HasOpenPipe(const CPython_Files *state, uint64_t identity)
+{
+    if (identity == 0) {
+        return false;
+    }
+    // A checkpoint can hold the OS descriptor open after Python closes it.
+    for (size_t i = 0; i < state->count; ++i) {
+        if (state->descriptors[i].pipe == identity) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int
+CPython_DuplicateFileDescriptor(int fd)
+{
+    Descriptor *source = require_descriptor(fd);
+    if (source == NULL) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+
+    // Reserving space may move the table.
+    uint64_t identity = source->pipe;
+    if (reserve_descriptors(1) < 0) {
+        return -1;
+    }
+
+    int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (duplicate < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    track_reserved_descriptor(duplicate, identity);
+    return duplicate;
+}
+
 CPython_FileTarget *
 CPython_CheckFile(const char *path, int base, int flags, CPython_FileOperation operation,
                   PyObject *filename)
@@ -217,7 +298,6 @@ CPython_CheckFile(const char *path, int base, int flags, CPython_FileOperation o
     PyThreadState *state = PyEval_SaveThread();
     CPython_FileTarget *target = CPython_PinFileTarget(path, base, follow);
     PyEval_RestoreThread(state);
-
     if (target == NULL) {
         PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, filename);
         return NULL;
@@ -231,6 +311,7 @@ CPython_CheckFile(const char *path, int base, int flags, CPython_FileOperation o
     if (decision > 0) {
         return target;
     }
+
     CPython_FreeFileTarget(target);
     if (decision == 0) {
         errno = EACCES;
@@ -253,7 +334,7 @@ CPython_OpenFile(const char *path, int base, int flags, mode_t mode, PyObject *f
     if (target == NULL) {
         return -1;
     }
-    if (reserve_descriptor() < 0) {
+    if (reserve_descriptors(1) < 0) {
         CPython_FreeFileTarget(target);
         return -1;
     }
@@ -264,7 +345,7 @@ CPython_OpenFile(const char *path, int base, int flags, mode_t mode, PyObject *f
     PyEval_RestoreThread(state);
 
     if (fd >= 0) {
-        files->descriptors[files->count++] = (Descriptor){.fd = fd};
+        track_reserved_descriptor(fd, 0);
     }
     return fd;
 }

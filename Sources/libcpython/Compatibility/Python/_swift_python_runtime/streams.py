@@ -71,7 +71,7 @@ class _Output(io.TextIOWrapper):
 
 
 class _Stream(io.TextIOBase):
-    # Keep this identity stable: logging handlers retain streams across REPL blocks.
+    # Logging handlers retain this stream across REPL blocks as its target changes.
     encoding = "utf-8"
     errors = "backslashreplace"
 

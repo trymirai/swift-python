@@ -10,8 +10,8 @@ struct ProjectFixture {
     static let projectModule: String = "assistant"
 
     let root: FilePath
-    let runtime: Python::Runtime
 
+    let runtime: Python::Runtime
     private let builder: Python::Session
 
     var project: String {
@@ -43,6 +43,8 @@ struct ProjectFixture {
             )
             let builder = try await builderRuntime
                 .session(delegate: FileAccessDelegate { $0.path.starts(with: root) })
+
+            // Keep fixture creation in its own interpreter while sessions consume the artifacts.
             try await withSession(builder) { builder in
                 try await builder.set(root.string, forKey: "root_path")
                 _ = try await builder.evaluate(Self.setup)
@@ -87,6 +89,16 @@ struct ProjectFixture {
         """#)
     }
 
+    func prepareProjectVirtualEnvironment() async throws {
+        _ = try await builder.evaluate(#"""
+        import sys
+
+        version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        packages = root / "project" / ".venv" / "lib" / version / "site-packages"
+        write_base(packages, "2.0", 27)
+        """#)
+    }
+
     func preparePackageSource(
         _ name: String,
         version: String,
@@ -109,6 +121,7 @@ struct ProjectFixture {
         )
     }
 
+    @discardableResult
     func write(_ source: String, to name: String) async throws -> String {
         let path = root.appending(name)
         try await source.write(toFileAt: path, options: .newFile(replaceExisting: true))
@@ -170,6 +183,7 @@ struct ProjectFixture {
         for member, data in files.items():
             digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
             writer.writerow((member, "sha256=" + digest, len(data)))
+
         writer.writerow((f"{metadata}/RECORD", "", ""))
         files[f"{metadata}/RECORD"] = records.getvalue().encode()
 
@@ -179,6 +193,7 @@ struct ProjectFixture {
         data = {"meta": {"api-version": "1.0"}, "files": []}
         if index.exists():
             data = json.loads(index.read_text())
+
         data["files"].append({
             "filename": target.name,
             "url": target.as_uri(),

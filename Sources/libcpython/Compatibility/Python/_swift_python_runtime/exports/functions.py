@@ -40,6 +40,7 @@ def _bind_parameters(parameters, native: bool) -> tuple[str, str, list, list[Par
     names = []
     declarations = []
     defaults = []
+
     visible = []
 
     for parameter, annotation, has_default, default in parameters:
@@ -94,6 +95,7 @@ class FunctionFactory:
             f"{f' -> {returns!r}' if returns else ''}:\n"
             f"    {documentation!r}\n    return {expression}\n"
         )
+
         scope = {
             "__name__": module.__name__,
             "__swift_defaults": defaults,
@@ -106,6 +108,7 @@ class FunctionFactory:
 
         result = scope[name]
         del scope["__swift_defaults"]
+        # The generated defaults accept any Swift parameter order. Show the original signature.
         result.__signature__ = Signature(
             visible, return_annotation=returns or Signature.empty, __validate_parameters__=False
         )

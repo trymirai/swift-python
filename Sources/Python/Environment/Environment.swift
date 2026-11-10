@@ -20,11 +20,11 @@ internal import Musl
 final class Environment {
     private let directory: Runtime.Path?
     let projectDirectory: Runtime.Path?
-
-    private let packaging: Service.Lazy
-    private let sessionPackages: [Runtime.PackageSource.Resolved]
     let requirements: [String]
 
+    private let packaging: Service.Lazy
+    
+    private var sessionPackages: [Runtime.PackageSource.Resolved]
     private var sessionConfiguration: Configuration?
 
     private(set) var manifest: Manifest?
@@ -94,11 +94,19 @@ final class Environment {
         if let sessionConfiguration {
             return sessionConfiguration
         }
-        guard !sessionPackages.isEmpty else {
-            return application
+
+        if
+            sessionPackages.isEmpty, let projectDirectory,
+            let source = try await service.projectPackageSource(at: projectDirectory)
+        {
+            sessionPackages = [source]
         }
 
-        let configuration = try await service.configuration(for: packageSources)
+        let configuration = if sessionPackages.isEmpty {
+            application
+        } else {
+            try await service.configuration(for: packageSources)
+        }
         sessionConfiguration = configuration
         return configuration
     }
@@ -187,14 +195,15 @@ final class Environment {
 
             let publication = Publication(active: active, manifest: next)
             try await Self.writePublication(publication, to: stagedManifest, using: service)
-            try execution.finishCheckingInterruption()
 
             // Publishing the manifest switches both the active slot and its package records.
+            try execution.finishCheckingInterruption()
             try Self.replace(stagedManifest, with: storage.manifestPath)
         }
 
         self.manifest = next
         self.storage?.active = active
+
         if let previous = storage.active, previous != active {
             await Self.discard(previous.packages(in: storage.root))
         }
@@ -365,18 +374,29 @@ private extension Environment {
 
         let bytes = try await [UInt8](contentsOf: path, maximumSizeAllowed: .unlimited)
         let publication = try await service.decodePublication(bytes)
+        try await validatePublication(publication, in: storage.root, expectedABI: expectedABI)
+        return publication
+    }
+
+    static func validatePublication(
+        _ publication: Publication,
+        in root: FilePath,
+        expectedABI: [String],
+    ) async throws {
         guard publication.manifest.abi == expectedABI else {
             throw invalid("The environment was prepared for a different Python runtime")
         }
 
         if let active = publication.active {
-            let packages = active.packages(in: storage.root)
-            let info = try await files.info(forFileAt: packages, infoAboutSymbolicLink: true)
+            let packages = active.packages(in: root)
+            let info = try await FileSystem.shared.info(
+                forFileAt: packages,
+                infoAboutSymbolicLink: true,
+            )
             guard info?.type == .directory else {
                 throw invalid("The active package directory is missing or invalid")
             }
         }
-        return publication
     }
 
     static func prepareSlots(in storage: Storage, claimed: Bool) async throws {
@@ -472,23 +492,31 @@ private extension Environment.Slot {
 
 extension Environment {
     static func clearCache(at root: FilePath) async throws {
-        let files = FileSystem.shared
         for name in ["wheels", "installed"] {
-            let directory = root.appending(name)
-            guard
-                try await files.info(forFileAt: directory, infoAboutSymbolicLink: true)?
-                    .type == .directory
-            else {
-                continue
-            }
-            try await files.withDirectoryHandle(atPath: directory) { handle in
-                for try await entry in handle.listContents() where entry.type == .directory {
-                    let artifact = entry.name.string
-                    let partial = name == "installed" && artifact.utf8.count == 17
-                        && artifact.hasPrefix(".install-")
-                    if isWheelDigest(artifact) || partial {
-                        try await files.removeItem(at: entry.path)
-                    }
+            try await clearCacheArtifacts(
+                in: root.appending(name),
+                removesPartialInstalls: name == "installed",
+            )
+        }
+    }
+
+    private static func clearCacheArtifacts(
+        in directory: FilePath,
+        removesPartialInstalls: Bool,
+    ) async throws {
+        let files = FileSystem.shared
+        let info = try await files.info(forFileAt: directory, infoAboutSymbolicLink: true)
+        guard info?.type == .directory else {
+            return
+        }
+
+        try await files.withDirectoryHandle(atPath: directory) { handle in
+            for try await entry in handle.listContents() where entry.type == .directory {
+                let artifact = entry.name.string
+                let partial = removesPartialInstalls && artifact.utf8.count == 17
+                    && artifact.hasPrefix(".install-")
+                if isWheelDigest(artifact) || partial {
+                    try await files.removeItem(at: entry.path)
                 }
             }
         }

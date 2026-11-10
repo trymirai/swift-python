@@ -87,6 +87,7 @@ def _shadowed_files(selected, shadowed) -> dict[str, set[str]]:
     for path, distribution in selected.values():
         if path in hidden:
             hidden[path].difference_update(distribution_files(distribution))
+
     return {
         path: {os.path.normpath(path + "/" + file) for file in files}
         for path, files in hidden.items()
@@ -122,6 +123,8 @@ def install(sources: list[dict], read) -> list[str]:
         return []
 
     selected, shadowed = select_distributions(paths)
+
+    # Capture the archive hook too when wrapping finders for shadowed distributions.
     archives = tuple(archive for archive in paths.values() if archive is not None)
     if archives:
         sys.path_hooks.insert(0, _archive_hook(archives))

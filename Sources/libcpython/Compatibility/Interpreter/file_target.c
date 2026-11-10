@@ -84,6 +84,7 @@ split_candidate(char *candidate, char name[NAME_MAX + 1])
     char *slash = strrchr(candidate, '/');
     const char *tail = slash == NULL ? candidate : slash + 1;
     size_t length = strlen(tail);
+
     if (length > NAME_MAX) {
         errno = ENAMETOOLONG;
         return NULL;
@@ -157,45 +158,65 @@ CPython_FreeFileTarget(CPython_FileTarget *target)
     errno = error;
 }
 
+static bool
+strip_trailing_slashes(char path[PATH_MAX])
+{
+    size_t length = strlen(path);
+    bool stripped = false;
+    while (length > 1 && path[length - 1] == '/') {
+        path[--length] = '\0';
+        stripped = true;
+    }
+    return stripped;
+}
+
+static int
+pin_candidate(CPython_FileTarget *target, char candidate[PATH_MAX], int base, bool needs_directory)
+{
+    const char *directory = split_candidate(candidate, target->name);
+    if (directory == NULL || pin_parent(target, base, directory) < 0) {
+        return -1;
+    }
+
+    if (fstatat(target->parent, target->name, &target->identity, AT_SYMLINK_NOFOLLOW) == 0) {
+        target->exists = true;
+        return 0;
+    }
+    if (errno == ENOENT && !needs_directory) {
+        target->exists = false;
+        return 0;
+    }
+    return -1;
+}
+
 static int
 resolve_candidate(CPython_FileTarget *target, char candidate[PATH_MAX], int base, bool follow,
                   bool needs_directory)
 {
     for (int links = 0; links <= 40; ++links) {
-        size_t length = strlen(candidate);
-        while (length > 1 && candidate[length - 1] == '/') {
-            candidate[--length] = '\0';
+        if (strip_trailing_slashes(candidate)) {
             needs_directory = true;
         }
-
-        const char *directory = split_candidate(candidate, target->name);
-        if (directory == NULL || pin_parent(target, base, directory) < 0) {
+        if (pin_candidate(target, candidate, base, needs_directory) < 0) {
             return -1;
         }
-
-        int parent = target->parent;
-        int result = fstatat(parent, target->name, &target->identity, AT_SYMLINK_NOFOLLOW);
-        if (result < 0) {
-            if (errno == ENOENT && !needs_directory) {
-                target->exists = false;
-                return 0;
-            }
-            return -1;
+        if (!target->exists) {
+            return 0;
         }
+
         if (!follow || !S_ISLNK(target->identity.st_mode)) {
             if (needs_directory && !S_ISDIR(target->identity.st_mode)) {
                 errno = ENOTDIR;
                 return -1;
             }
-            target->exists = true;
             return 0;
         }
 
-        ssize_t count = readlinkat(parent, target->name, candidate, PATH_MAX);
+        ssize_t count = readlinkat(target->parent, target->name, candidate, PATH_MAX);
         if (terminate_link_path(candidate, count) < 0) {
             return -1;
         }
-        base = parent;
+        base = target->parent;
         errno = ELOOP;
     }
     return -1;
@@ -275,8 +296,8 @@ finish_open(const CPython_FileTarget *target, int fd, int flags)
     return flags & O_TRUNC ? ftruncate(fd, 0) : 0;
 }
 
-int
-CPython_OpenFileTarget(const CPython_FileTarget *target, int flags, mode_t mode)
+static int
+validate_open(const CPython_FileTarget *target, int flags)
 {
     if (target->exists && (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
         errno = EEXIST;
@@ -289,6 +310,15 @@ CPython_OpenFileTarget(const CPython_FileTarget *target, int flags, mode_t mode)
     if (target->exists && !S_ISREG(target->identity.st_mode) &&
         !S_ISDIR(target->identity.st_mode)) {
         errno = S_ISLNK(target->identity.st_mode) ? ELOOP : EACCES;
+        return -1;
+    }
+    return 0;
+}
+
+int
+CPython_OpenFileTarget(const CPython_FileTarget *target, int flags, mode_t mode)
+{
+    if (validate_open(target, flags) < 0) {
         return -1;
     }
 

@@ -77,9 +77,11 @@ extension Interpreter {
                     swap(&jobs, &queue.jobs)
                     return queue.isFinishing
                 }
+
                 for job in jobs {
                     unsafe job.runSynchronously(on: executor)
                 }
+
                 if finishing {
                     return
                 }

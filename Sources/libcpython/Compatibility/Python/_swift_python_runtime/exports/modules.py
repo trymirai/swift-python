@@ -32,6 +32,7 @@ def install(modules, invoke) -> None:
 
         pending.extend(classes.prepare(record, module) for record in class_records)
 
+    # Bases can come from other Swift modules. Resolve them before any module source runs.
     classes.install(pending)
     _execute_sources(modules, installed)
 

@@ -2,26 +2,25 @@
 static int
 swift_open_directory(path_t *path)
 {
+    int fd;
     if (path->is_fd) {
         if (CPython_RequireFileDescriptor(path->fd, false) < 0) {
             path_error(path);
             return -1;
         }
-        // Open a new directory stream, with an independent position.
-        int fd = openat(path->fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (fd < 0) {
-            path_error(path);
+        // A separate open gives the directory stream its own position.
+        fd = openat(path->fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    } else {
+        CPython_FileTarget *target =
+            CPython_CheckFile(path->narrow ? path->narrow : ".", DEFAULT_DIR_FD, O_RDONLY,
+                              CPython_FileEnumerate, path->object ? path->object : Py_None);
+        if (target == NULL) {
+            return -1;
         }
-        return fd;
+        fd = CPython_OpenFileTarget(target, O_RDONLY | O_DIRECTORY, 0);
+        CPython_FreeFileTarget(target);
     }
-    CPython_FileTarget *target =
-        CPython_CheckFile(path->narrow ? path->narrow : ".", DEFAULT_DIR_FD, O_RDONLY,
-                          CPython_FileEnumerate, path->object ? path->object : Py_None);
-    if (target == NULL) {
-        return -1;
-    }
-    int fd = CPython_OpenFileTarget(target, O_RDONLY | O_DIRECTORY, 0);
-    CPython_FreeFileTarget(target);
+
     if (fd < 0) {
         path_error(path);
     }

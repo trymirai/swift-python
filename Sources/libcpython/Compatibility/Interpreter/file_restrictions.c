@@ -16,7 +16,8 @@ listed(const char *name, const char *const list[])
 PyObject *
 CPython_UnsupportedNativeOperation(void)
 {
-    PyErr_SetString(PyExc_PermissionError, "Native operation is unavailable in a restricted Python session.");
+    PyErr_SetString(PyExc_PermissionError,
+                    "Native operation is unavailable in a restricted Python session.");
     return NULL;
 }
 
@@ -47,19 +48,16 @@ CPython_AllowBuiltin(PyObject *name)
         return -1;
     }
     if (!listed(value, allowed)) {
-        PyErr_Format(PyExc_ModuleNotFoundError, "Native module %R is unavailable in a restricted Python session.", name);
+        PyErr_Format(PyExc_ModuleNotFoundError,
+                     "Native module %R is unavailable in a restricted Python session.", name);
         return -1;
     }
     return 0;
 }
 
-int
-CPython_RestrictPOSIXModule(PyObject *module)
+static bool
+allows_posix_method(const char *name, bool allows_subprocesses)
 {
-    if (!CPython_RestrictedFiles()) {
-        return 0;
-    }
-
     static const char *const allowed[] = {
         "_create_environ", "_path_normpath", "_path_splitroot_ex",
         // tempfile needs the chmod entry point. The POSIX patch denies the mutation.
@@ -71,11 +69,26 @@ CPython_RestrictPOSIXModule(PyObject *module)
         "WCOREDUMP", "WEXITSTATUS", "WIFCONTINUED", "WIFEXITED", "WIFSIGNALED",
         "WIFSTOPPED", "WSTOPSIG", "WTERMSIG", NULL,
     };
+    static const char *const subprocess[] = {"dup", "kill", "pipe", NULL};
+
+    return listed(name, allowed) || (allows_subprocesses && listed(name, subprocess));
+}
+
+int
+CPython_RestrictPOSIXModule(PyObject *module)
+{
+    if (!CPython_RestrictedFiles()) {
+        return 0;
+    }
+
+    const bool allows_subprocesses = CPython_AllowsSubprocesses();
     PyObject *dict = PyModule_GetDict(module);
+    // Iterate over a snapshot of the keys while deleting methods from the module.
     PyObject *keys = PyDict_Keys(dict);
     if (keys == NULL) {
         return -1;
     }
+
     int result = 0;
     for (Py_ssize_t i = 0; i < PyList_GET_SIZE(keys); ++i) {
         PyObject *key = PyList_GET_ITEM(keys, i);
@@ -84,7 +97,8 @@ CPython_RestrictPOSIXModule(PyObject *module)
             continue;
         }
         const char *name = PyUnicode_AsUTF8(key);
-        if (name == NULL || (!listed(name, allowed) && PyDict_DelItem(dict, key) < 0)) {
+        if (name == NULL ||
+            (!allows_posix_method(name, allows_subprocesses) && PyDict_DelItem(dict, key) < 0)) {
             result = -1;
             break;
         }
@@ -102,10 +116,9 @@ audit_file_access(const char *event, PyObject *args, void *context)
         return 0;
     }
 
-    // These modules are imported by asyncio. Their process and socket entry
-    // points remain unavailable, including calls via private native functions.
+    // asyncio imports these modules even in sessions without the capability.
     if (strncmp(event, "socket.", 7) == 0 ||
-        strcmp(event, "_posixsubprocess.fork_exec") == 0 ||
+        (strcmp(event, "_posixsubprocess.fork_exec") == 0 && !CPython_AllowsSubprocesses()) ||
         strcmp(event, "sys.addaudithook") == 0) {
         CPython_UnsupportedNativeOperation();
         return -1;

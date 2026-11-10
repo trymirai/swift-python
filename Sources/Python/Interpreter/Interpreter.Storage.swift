@@ -35,13 +35,13 @@ extension Interpreter {
         let key: UInt
         let references: Reference.Store
 
-        let fileAccess: Interpreter.FileAccess?
         var sessionOrigin: ObjectIdentifier?
         weak var session: Session?
 
         private var isClosed: Bool = false
         var checkpoint: CheckpointState = .inactive
 
+        let fileAccess: Interpreter.FileAccess?
         var execution: Session.Control?
         private var nextCallID: Int = 0
 
@@ -93,6 +93,7 @@ extension Interpreter {
                     message: "The interpreter is restoring its execution state.",
                 )
             }
+
             guard state.borrowedBuffers.isEmpty else {
                 throw Exception(
                     name: "RuntimeError",
@@ -196,13 +197,17 @@ extension Interpreter.Storage {
 
         let address = unsafe UInt(bitPattern: buffer.pointee.buf)
         let byteCount = unsafe UInt(buffer.pointee.len)
-        for borrow in borrowedBuffers where isMutable || borrow.isMutable {
-            if borrow.overlaps(address: address, byteCount: byteCount) {
-                throw Exception(
-                    name: "BufferError",
-                    message: "Overlapping writable Python buffer arguments are not allowed.",
-                )
-            }
+        let overlapsWritableBorrow = borrowedBuffers.contains { borrow in
+            (isMutable || borrow.isMutable) && borrow.overlaps(
+                address: address,
+                byteCount: byteCount,
+            )
+        }
+        if overlapsWritableBorrow {
+            throw Exception(
+                name: "BufferError",
+                message: "Overlapping writable Python buffer arguments are not allowed.",
+            )
         }
 
         let id = nextBorrowID

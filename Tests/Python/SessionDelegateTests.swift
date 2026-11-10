@@ -251,6 +251,7 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
         let timeout: Duration? = interruption == .timeout ? .seconds(2) : nil
         let evaluation = Task {
             defer { entered.continuation.finish() }
+            // The cancellation case must reach the evaluation through its parent task.
             return try await withThrowingTaskGroup(of: Python::Execution.self) { group in
                 group.addTask {
                     try await session.evaluate(source, timeout: timeout)

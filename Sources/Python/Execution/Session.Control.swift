@@ -33,7 +33,9 @@ extension Session {
         private let timeout: Duration?
 
         private let state: Mutex<State>
+
         let pipe: Pipe
+        let subprocesses: Subprocesses?
 
         private let incomingCalls: AsyncStream<Invocation>
         private let submissions: AsyncStream<Invocation>.Continuation
@@ -42,9 +44,11 @@ extension Session {
             timeout: Duration?,
             scope: (any Sendable)? = nil,
             output: OutputHandler? = nil,
+            allowsSubprocesses: Bool = false,
         ) throws {
             try Self.validateTimeout(timeout)
             self.pipe = try Pipe()
+            self.subprocesses = allowsSubprocesses ? try Subprocesses() : nil
 
             self.hasOutputHandler = output != nil
             self.timeout = timeout
@@ -101,8 +105,11 @@ extension Session {
                 result = .failure(error)
             }
 
+            if settling != nil || subprocesses != nil {
+                settleCallsAndSubprocesses(on: session, result: &result)
+            }
+
             if let settling {
-                finishCalls(state.withLock { $0.settleCalls() })
                 await callbacks
                 result = await settling(session, self, result)
             }
@@ -111,13 +118,39 @@ extension Session {
             // Python can return before interrupted Swift callbacks finish their cleanup.
             await callbacks
 
-            if let interruption {
-                guard let onInterruption else {
-                    throw CancellationError()
-                }
-                return onInterruption(interruption, result)
+            guard let interruption else {
+                return try result.get()
             }
-            return try result.get()
+            guard let onInterruption else {
+                throw CancellationError()
+            }
+            return onInterruption(interruption, result)
+        }
+
+        private func settleCallsAndSubprocesses<Result>(
+            on session: isolated Session,
+            result: inout Swift::Result<Result, any Swift::Error>,
+        ) {
+            if let subprocesses, case .success = result, session.hasOpenPipes(in: subprocesses) {
+                result = .failure(Runtime.Failure(
+                    "Python returned with a running subprocess and an open PIPE. "
+                        + "Call communicate() or redirect the stream to a file.",
+                ))
+            }
+            if case .failure = result {
+                subprocesses?.stop()
+            }
+
+            finishCalls(state.withLock { $0.settleCalls() })
+
+            // The executor owns the wait. The deadline task and Stop can still signal children.
+            do {
+                try subprocesses?.join()
+            } catch {
+                if case .success = result {
+                    result = .failure(error)
+                }
+            }
         }
 
         @concurrent
@@ -218,6 +251,7 @@ extension Session {
             }
 
             if let calls {
+                subprocesses?.stop()
                 pipe.signal()
                 finishCalls(calls)
             }
@@ -272,11 +306,10 @@ private extension Session.Control {
 
         var phase: Phase = .ready
         var evaluatingInterpreter: UInt?
+        var calls: [CallID: Invocation] = [:]
 
         var scope: (any Sendable)?
         var outputHandler: OutputHandler?
-
-        var calls: [CallID: Invocation] = [:]
 
         mutating func start(until deadline: ContinuousClock.Instant?) {
             if case .ready = phase {

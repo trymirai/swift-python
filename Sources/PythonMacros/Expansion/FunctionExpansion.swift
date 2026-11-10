@@ -18,7 +18,6 @@ struct FunctionExpansion {
 
         let name = attribute.nameSource(default: declaration.name.text)
         let documentation = attribute.documentationSource
-        let isAsynchronous = requiresAwait
 
         let returnType = declaration.signature
             .returnClause
@@ -26,6 +25,7 @@ struct FunctionExpansion {
         let parameters = try expandParameters(hasReceiver: isInstanceMethod)
         let metadata = (isInstanceMethod ? [".receiver"] : []) + parameters.map(\.metadataSource)
 
+        let isAsynchronous = requiresAwait
         let receiver = isInstanceMethod ? "__self" : owner.name
         let receiverBinding = isInstanceMethod
             ? "let __self = try arguments.receiver(as: \(owner.name).self)"
@@ -97,6 +97,7 @@ struct FunctionExpansion {
         let isThrowing = declaration.signature.effectSpecifiers?.throwsClause != nil
         let prefix = (isThrowing ? "try " : "") + (isAsynchronous ? "await " : "")
         let arguments = parameters.map(\.argumentSource).joined(separator: ", ")
+
         return "\(prefix)\(receiver).\(declaration.name.trimmedDescription)(\(arguments))"
     }
 
@@ -118,6 +119,7 @@ struct FunctionExpansion {
             "return \(invocation)"
         }
 
+        // The outermost closure binds the first Swift parameter.
         for parameter in parameters.reversed() {
             expression = parameter.wrapping(expression, isAsynchronous: isAsynchronous)
         }

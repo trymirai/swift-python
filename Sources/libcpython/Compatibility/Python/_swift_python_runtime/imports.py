@@ -107,16 +107,15 @@ class _ProjectFinder:
 def import_project(directory: str, name: str | None, import_paths: list[str]) -> ModuleType:
     if name is None:
         with os.scandir(directory) as entries:
-            name = min(
-                (
-                    entry.name
-                    for entry in entries
-                    if entry.name.isidentifier()
-                    and entry.is_dir(follow_symlinks=False)
-                    and os.path.isfile(os.path.join(entry.path, "__init__.py"))
-                ),
-                default=None,
+            packages = (
+                entry.name
+                for entry in entries
+                if entry.name.isidentifier()
+                and entry.is_dir(follow_symlinks=False)
+                and os.path.isfile(os.path.join(entry.path, "__init__.py"))
             )
+            name = min(packages, default=None)
+
         if name is None:
             raise ModuleNotFoundError(
                 f"No startup package in project {directory!r}. "

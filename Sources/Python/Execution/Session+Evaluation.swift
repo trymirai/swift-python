@@ -33,17 +33,6 @@ public extension Session {
         )
     }
 
-    /// Runs startup when the session is idle. The redirections apply to startup.
-    nonisolated func initialize(
-        scope: (any Sendable)? = nil,
-        redirecting redirects: [Stream: FilePath] = [:],
-    ) async throws {
-        try await withExecution(scope: scope) { session, execution in
-            let redirects = try redirects.mapValues(Runtime.Path.init)
-            try session.openInterpreterIfNeeded(execution: execution, redirecting: redirects)
-        }
-    }
-
     /// Calls the host after a transactional block and its Swift callbacks finish.
     /// Call `Commit.seal()` immediately before publishing external changes.
     /// If publication fails after sealing, restore those changes before throwing.
@@ -73,6 +62,17 @@ public extension Session {
         /// Seals the execution for publication. Throws if it was stopped or timed out.
         public func seal() throws {
             try checking()
+        }
+    }
+
+    /// Runs startup when the session is idle. The redirections apply to startup.
+    nonisolated func initialize(
+        scope: (any Sendable)? = nil,
+        redirecting redirects: [Stream: FilePath] = [:],
+    ) async throws {
+        try await withExecution(scope: scope) { session, execution in
+            let redirects = try redirects.mapValues(Runtime.Path.init)
+            try session.openInterpreterIfNeeded(execution: execution, redirecting: redirects)
         }
     }
 

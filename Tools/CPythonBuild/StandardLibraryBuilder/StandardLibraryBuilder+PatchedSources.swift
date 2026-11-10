@@ -9,10 +9,12 @@ extension StandardLibraryBuilder {
         let sources: [(input: String, output: String)] = [
             ("Modules/_io/fileio.c", "FileIO.c"),
             ("Modules/posixmodule.c", "PosixModule.c"),
+            ("Modules/_posixsubprocess.c", "PosixSubprocess.c"),
             ("Python/import.c", "Import.c"),
             ("Modules/socketmodule.c", "SocketModule.c"),
             ("Modules/selectmodule.c", "SelectModule.c"),
             ("Modules/_threadmodule.c", "ThreadModule.c"),
+            ("Lib/subprocess.py", "subprocess.py"),
         ]
         let patchDirectory = workspace.packageDirectory.appending("Tools/CPythonPatches")
 

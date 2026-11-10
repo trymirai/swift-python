@@ -49,6 +49,7 @@ extension Module {
 
 // MARK: - Module.Metadata
 
+// The positional fields below match the records read by _swift_python_runtime.exports.
 extension Module {
     struct Metadata {
         let module: Module
@@ -64,6 +65,7 @@ extension Module.Metadata: Encodable {
         try encoder.encode(module.name, at: 0)
         try encoder.encode(module.documentation, at: 1)
         try encoder.encode(module.source, at: 2)
+
         try encoder.encode(functions, at: 3)
         try encoder.encode(classes, at: 4)
     }
@@ -88,6 +90,7 @@ extension Module.Metadata.Class: Encodable {
         try encoder.encode(value.superclass.map { String(reflecting: $0) }, at: 1)
         try encoder.encode(value.name, at: 2)
         try encoder.encode(value.documentation, at: 3)
+
         try encoder.encode(initializer, at: 4)
         try encoder.encode(methods, at: 5)
         try encoder.encode(properties, at: 6)

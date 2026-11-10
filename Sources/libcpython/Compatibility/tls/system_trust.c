@@ -109,21 +109,11 @@ static STACK_OF(X509) * copy_x509_chain(CFArrayRef certificates, CFIndex first, 
     return result;
 }
 
-// Takes the verified chain and releases it once the OpenSSL stacks have been copied.
 static int
-verify_system_chain(X509_STORE_CTX *context, CFArrayRef chain, CFIndex count)
+verify_with_temporary_chain(X509_STORE_CTX *context, STACK_OF(X509) * anchors,
+                            STACK_OF(X509) * intermediates)
 {
-    STACK_OF(X509) *anchors = copy_x509_chain(chain, count - 1, count);
-    STACK_OF(X509) *intermediates = copy_x509_chain(chain, 1, count - 1);
-    CFRelease(chain);
-    if (anchors == NULL || intermediates == NULL) {
-        sk_X509_pop_free(anchors, X509_free);
-        sk_X509_pop_free(intermediates, X509_free);
-        X509_STORE_CTX_set_error(context, X509_V_ERR_OUT_OF_MEM);
-        return 0;
-    }
-
-    // Security chooses the path. OpenSSL enforces the caller's parameters and retains the result.
+    // OpenSSL applies the caller's verification parameters to the path chosen by Security.
     STACK_OF(X509) *original = X509_STORE_CTX_get0_untrusted(context);
     X509_STORE_CTX_set0_untrusted(context, intermediates);
     X509_STORE_CTX_set0_trusted_stack(context, anchors);
@@ -131,7 +121,25 @@ verify_system_chain(X509_STORE_CTX *context, CFArrayRef chain, CFIndex count)
 
     X509_STORE_CTX_set0_trusted_stack(context, NULL);
     X509_STORE_CTX_set0_untrusted(context, original);
+    return result;
+}
 
+// Consumes the verified chain once the OpenSSL stacks have been copied.
+static int
+verify_system_chain(X509_STORE_CTX *context, CFArrayRef chain, CFIndex count)
+{
+    STACK_OF(X509) *anchors = copy_x509_chain(chain, count - 1, count);
+    STACK_OF(X509) *intermediates = copy_x509_chain(chain, 1, count - 1);
+    CFRelease(chain);
+
+    if (anchors == NULL || intermediates == NULL) {
+        sk_X509_pop_free(anchors, X509_free);
+        sk_X509_pop_free(intermediates, X509_free);
+        X509_STORE_CTX_set_error(context, X509_V_ERR_OUT_OF_MEM);
+        return 0;
+    }
+
+    int result = verify_with_temporary_chain(context, anchors, intermediates);
     sk_X509_pop_free(intermediates, X509_free);
     sk_X509_pop_free(anchors, X509_free);
     return result;

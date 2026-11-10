@@ -15,6 +15,7 @@ extension Interpreter.Storage {
 
         // The thread state owns storage until the hook is cleared.
         let context = unsafe Unmanaged.passUnretained(self).toOpaque()
+        unsafe CPython_SetSubprocesses(execution?.subprocesses?.handle)
         unsafe CPython_SetFileAccessCheck({ context, path, mode, options, operation, exists in
             let storage = unsafe Unmanaged<Interpreter.Storage>.fromOpaque(context)
                 .takeUnretainedValue()
@@ -26,7 +27,10 @@ extension Interpreter.Storage {
             )
             return storage.authorizeFileAccess(request)
         }, context, fileAccess.descriptors)
-        defer { CPython_SetFileAccessCheck(nil, nil, nil) }
+        defer {
+            CPython_SetFileAccessCheck(nil, nil, nil)
+            CPython_SetSubprocesses(nil)
+        }
         return try operation()
     }
 

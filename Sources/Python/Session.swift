@@ -10,7 +10,6 @@ import Synchronization
 public actor Session {
     private nonisolated let executor: Interpreter.Executor
     private nonisolated let operations: Operations = .init()
-
     private nonisolated let activeExecution: Mutex<Control?> = .init(nil)
 
     private let directory: Runtime.Path?
@@ -19,10 +18,10 @@ public actor Session {
     private let startup: Startup
     private let modules: [Module]
     nonisolated let transactional: Bool
+    private let allowsSubprocesses: Bool
 
-    private var delegate: (any Delegate)?
     private(set) var environment: Environment?
-
+    private var delegate: (any Delegate)?
     private var state: State = .idle
 
     /// Output from startup. Reset clears it, and close preserves the last captured value.
@@ -48,6 +47,7 @@ public actor Session {
         modules: [Module],
         startup: Startup = .source(""),
         transactional: Bool = false,
+        allowsSubprocesses: Bool = false,
         environment: sending Environment? = nil,
         delegate: (any Delegate)? = nil,
     ) {
@@ -57,6 +57,7 @@ public actor Session {
         self.modules = modules
         self.startup = startup
         self.transactional = transactional
+        self.allowsSubprocesses = allowsSubprocesses
         self.environment = environment
         self.delegate = delegate
     }
@@ -144,6 +145,15 @@ public actor Session {
         case .closed:
             throw Session.Error.closed
         }
+    }
+
+    func hasOpenPipes(in subprocesses: Control.Subprocesses) -> Bool {
+        withOpenInterpreter { interpreter in
+            guard let files = interpreter.pThread.storage.fileAccess else {
+                return false
+            }
+            return subprocesses.hasOpenPipes(in: files)
+        } ?? false
     }
 
     func finishCheckpoint(_ outcome: Interpreter.CheckpointOutcome) {
@@ -270,7 +280,12 @@ public actor Session {
         _ operation: @Sendable (isolated Session, Control) async throws -> Result,
     ) async throws -> Result {
         try await withOperation { session in
-            let execution = try Control(timeout: timeout, scope: scope, output: output)
+            let execution = try Control(
+                timeout: timeout,
+                scope: scope,
+                output: output,
+                allowsSubprocesses: session.allowsSubprocesses,
+            )
 
             session.activeExecution.withLock { $0 = execution }
             defer { session.activeExecution.withLock { $0 = nil } }
@@ -293,7 +308,10 @@ public actor Session {
         guard !isInOwnCallback else {
             throw Session.Error.busy
         }
-        return try await operations.withReservation(Self.isInCallback ? .immediate : .queued) {
+
+        // A callback may enter another session only when it can take the reservation immediately.
+        let admission: Operations.Admission = Self.isInCallback ? .immediate : .queued
+        return try await operations.withReservation(admission) {
             try await perform(operation)
         }
     }

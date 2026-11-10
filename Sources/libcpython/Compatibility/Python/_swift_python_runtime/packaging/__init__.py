@@ -10,6 +10,7 @@ installation_tools()
 
 from .candidate import Wheel
 from .configuration import describe, load, with_sources
+from .configuration import project_package_source as project_package_source
 from .requirements import module_name as module_name
 from .requirements import names as names
 from .requirements import normalize as normalize

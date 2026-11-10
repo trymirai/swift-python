@@ -88,6 +88,33 @@ extension StandardLibraryBuilder {
         version: String,
         defines: [String: String],
     ) -> String {
+        let values = moduleValues(for: profile, version: version, defines: defines)
+        let runtime = """
+        # ABI and trait-dependent values come from the running interpreter.
+        import _imp
+        import sys
+
+        _suffix = next(iter(_imp.extension_suffixes()), "")
+        build_time_vars = {
+            "ABIFLAGS": sys.abiflags,
+            "MULTIARCH": sys.implementation._multiarch,
+            "SOABI": _suffix.removeprefix(".").removesuffix(".so"),
+            "EXT_SUFFIX": _suffix,
+            "MACHDEP": sys.platform,
+            "Py_REMOTE_DEBUG": int("_remote_debugging" in sys.builtin_module_names),
+
+        """
+
+        return runtime + values.sorted { $0.key < $1.key }
+            .map { "    " + $0.key.quotedSourceLiteral + ": " + $0.value + "," }
+            .joined(separator: "\n") + "\n}\n"
+    }
+
+    private static func moduleValues(
+        for profile: Profile,
+        version: String,
+        defines: [String: String],
+    ) -> [String: String] {
         var values = defines
         let strings = [
             "VERSION": version,
@@ -127,26 +154,7 @@ extension StandardLibraryBuilder {
         values["Py_ENABLE_SHARED"] = "0"
         values["Py_DEBUG"] = "0"
         values.removeValue(forKey: "Py_REMOTE_DEBUG")
-
-        let runtime = """
-        # ABI and trait-dependent values come from the running interpreter.
-        import _imp
-        import sys
-
-        _suffix = next(iter(_imp.extension_suffixes()), "")
-        build_time_vars = {
-            "ABIFLAGS": sys.abiflags,
-            "MULTIARCH": sys.implementation._multiarch,
-            "SOABI": _suffix.removeprefix(".").removesuffix(".so"),
-            "EXT_SUFFIX": _suffix,
-            "MACHDEP": sys.platform,
-            "Py_REMOTE_DEBUG": int("_remote_debugging" in sys.builtin_module_names),
-
-        """
-
-        return runtime + values.sorted { $0.key < $1.key }
-            .map { "    " + $0.key.quotedSourceLiteral + ": " + $0.value + "," }
-            .joined(separator: "\n") + "\n}\n"
+        return values
     }
 
     private func integerDefines(in header: String) -> [String: String] {
