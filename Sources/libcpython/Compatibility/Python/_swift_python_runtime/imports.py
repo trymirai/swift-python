@@ -23,6 +23,7 @@ def _loaded_source_modules(names: list[str]) -> list[tuple]:
     from importlib.machinery import SourceFileLoader
 
     loaded = []
+    # Evict children first so their bindings can still be removed from their parents.
     for name in sorted(set(names), key=lambda name: name.count("."), reverse=True):
         module = sys.modules.get(name)
         if module is None:
@@ -57,12 +58,14 @@ class _ProjectFinder:
     def __init__(self, directory: str, name: str, import_paths: list[str]) -> None:
         self.directory = directory
         self.name = name
+
         self.search_paths = [directory]
         self.search_paths.extend(path for path in import_paths if self._contains(path))
 
     def _contains(self, path: object) -> bool:
         if not isinstance(path, str) or not os.path.isabs(path):
             return False
+
         relative = os.path.relpath(path, self.directory)
         return relative != os.pardir and not relative.startswith(os.pardir + os.sep)
 
@@ -88,11 +91,13 @@ class _ProjectFinder:
     def find_spec(self, fullname: str, path=None, target=None) -> ModuleSpec | None:
         if fullname != self.name and not self.name.startswith(fullname + "."):
             return None
+
         paths = (
             self.search_paths
             if path is None
             else [entry for entry in path if self._contains(entry)]
         )
+
         spec = PathFinder.find_spec(fullname, paths, target)
         if spec is None:
             raise self._missing()

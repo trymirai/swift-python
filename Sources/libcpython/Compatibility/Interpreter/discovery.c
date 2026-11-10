@@ -43,8 +43,6 @@ CPython_RegisterExport(CPython_ExportRegistration registration)
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 
-// Registering this callback also visits images already loaded. Export-bearing
-// images must remain loaded for the lifetime of the sessions using their code.
 static pthread_once_t discovery_once = PTHREAD_ONCE_INIT;
 
 typedef struct {
@@ -92,6 +90,8 @@ discover_image(const struct mach_header *header, intptr_t slide)
 static void
 initialize_discovery(void)
 {
+    // dyld visits already-loaded images too. Keep export-bearing images loaded while sessions use
+    // them.
     _dyld_register_func_for_add_image(discover_image);
 }
 #endif
@@ -100,6 +100,7 @@ static CPython_ExportRegistration *
 snapshot_exports(size_t *snapshot_count)
 {
     pthread_mutex_lock(&export_lock);
+
     size_t count = 0;
     for (ExportNode *node = exports; node != NULL; node = node->next) {
         if (count == SIZE_MAX / sizeof(CPython_ExportRegistration)) {

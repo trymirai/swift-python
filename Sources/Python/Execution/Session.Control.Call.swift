@@ -45,16 +45,20 @@ extension Session.Control {
             }
 
             self.pipe = try Pipe()
+
             self.operation = operation
             self.origin = origin
+
             (self.completion, self.completionSignal) = AsyncStream.makeStream()
         }
 
         func run() async {
             await withDiscardingTaskGroup { group in
                 group.addTask { await self.invoke() }
-                // Closing the stream wakes this task when Python cancels this call.
+
+                // Either completion or cancellation closes this stream.
                 for await _ in completion {}
+
                 cancel()
                 group.cancelAll()
             }
@@ -150,6 +154,7 @@ extension Session.Control {
             call.pipe.readDescriptor().rawValue,
             pipe.readDescriptor().rawValue,
         )
+
         try checkInterruption()
         guard status == 0 else {
             throw Errno(rawValue: status)

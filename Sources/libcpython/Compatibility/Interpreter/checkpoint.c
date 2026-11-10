@@ -22,6 +22,7 @@ typedef struct {
     CPython_Heap *owner;
     Domain *domain;
 
+    // Offsets refer to the owner's snapshot. Retired baseline blocks stay allocated until commit.
     size_t offset;
     bool baseline;
     bool retired;
@@ -33,6 +34,7 @@ static _Atomic size_t heap_count;
 static Allocation *ledger;
 static size_t capacity;
 static size_t count;
+// Include tombstones when deciding whether to rebuild the table.
 static size_t occupied;
 
 static Domain domains[3];
@@ -63,7 +65,6 @@ find_slot(Allocation *slots, size_t slot_count, uintptr_t address)
     }
 }
 
-// Reserve before invoking realloc, which can consume the original pointer.
 static bool
 reserve_slot(void)
 {
@@ -175,6 +176,26 @@ tracked_calloc(void *context, size_t count, size_t size)
 }
 
 static void *
+resize_allocation(PyMemAllocatorEx *allocator, Allocation *slot, void *pointer, size_t size)
+{
+    if (slot != NULL && slot->baseline) {
+        // Preserve the old block at its original address in case the checkpoint is restored.
+        void *replacement = allocator->malloc(allocator->ctx, size);
+        if (replacement != NULL) {
+            memcpy(replacement, pointer, size < slot->size ? size : slot->size);
+            slot->retired = true;
+        }
+        return replacement;
+    }
+
+    void *replacement = allocator->realloc(allocator->ctx, pointer, size);
+    if (slot != NULL && replacement != NULL) {
+        remove_allocation(slot);
+    }
+    return replacement;
+}
+
+static void *
 tracked_realloc(void *context, void *pointer, size_t size)
 {
     Domain *domain = context;
@@ -187,6 +208,7 @@ tracked_realloc(void *context, void *pointer, size_t size)
     Allocation *slot = lookup(pointer);
     CPython_Heap *owner = slot != NULL ? slot->owner : (pointer == NULL ? active_heap : NULL);
     if (owner != NULL) {
+        // Reserve before realloc can consume the original pointer.
         if (!reserve_slot()) {
             pthread_mutex_unlock(&ledger_lock);
             return NULL;
@@ -196,19 +218,7 @@ tracked_realloc(void *context, void *pointer, size_t size)
     }
 
     in_allocator = true;
-    void *replacement;
-    if (slot != NULL && slot->baseline) {
-        replacement = allocator->malloc(allocator->ctx, size);
-        if (replacement != NULL) {
-            memcpy(replacement, pointer, size < slot->size ? size : slot->size);
-            slot->retired = true;
-        }
-    } else {
-        replacement = allocator->realloc(allocator->ctx, pointer, size);
-        if (slot != NULL && replacement != NULL) {
-            remove_allocation(slot);
-        }
-    }
+    void *replacement = resize_allocation(allocator, slot, pointer, size);
     in_allocator = false;
 
     if (owner != NULL) {
@@ -309,6 +319,13 @@ compare_ranges(const void *left, const void *right)
     return (first->start > second->start) - (first->start < second->start);
 }
 
+static bool
+is_snapshot_allocation(const Allocation *slot, const CPython_Heap *heap,
+                       const PyInterpreterState *interpreter)
+{
+    return slot->owner == heap && slot->address != (uintptr_t)interpreter->obmalloc;
+}
+
 static void
 copy_allocation_ranges(const Allocation *slot, unsigned char *snapshot, bool restoring,
                        const Range *excluded, size_t excluded_count)
@@ -371,8 +388,7 @@ copy_private_bytes(PyThreadState *state, CPython_Heap *heap, bool restoring)
 
     for (size_t index = 0; index < capacity; index++) {
         Allocation *slot = &ledger[index];
-        if (slot->owner != heap || slot->address == (uintptr_t)interpreter->obmalloc ||
-            (restoring && !slot->baseline)) {
+        if (!is_snapshot_allocation(slot, heap, interpreter) || (restoring && !slot->baseline)) {
             continue;
         }
         copy_allocation_ranges(slot, heap->snapshot, restoring, excluded,
@@ -381,6 +397,24 @@ copy_private_bytes(PyThreadState *state, CPython_Heap *heap, bool restoring)
 }
 
 #undef FIELD
+
+static unsigned char *
+allocate_snapshot(CPython_Heap *heap, PyInterpreterState *interpreter)
+{
+    size_t bytes = 0;
+    for (size_t index = 0; index < capacity; index++) {
+        Allocation *slot = &ledger[index];
+        if (!is_snapshot_allocation(slot, heap, interpreter)) {
+            continue;
+        }
+        if (slot->size > SIZE_MAX - bytes) {
+            return NULL;
+        }
+        slot->offset = bytes;
+        bytes += slot->size;
+    }
+    return malloc(bytes == 0 ? 1 : bytes);
+}
 
 int
 CPython_BeginHeapCheckpoint(PyThreadState *state)
@@ -391,25 +425,12 @@ CPython_BeginHeapCheckpoint(PyThreadState *state)
     PyInterpreterState *interpreter = PyThreadState_GetInterpreter(state);
 
     pthread_mutex_lock(&ledger_lock);
-    size_t bytes = 0;
-    for (size_t index = 0; index < capacity; index++) {
-        Allocation *slot = &ledger[index];
-        if (slot->owner != heap || slot->address == (uintptr_t)interpreter->obmalloc) {
-            continue;
-        }
-        if (slot->size > SIZE_MAX - bytes) {
-            pthread_mutex_unlock(&ledger_lock);
-            return -1;
-        }
-        slot->offset = bytes;
-        bytes += slot->size;
-    }
-
-    heap->snapshot = malloc(bytes == 0 ? 1 : bytes);
+    heap->snapshot = allocate_snapshot(heap, interpreter);
     if (heap->snapshot == NULL) {
         pthread_mutex_unlock(&ledger_lock);
         return -1;
     }
+
     copy_private_bytes(state, heap, false);
     for (size_t index = 0; index < capacity; index++) {
         if (ledger[index].owner == heap) {

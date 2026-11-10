@@ -21,17 +21,23 @@ final class Environment {
     private let directory: Runtime.Path?
     let projectDirectory: Runtime.Path?
 
-    let packaging: Service.Lazy
+    private let packaging: Service.Lazy
+    private let sessionPackages: [Runtime.PackageSource.Resolved]
     let requirements: [String]
 
-    private(set) var manifest: Manifest?
+    private var sessionConfiguration: Configuration?
 
+    private(set) var manifest: Manifest?
     private var storage: Storage?
     private var temporary: FilePath?
 
     var needsPreparation: Bool {
         directory != nil || projectDirectory != nil || !requirements.isEmpty
-            || !packaging.packages.isEmpty
+            || !sessionPackages.isEmpty || !packaging.packages.isEmpty
+    }
+
+    var packageSources: [Runtime.PackageSource.Resolved] {
+        sessionPackages.isEmpty ? packaging.packages : sessionPackages + packaging.packages
     }
 
     var sitePackagesPath: String? {
@@ -48,11 +54,13 @@ final class Environment {
         directory: Runtime.Path?,
         projectDirectory: Runtime.Path?,
         requirements: [String],
+        sessionPackages: [Runtime.PackageSource.Resolved],
         packaging: Service.Lazy,
     ) {
         self.directory = directory
         self.projectDirectory = projectDirectory
         self.requirements = requirements
+        self.sessionPackages = sessionPackages
         self.packaging = packaging
     }
 
@@ -64,43 +72,35 @@ final class Environment {
     }
 
     func open() async throws -> (Service, Configuration) {
-        let (service, configuration) = try await packaging.open()
-        guard let root = directory?.file, storage == nil else {
-            return (service, configuration)
-        }
+        let (service, application) = try await packaging.open()
+        let configuration = try await resolveConfiguration(using: service, application: application)
 
-        let files = FileSystem.shared
-        do {
-            try await files.createDirectory(at: root, withIntermediateDirectories: true)
-        } catch var error as FileSystemError where error.code == .fileAlreadyExists {
-            error.code = .invalidArgument
-            throw error
-        }
-
-        var opened = Storage(root: root, lease: try Self.acquireLease(at: root))
-        do {
-            let claimed = try Self.isClaimed(opened.lease)
-            let publication = try await Self.readPublication(
-                in: opened,
+        if let root = directory?.file, storage == nil {
+            let opened = try await Self.openStorage(
+                at: root,
                 using: service,
                 expectedABI: configuration.abi,
             )
-            opened.active = publication?.active
-
-            try await Self.prepareSlots(in: opened, claimed: claimed)
-
-            // Mark the lease after checking reserved paths so future opens can reap staging safely.
-            if !claimed {
-                _ = try opened.lease.writeAll(toAbsoluteOffset: 0, [Self.leaseMarker])
-            }
-
-            manifest = publication?.manifest
-            storage = opened
-        } catch {
-            try? opened.lease.close()
-            throw error
+            manifest = opened.manifest
+            storage = opened.storage
         }
         return (service, configuration)
+    }
+
+    private func resolveConfiguration(
+        using service: Service,
+        application: Configuration,
+    ) async throws -> Configuration {
+        if let sessionConfiguration {
+            return sessionConfiguration
+        }
+        guard !sessionPackages.isEmpty else {
+            return application
+        }
+
+        let configuration = try await service.configuration(for: packageSources)
+        sessionConfiguration = configuration
+        return configuration
     }
 
     func installed() async throws -> [String: String] {
@@ -110,7 +110,7 @@ final class Environment {
         let (_, configuration) = try await open()
 
         let localVersions = manifest?.packages.mapValues(\.version) ?? [:]
-        return configuration.baseVersions.merging(localVersions) { _, local in local }
+        return configuration.base.mapValues(\.version).merging(localVersions) { _, local in local }
     }
 
     func close() async {
@@ -139,7 +139,6 @@ final class Environment {
                 replacingFiles: resolution,
                 in: storage,
                 using: service,
-                configuration: configuration,
                 execution: execution,
             )
         } else {
@@ -157,7 +156,6 @@ final class Environment {
         replacingFiles resolution: Preparation.Resolution?,
         in storage: Storage,
         using service: Service,
-        configuration: Configuration,
         execution: Session.Control,
     ) async throws {
         let active: Slot? = if resolution != nil {
@@ -165,12 +163,11 @@ final class Environment {
         } else {
             storage.active
         }
-        guard
-            active != nil || storage.active != nil
-            || !next.local.isEmpty || manifest?.local.isEmpty == false
-        else {
-            try execution.finishCheckingInterruption()
-            manifest = next
+
+        let hasSlot = active != nil || storage.active != nil
+        let hasLocalRequirements = !next.local.isEmpty || manifest?.local.isEmpty == false
+        guard hasSlot || hasLocalRequirements else {
+            try saveManifestInMemory(next, execution: execution)
             return
         }
 
@@ -184,7 +181,6 @@ final class Environment {
                 try await Self.stageFiles(
                     resolution,
                     into: staged,
-                    baseFiles: configuration.baseFiles,
                     execution: execution,
                 )
             }
@@ -211,8 +207,7 @@ final class Environment {
         execution: Session.Control,
     ) async throws {
         guard let resolution else {
-            try execution.finishCheckingInterruption()
-            manifest = next
+            try saveManifestInMemory(next, execution: execution)
             return
         }
 
@@ -228,7 +223,6 @@ final class Environment {
                 try await Self.stageFiles(
                     resolution,
                     into: staged.appending("site-packages"),
-                    baseFiles: configuration.baseFiles,
                     execution: execution,
                 )
             }
@@ -242,6 +236,11 @@ final class Environment {
         if let previous {
             await Self.discard(previous)
         }
+    }
+
+    private func saveManifestInMemory(_ next: Manifest, execution: Session.Control) throws {
+        try execution.finishCheckingInterruption()
+        manifest = next
     }
 
     // MARK: Filesystem operations
@@ -296,6 +295,42 @@ private extension Environment {
 
         var stagedManifestPath: FilePath {
             root.appending(".environment.json.tmp")
+        }
+    }
+
+    static func openStorage(
+        at root: FilePath,
+        using service: Service,
+        expectedABI: [String],
+    ) async throws -> (storage: Storage, manifest: Manifest?) {
+        let files = FileSystem.shared
+        do {
+            try await files.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch var error as FileSystemError where error.code == .fileAlreadyExists {
+            error.code = .invalidArgument
+            throw error
+        }
+
+        var opened = Storage(root: root, lease: try acquireLease(at: root))
+        do {
+            let claimed = try isClaimed(opened.lease)
+            let publication = try await readPublication(
+                in: opened,
+                using: service,
+                expectedABI: expectedABI,
+            )
+            opened.active = publication?.active
+
+            try await prepareSlots(in: opened, claimed: claimed)
+
+            // Mark ownership only after checking the reserved paths.
+            if !claimed {
+                _ = try opened.lease.writeAll(toAbsoluteOffset: 0, [leaseMarker])
+            }
+            return (opened, publication?.manifest)
+        } catch {
+            try? opened.lease.close()
+            throw error
         }
     }
 
@@ -459,29 +494,11 @@ extension Environment {
         }
     }
 
-    static func validateBaseFiles(
-        _ resolution: Preparation.Resolution,
-        against baseFiles: Set<FilePath>,
-    ) throws {
-        guard !baseFiles.isEmpty else {
-            return
-        }
-        for distribution in resolution.distributions.values {
-            if let conflict = distribution.files.first(where: { baseFiles.contains($0.path) }) {
-                throw invalid(
-                    "Local package file conflicts with the application base: \(conflict.path)",
-                )
-            }
-        }
-    }
-
     static func stageFiles(
         _ resolution: Preparation.Resolution,
         into directory: FilePath,
-        baseFiles: Set<FilePath>,
         execution: Session.Control,
     ) async throws {
-        try validateBaseFiles(resolution, against: baseFiles)
         let files = FileSystem.shared
         try await files.createDirectory(at: directory, withIntermediateDirectories: true)
 

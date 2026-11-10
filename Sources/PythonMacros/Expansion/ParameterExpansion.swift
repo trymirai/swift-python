@@ -29,8 +29,8 @@ struct ParameterExpansion {
                 "Python parameters do not support variadics, consuming or general inout arguments.",
             )
         }
-        self.index = index
 
+        self.index = index
         let type = "(\(parameter.type.concreteSpelling(owner: owner))).self"
         let defaultValueSource = parameter
             .defaultValue
@@ -41,6 +41,7 @@ struct ParameterExpansion {
         let name = parameter.secondName?.text ?? parameter.firstName.text
         let pName = name == "_" ? "arg\(index)" : name
         let isUnlabeled = parameter.firstName.text == "_"
+
         metadataSource = """
         .init(\(String(reflecting: pName)), as: \(type),
               hasDefaultValue: \(parameter.defaultValue != nil), isUnlabeled: \(isUnlabeled))

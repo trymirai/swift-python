@@ -11,12 +11,17 @@ extension Environment {
         let cacheDirectory: Runtime.Path
         let abi: [String]
 
-        let baseVersions: [String: String]
-        let baseFiles: Set<FilePath>
+        let base: [String: BasePackage]
 
         var scratchDirectory: FilePath {
             cacheDirectory.file.appending("tmp")
         }
+    }
+
+    struct BasePackage: Sendable {
+        let version: String
+        let requires: [String]
+        let files: [String]
     }
 }
 
@@ -27,8 +32,22 @@ extension Environment.Configuration: Decodable {
         cacheDirectory = try Runtime.Path(decoder.decode(String.self, forKey: "cache"))
         abi = try decoder.decode([String].self, forKey: "abi")
 
-        baseVersions = try decoder.decode([String: String].self, forKey: "base")
-        baseFiles = Set(try decoder.decode([String].self, forKey: "base_files")
-            .map { FilePath($0) })
+        base = try decoder.decode([String: Environment.BasePackage].self, forKey: "base")
+    }
+}
+
+// MARK: - Environment.BasePackage + Encodable, Decodable
+
+extension Environment.BasePackage: Encodable, Decodable {
+    init(from decoder: borrowing Decoder) throws {
+        version = try decoder.decode(String.self, forKey: "version")
+        requires = try decoder.decode([String].self, forKey: "requires")
+        files = try decoder.decode([String].self, forKey: "files")
+    }
+
+    func encode(to encoder: inout Encoder) throws {
+        try encoder.encode(version, forKey: "version")
+        try encoder.encode(requires, forKey: "requires")
+        try encoder.encode(files, forKey: "files")
     }
 }

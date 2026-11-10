@@ -87,7 +87,8 @@ extension BuildWorkspace {
         output: Output = .currentStandardOutput,
     ) async throws -> Output.OutputType {
         logger.debug("\(stage)")
-        // Convert through String because Subprocess uses the SDK's FilePath on Apple.
+
+        // On Apple, Subprocess takes the SDK's FilePath and the workspace uses Swift System.
         let command: Executable = executable.isAbsolute
             ? .path(.init(executable.string))
             : .name(executable.string)

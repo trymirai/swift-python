@@ -49,6 +49,9 @@ extension Environment.Service.Request where Reply == [Environment.Service.Requir
 extension Environment.Service.Request where Reply == Environment.Preparation {
     static func prepare(
         requirements: [String],
+        base: [String: Environment.BasePackage],
+        local: [String] = [],
+        removed: [String] = [],
         installed: [String: Environment.InstalledPackage],
         fingerprint: String?,
         update: Bool,
@@ -56,8 +59,13 @@ extension Environment.Service.Request where Reply == Environment.Preparation {
     ) -> Self {
         Self("prepare") {
             try $0.encode(requirements, forKey: "requirements")
+            try $0.encode(base, forKey: "base")
+
+            try $0.encode(local, forKey: "local")
+            try $0.encode(removed, forKey: "removed")
             try $0.encode(installed, forKey: "installed")
             try $0.encode(fingerprint, forKey: "fingerprint")
+
             try $0.encode(update, forKey: "update")
             try $0.encode(replaceFiles, forKey: "replace_files")
         }

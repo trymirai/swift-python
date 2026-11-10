@@ -64,6 +64,7 @@ func plainSessionAndScriptDoNotCreatePackageDirectories() async throws {
         try await "print('completed')\n".write(toFileAt: script)
         let stdout = root.appending("stdout.log")
         let streamed = Mutex("")
+
         let execution = try await runtime.run(
             script: script.string,
             redirecting: [.stdout: stdout],
@@ -111,7 +112,8 @@ func scriptAuthorizationUsesTheApprovedSourceWithoutGrantingSiblingReads() async
             }
             #expect(request.operation == .open(mode: .readOnly, options: []))
             #expect(request.exists)
-            // Repoint the link between the access decision and the source read.
+
+            // Change the link after the runtime has pinned the source.
             try await FileSystem.shared.removeItem(at: link)
             try await FileSystem.shared.createSymbolicLink(at: link, withDestination: replacement)
             return true
@@ -174,11 +176,13 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
         try await fixture.withProject { session in
             _ = try await session.evaluate("package_file = sampledep.__file__")
             let path: String = try await session.get("package_file")
+
             for wheel in ["sampledep", "sampleleaf"] {
                 try await FileSystem.shared.removeItem(
                     at: fixture.root.appending("\(wheel)-1.0-py3-none-any.whl"),
                 )
             }
+
             try await fixture.withProject(
                 environmentDirectory: fixture.root.appending("second-environment").string,
                 delegate: FileAccessDelegate {

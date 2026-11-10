@@ -16,6 +16,7 @@ extension Object {
 
         private let container: UnsafeMutablePointer<PyObject>
         private let key: Key
+
         private let depth: Int
 
         @_lifetime(borrow owner)

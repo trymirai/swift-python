@@ -136,6 +136,7 @@ extension Session {
                 if session.transactional {
                     try interpreter.beginCheckpoint()
                 }
+
                 let captured = try interpreter.evaluate(
                     source,
                     filename: filename,
@@ -164,6 +165,7 @@ private extension Session {
         case .failure:
             .empty
         }
+
         let end: Execution.End = switch interruption {
         case .stopped:
             .stopped

@@ -40,6 +40,7 @@ extension Environment {
             let pThread = try PThread()
             let result = try pThread.withAttached { attachment in
                 try Object.installImporter(in: attachment)
+
                 let module = try Object.import(module: Self.moduleName, in: attachment)
                 let configure = try module.attribute("configure")
                 let result = try configure.call(
@@ -53,6 +54,19 @@ extension Environment {
             self.pThread = consume pThread
             configuration = result
             return result
+        }
+
+        func configuration(
+            for packages: [Runtime.PackageSource.Resolved],
+        ) throws -> Environment.Configuration {
+            try withModule { module, attachment in
+                let describe = try module.attribute("describe_sources")
+                return try describe.call(
+                    Object(encoding: packages, in: attachment),
+                    Object.makeFunction(Runtime.PackageSource.Reader(packages), in: attachment),
+                )
+                .decode(as: Environment.Configuration.self)
+            }
         }
 
         nonisolated func projectRequirements(
@@ -136,6 +150,7 @@ extension Environment.Service {
                 instance = service
                 return service
             }
+
             let configuration = try await service.open(packages: packages, options: options)
             return (service, configuration)
         }

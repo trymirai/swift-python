@@ -111,6 +111,7 @@ is_resource_directory(PyObject *Py_UNUSED(self), PyObject *argument)
     if (path == NULL) {
         return NULL;
     }
+
     size_t length = strlen(path);
     size_t index = directory_lower_bound(path, length);
     return PyBool_FromLong(resource_is_in_directory(index, path, length));
@@ -137,11 +138,11 @@ append_directory_children(PyObject *children, const char *path)
     const char *last = NULL;
     size_t last_size = 0;
     for (size_t index = directory_lower_bound(path, length);
-         resource_is_in_directory(index, path, length);
-         index++) {
+         resource_is_in_directory(index, path, length); index++) {
         const char *child = CPythonEmbeddedResources[index].path + prefix;
         const char *slash = strchr(child, '/');
         size_t size = slash == NULL ? strlen(child) : (size_t)(slash - child);
+
         // Sorted paths place all descendants of a directory next to one another.
         if (last != NULL && size == last_size && strncmp(last, child, size) == 0) {
             continue;

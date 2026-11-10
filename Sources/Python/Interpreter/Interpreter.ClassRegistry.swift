@@ -100,11 +100,27 @@ extension Interpreter {
             try identity.claim(instance, in: storage)
 
             let context = Context(storage: storage)
-            if let weak = identity.wrapper, let wrapper = try weak.resolve(in: context) {
-                // Transfer the scoped result to the caller's attachment lifetime.
-                return unsafe Object(owned: wrapper.release(), in: owner)
+            let wrapper: Object
+            if let weak = identity.wrapper, let existing = try weak.resolve(in: context) {
+                wrapper = consume existing
+            } else {
+                wrapper = try constructWrapper(
+                    for: instance,
+                    classKey: classKey,
+                    identity: identity,
+                    in: context,
+                )
             }
+            return unsafe Object(owned: wrapper.release(), in: owner)
+        }
 
+        @_lifetime(borrow context)
+        private func constructWrapper(
+            for instance: any _PClass,
+            classKey: String,
+            identity: Object.Identity,
+            in context: borrowing Context,
+        ) throws -> Object {
             guard let wrapperFactory else {
                 throw Self.unregistered()
             }
@@ -117,14 +133,15 @@ extension Interpreter {
             let key = try Object(encoding: classKey, in: context)
             let capsule = try makeCapsule(for: instance, in: context)
 
-            let wrapper = try function.call(key, capsule)
-            return unsafe Object(owned: wrapper.release(), in: owner)
+            return try function.call(key, capsule)
         }
 
         private func rememberWrapper(for identity: Object.Identity) {
             guard savedWrappers != nil else {
                 return
             }
+
+            // Only the first change to an identity records its pre-block wrapper.
             let id = ObjectIdentifier(identity)
             if savedWrappers?[id] == nil {
                 savedWrappers?[id] = (identity, identity.wrapper)

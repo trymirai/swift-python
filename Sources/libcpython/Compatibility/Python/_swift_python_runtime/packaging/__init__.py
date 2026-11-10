@@ -1,6 +1,7 @@
 """Swift-facing package preparation; environment transactions stay in Swift."""
 
 import json
+from dataclasses import replace
 
 from ..packages import installation_tools
 
@@ -8,7 +9,7 @@ from ..packages import installation_tools
 installation_tools()
 
 from .candidate import Wheel
-from .configuration import load
+from .configuration import describe, load, with_sources
 from .requirements import module_name as module_name
 from .requirements import names as names
 from .requirements import normalize as normalize
@@ -25,12 +26,18 @@ def configure(configuration: dict, sources: list[dict], read) -> dict:
     if _configuration is not None:
         raise RuntimeError("The package service is already configured")
 
-    _configuration, description = load(configuration, sources, read)
+    options = load(configuration)
+    description = describe(with_sources(options, sources, read))
+    _configuration = options
     return description
 
 
+def describe_sources(sources: list[dict], read) -> dict:
+    return describe(with_sources(_configuration, sources, read))
+
+
 def prepare(request: dict) -> dict:
-    return prepare_distributions(request, _configuration)
+    return prepare_distributions(request, replace(_configuration, base=request["base"]))
 
 
 def encode_manifest(manifest: dict) -> str:

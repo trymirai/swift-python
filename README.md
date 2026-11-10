@@ -115,8 +115,7 @@ await bufferSession.close()
 
 ## Scripts and projects
 
-Use absolute paths. Dependency resolution uses pure-Python wheels. Pass `environmentDirectory:` to
-reuse installed dependencies across runs or sessions.
+Use absolute paths.
 
 ### Run a script
 
@@ -157,7 +156,44 @@ print(try await projectSession.get("__name__", as: String.self)) // reporting
 await projectSession.close()
 ```
 
-Use `projectSession.packages` to inspect and manage dependencies.
+## Environments and dependencies
+
+Project dependencies come from `requirements.txt` when present, otherwise from
+`[project].dependencies` in `pyproject.toml`. Scripts use inline PEP 723 metadata.
+The runtime prepares dependencies before Python starts. Local installs use compatible pure-Python
+wheels from the index set by `Runtime(packageIndex:)` (PyPI by default).
+
+Pass an absolute path as `environmentDirectory:` to `session` or `run` to keep local
+installations and their saved resolution across runs. One session can use the directory at a time.
+Omit it for temporary installs that are removed when the session closes. The runtime's
+`cacheDirectory:` controls the separate cache for downloaded and unpacked wheels.
+
+### Package precedence
+
+For each distribution, the first source that provides it wins.
+
+1. Local installations in the managed environment.
+2. Sources passed to `session(packages:)`, in list order.
+3. Sources passed to `Runtime(packages:)`, in list order.
+
+Supply an existing `site-packages` directory as `.directory("/path/to/project/site-packages")`,
+a ZIP file as `.archive(path)`, or ZIP bytes as `.embedded(bytes)`. Resolution fails when the
+selected version conflicts with a project or script requirement, even if a later source has a
+compatible version.
+
+### Manage local dependencies
+
+Use `session.packages` to inspect and change the environment.
+
+- `installed()` lists the selected distribution versions, including supplied packages.
+- `resolve()` re-reads project requirements and prefers compatible installed versions.
+- `update()` re-resolves local packages using current versions from the index.
+- `install(requirements:)` adds or replaces local requirements and can override a supplied version.
+- `uninstall(_:)` removes local requirements or overrides. Removing an override brings back the
+  supplied version if it satisfies the remaining requirements.
+
+Once the interpreter has started, a change to the installed wheels returns `.requiresReset`.
+Call `session.reset()` to clear Python state and invalidate its references, then retry the change.
 
 ### Bundle a project for offline use
 

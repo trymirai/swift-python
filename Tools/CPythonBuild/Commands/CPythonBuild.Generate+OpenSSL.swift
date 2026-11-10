@@ -157,28 +157,7 @@ extension CPythonBuild.Generate {
 
         init(_ plan: String) throws {
             for line in plan.split(whereSeparator: \.isNewline) {
-                let fields = line.split(separator: "\t", maxSplits: 1)
-                guard fields.count == 2 else {
-                    throw BuildError("Unexpected entry in the OpenSSL source graph.")
-                }
-
-                let name = String(fields[1])
-                switch fields[0] {
-                case "prefix":
-                    sourcePrefix = name
-                case "source":
-                    translationUnits.insert(name)
-                    links.insert(name)
-                case "generated-source":
-                    translationUnits.insert(name)
-                    generated.insert(name)
-                case "generated-header":
-                    generated.insert(name)
-                case "header":
-                    links.insert(name)
-                default:
-                    throw BuildError("Unknown entry in the OpenSSL source graph.")
-                }
+                try addEntry(line)
             }
 
             guard
@@ -188,6 +167,31 @@ extension CPythonBuild.Generate {
                 links.isDisjoint(with: generated)
             else {
                 throw BuildError("Invalid paths in the OpenSSL source graph.")
+            }
+        }
+
+        private mutating func addEntry(_ line: Substring) throws {
+            let fields = line.split(separator: "\t", maxSplits: 1)
+            guard fields.count == 2 else {
+                throw BuildError("Unexpected entry in the OpenSSL source graph.")
+            }
+
+            let name = String(fields[1])
+            switch fields[0] {
+            case "prefix":
+                sourcePrefix = name
+            case "source":
+                translationUnits.insert(name)
+                links.insert(name)
+            case "generated-source":
+                translationUnits.insert(name)
+                generated.insert(name)
+            case "generated-header":
+                generated.insert(name)
+            case "header":
+                links.insert(name)
+            default:
+                throw BuildError("Unknown entry in the OpenSSL source graph.")
             }
         }
     }
@@ -272,7 +276,8 @@ extension CPythonBuild.Generate {
 
         let configuredSource = graph.sourcePrefix + "/"
         let absoluteSource = source.string + "/"
-        for name in graph.generated.sorted() {
+
+        func copyGeneratedFile(_ name: String) async throws {
             let path = generatedFiles.appending(name)
             let contents = try await workspace.read(textFrom: output.appending(name))
             let normalized = contents
@@ -281,6 +286,10 @@ extension CPythonBuild.Generate {
 
             try await createParent(of: path)
             try await workspace.write(normalized, to: path)
+        }
+
+        for name in graph.generated.sorted() {
+            try await copyGeneratedFile(name)
         }
 
         // Preserve upstream include paths while storing generated files separately.

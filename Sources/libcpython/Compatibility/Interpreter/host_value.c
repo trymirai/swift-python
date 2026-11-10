@@ -22,6 +22,7 @@ insert(HostValue **head, HostValue *value)
     assert(value->list == NULL);
     value->list = head;
     value->next = *head;
+
     if (*head != NULL) {
         (*head)->previous = value;
     }
@@ -39,6 +40,7 @@ remove_value(HostValue *value)
     if (value->next != NULL) {
         value->next->previous = value->previous;
     }
+
     value->list = NULL;
     value->previous = NULL;
     value->next = NULL;
@@ -68,8 +70,9 @@ void
 checkpoint_finish_host_values(bool commit)
 {
     assert(is_active());
-    // Mark the checkpoint inactive before disposers can release more values.
+    // Disposers can release more values. Those releases must happen outside the checkpoint.
     checkpoint.interpreter = 0;
+
     drain(&checkpoint.retired, commit);
     drain(&checkpoint.created, !commit);
 }

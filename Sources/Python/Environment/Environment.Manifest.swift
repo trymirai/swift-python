@@ -10,6 +10,17 @@ extension Environment {
         var local: [String: String] = [:]
         var packages: [String: InstalledPackage] = [:]
 
+        func updating(local: [String: String], resolution: Preparation.Resolution?) -> Self {
+            var updated = self
+            updated.local = local
+
+            if let resolution {
+                updated.fingerprint = resolution.fingerprint
+                updated.packages = resolution.distributions.mapValues(\.record)
+            }
+            return updated
+        }
+
         func hasSameWheels(as other: Self) -> Bool {
             packages.count == other.packages.count && packages.allSatisfy { name, record in
                 other.packages[name]?.digest == record.digest

@@ -190,6 +190,7 @@ private func checkFileAccessRequests(
 
     let append = try #require(requests.dropFirst(2).first)
     #expect(append.operation.openOptions?.contains(.append) == true)
+
     let truncate = try #require(requests.dropFirst(3).first)
     #expect(truncate.operation.openOptions?.contains([.create, .truncate]) == true)
 }
@@ -211,8 +212,10 @@ private actor SuspendedFileAccessDelegate: Python::Session.Delegate {
         guard request.path == path else {
             return true
         }
+
         entered.yield(())
         defer { cancelled = Task.isCancelled }
+
         try await Task.sleep(for: .seconds(30))
         return true
     }

@@ -8,8 +8,6 @@ import Synchronization
 // MARK: - Interpreter.Storage
 
 extension Interpreter {
-    // The registry borrows each PThread's storage, and only attached callbacks
-    // can look it up. Entries are removed after interpreter destruction completes.
     @safe
     final class Storage {
         private struct BufferBorrow {
@@ -31,17 +29,18 @@ extension Interpreter {
             }
         }
 
+        // Entries borrow PThread storage until interpreter destruction completes.
         private static let registry: Mutex<[UInt: UInt]> = .init([:])
 
         let key: UInt
         let references: Reference.Store
+
         let fileAccess: Interpreter.FileAccess?
+        var sessionOrigin: ObjectIdentifier?
+        weak var session: Session?
 
         private var isClosed: Bool = false
         var checkpoint: CheckpointState = .inactive
-
-        var sessionOrigin: ObjectIdentifier?
-        weak var session: Session?
 
         var execution: Session.Control?
         private var nextCallID: Int = 0
@@ -51,7 +50,6 @@ extension Interpreter {
 
         var classRegistry: Interpreter.ClassRegistry?
         var defaultArgumentMarker: UInt = 0
-
         private var constructedWrappers: [Reference] = []
 
         private var borrowedBuffers: [BufferBorrow] = []
@@ -119,11 +117,12 @@ extension Interpreter {
 
         @unsafe
         static func release(_ pointer: UnsafeMutablePointer<PyObject>) {
-            if let state = current(), !state.borrowedBuffers.isEmpty {
-                state.pendingObjectReleases.append(UInt(bitPattern: pointer))
-            } else {
+            guard let state = current(), !state.borrowedBuffers.isEmpty else {
                 unsafe Py_DecRef(pointer)
+                return
             }
+
+            state.pendingObjectReleases.append(UInt(bitPattern: pointer))
         }
 
         func withConstructionScope<Result: ~Copyable>(

@@ -17,7 +17,7 @@ public extension Session {
 
         fileprivate let session: Session
 
-        /// Application and local distributions visible to the session.
+        /// The selected version of each distribution visible to the session.
         public func installed() async throws -> [String: String] {
             try await session.withExecution { session, _ in
                 try await session.environment?.installed() ?? [:]
@@ -29,7 +29,7 @@ public extension Session {
             try await apply(.resolve)
         }
 
-        /// Selects current compatible versions while retaining the fixed application base.
+        /// Selects current compatible versions for the local environment.
         public func update() async throws -> Change {
             try await apply(.update)
         }

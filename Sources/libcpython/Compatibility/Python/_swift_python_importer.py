@@ -1,9 +1,6 @@
 """Expose frozen stdlib code, source inspection and resources in each interpreter.
 
-The C catalogs own immutable process-wide bytes. Loaders, code objects and resource
-wrappers belong to the current interpreter; this module never caches Python objects
-globally in C. Structural loader protocols avoid importing importlib.abc while the
-import system itself is still being installed.
+Using the frozen loader protocols keeps importlib.abc out of the bootstrap.
 """
 
 import _imp

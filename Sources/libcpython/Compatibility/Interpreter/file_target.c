@@ -20,14 +20,8 @@ struct CPython_FileTarget {
 };
 
 static int
-descriptor_path(int fd, char path[PATH_MAX])
+terminate_link_path(char path[PATH_MAX], ssize_t count)
 {
-#if defined(F_GETPATH)
-    return fcntl(fd, F_GETPATH, path);
-#elif defined(__linux__)
-    char link[48];
-    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
-    ssize_t count = readlink(link, path, PATH_MAX);
     if (count < 0) {
         return -1;
     }
@@ -37,6 +31,17 @@ descriptor_path(int fd, char path[PATH_MAX])
     }
     path[count] = '\0';
     return 0;
+}
+
+static int
+descriptor_path(int fd, char path[PATH_MAX])
+{
+#if defined(F_GETPATH)
+    return fcntl(fd, F_GETPATH, path);
+#elif defined(__linux__)
+    char link[48];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    return terminate_link_path(path, readlink(link, path, PATH_MAX));
 #else
     errno = ENOTSUP;
     return -1;
@@ -88,6 +93,7 @@ split_candidate(char *candidate, char name[NAME_MAX + 1])
         memcpy(name, ".", 2);
         return candidate;
     }
+
     memcpy(name, tail, length + 1);
     if (slash == NULL) {
         return ".";
@@ -97,6 +103,30 @@ split_candidate(char *candidate, char name[NAME_MAX + 1])
     }
     *slash = '\0';
     return candidate;
+}
+
+static int
+set_display_path(CPython_FileTarget *target)
+{
+    int parent = target->parent;
+    char display[PATH_MAX];
+    struct stat pinned;
+    struct stat visible;
+    if (descriptor_path(parent, display) < 0 || fstat(parent, &pinned) < 0 ||
+        stat(display, &visible) < 0) {
+        return -1;
+    }
+
+    // The delegate sees the path, so it must name the directory held by the descriptor.
+    if (!same_object(&pinned, &visible)) {
+        errno = ESTALE;
+        return -1;
+    }
+    if (strcmp(target->name, ".") != 0) {
+        return join(target->path, display, target->name);
+    }
+    memcpy(target->path, display, strlen(display) + 1);
+    return 0;
 }
 
 static int
@@ -111,24 +141,7 @@ pin_parent(CPython_FileTarget *target, int base, const char *directory)
         close(target->parent);
     }
     target->parent = parent;
-
-    char display[PATH_MAX];
-    struct stat pinned;
-    struct stat visible;
-    if (descriptor_path(parent, display) < 0 || fstat(parent, &pinned) < 0 ||
-        stat(display, &visible) < 0) {
-        return -1;
-    }
-    // Verify that the path shown to the delegate still names the directory held by the descriptor.
-    if (!same_object(&pinned, &visible)) {
-        errno = ESTALE;
-        return -1;
-    }
-    if (strcmp(target->name, ".") != 0) {
-        return join(target->path, display, target->name);
-    }
-    memcpy(target->path, display, strlen(display) + 1);
-    return 0;
+    return set_display_path(target);
 }
 
 void
@@ -142,6 +155,50 @@ CPython_FreeFileTarget(CPython_FileTarget *target)
         free(target);
     }
     errno = error;
+}
+
+static int
+resolve_candidate(CPython_FileTarget *target, char candidate[PATH_MAX], int base, bool follow,
+                  bool needs_directory)
+{
+    for (int links = 0; links <= 40; ++links) {
+        size_t length = strlen(candidate);
+        while (length > 1 && candidate[length - 1] == '/') {
+            candidate[--length] = '\0';
+            needs_directory = true;
+        }
+
+        const char *directory = split_candidate(candidate, target->name);
+        if (directory == NULL || pin_parent(target, base, directory) < 0) {
+            return -1;
+        }
+
+        int parent = target->parent;
+        int result = fstatat(parent, target->name, &target->identity, AT_SYMLINK_NOFOLLOW);
+        if (result < 0) {
+            if (errno == ENOENT && !needs_directory) {
+                target->exists = false;
+                return 0;
+            }
+            return -1;
+        }
+        if (!follow || !S_ISLNK(target->identity.st_mode)) {
+            if (needs_directory && !S_ISDIR(target->identity.st_mode)) {
+                errno = ENOTDIR;
+                return -1;
+            }
+            target->exists = true;
+            return 0;
+        }
+
+        ssize_t count = readlinkat(parent, target->name, candidate, PATH_MAX);
+        if (terminate_link_path(candidate, count) < 0) {
+            return -1;
+        }
+        base = parent;
+        errno = ELOOP;
+    }
+    return -1;
 }
 
 CPython_FileTarget *
@@ -167,49 +224,9 @@ CPython_PinFileTarget(const char *path, int base, bool follow)
     target->parent = -1;
 
     bool needs_directory = path[size - 2] == '/';
-    for (int links = 0; links <= 40; ++links) {
-        size_t length = strlen(candidate);
-        while (length > 1 && candidate[length - 1] == '/') {
-            candidate[--length] = '\0';
-            needs_directory = true;
-        }
-
-        const char *directory = split_candidate(candidate, target->name);
-        if (directory == NULL || pin_parent(target, base, directory) < 0) {
-            break;
-        }
-
-        int parent = target->parent;
-        int result = fstatat(parent, target->name, &target->identity, AT_SYMLINK_NOFOLLOW);
-        if (result < 0) {
-            if (errno == ENOENT && !needs_directory) {
-                target->exists = false;
-                return target;
-            }
-            break;
-        }
-        if (!follow || !S_ISLNK(target->identity.st_mode)) {
-            if (needs_directory && !S_ISDIR(target->identity.st_mode)) {
-                errno = ENOTDIR;
-                break;
-            }
-            target->exists = true;
-            return target;
-        }
-
-        ssize_t count = readlinkat(parent, target->name, candidate, sizeof(candidate));
-        if (count < 0) {
-            break;
-        }
-        if (count == sizeof(candidate)) {
-            errno = ENAMETOOLONG;
-            break;
-        }
-        candidate[count] = '\0';
-        base = parent;
-        errno = ELOOP;
+    if (resolve_candidate(target, candidate, base, follow, needs_directory) == 0) {
+        return target;
     }
-
     CPython_FreeFileTarget(target);
     return NULL;
 }

@@ -7,6 +7,7 @@
 extension Environment {
     struct InstalledPackage: Equatable, Sendable {
         let version: String
+
         let url: String
         let digest: String
         let filename: String

@@ -37,7 +37,12 @@ CPython_NewPeer(void *value, void (*destroy)(void *))
         destroy(value);
         return PyErr_NoMemory();
     }
-    *peer = (SwiftPeer){.lifetime = {.dispose = free_peer}, .value = value, .destroy = destroy};
+
+    *peer = (SwiftPeer){
+        .lifetime = {.dispose = free_peer},
+        .value = value,
+        .destroy = destroy,
+    };
 
     return host_value_capsule(&peer->lifetime, peer_name, destroy_peer);
 }

@@ -102,6 +102,7 @@ func integersRoundTripAtTheirWidthAndRejectOverflow() async throws {
         try await session.get("maximum", as: Int8.self)
     }
     #expect(overflow.name == "OverflowError")
+
     let subclass = try await #require(throws: Python::Exception.self) {
         try await session.get("wide_subclass", as: UInt128.self)
     }
@@ -152,6 +153,7 @@ func attributesSupportNULAndModuleNamesRejectIt() async throws {
         #expect(try named.attribute("value\0tail").decode(as: Int.self) == 42)
         try named.setAttribute("value\0tail", to: 43)
         #expect(try named.attribute("value\0tail").decode(as: Int.self) == 43)
+
         do {
             _ = try context.import(module: "sys\0tail")
             Issue.record("Expected a NUL module name to fail.")

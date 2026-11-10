@@ -25,7 +25,19 @@ public struct Arguments: ~Copyable, ~Escapable {
         }
 
         let marker = Interpreter.Storage.current()?.defaultArgumentMarker
-        // Reject missing required arguments before the generated binder evaluates defaults.
+        try Self.validateRequiredArguments(in: object, layout: layout, marker: marker)
+
+        self.layout = layout
+        self.defaultArgumentMarker = marker
+        unsafe self.pointer = object.pointer
+    }
+
+    private static func validateRequiredArguments(
+        in object: borrowing Object,
+        layout: Layout,
+        marker: UInt?,
+    ) throws {
+        // Required arguments must be present before the generated binder evaluates defaults.
         for case let .argument(index, parameter) in layout.slots
             where parameter.defaultValue.isRequired
         {
@@ -40,10 +52,6 @@ public struct Arguments: ~Copyable, ~Escapable {
                 )
             }
         }
-
-        self.layout = layout
-        self.defaultArgumentMarker = marker
-        unsafe self.pointer = object.pointer
     }
 
     public borrowing func isMissing(_ index: Int) throws -> Bool {

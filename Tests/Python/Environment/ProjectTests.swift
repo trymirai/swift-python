@@ -21,13 +21,28 @@ func projectStartupSelectsOnlyProjectModules() async throws {
             .write(toFileAt: root.appending("outside.py"))
 
         let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
-        let empty = try await runtime.session(.project(directory: project.string))
-        try await withSession(empty) { session in
-            let error = try await #require(throws: Python::ExecutionError.self) {
-                try await session.initialize()
+
+        func expectStartupError(
+            for module: String?,
+            importPaths: [String] = [],
+            containing diagnostic: String,
+        ) async throws {
+            let session = try await runtime.session(
+                .project(directory: project.string, module: module),
+                importPaths: importPaths,
+            )
+            try await withSession(session) { session in
+                let error = try await #require(throws: Python::ExecutionError.self) {
+                    try await session.initialize()
+                }
+                #expect(error.traceback.contains(diagnostic))
             }
-            #expect(error.traceback.contains("ModuleNotFoundError: No startup package"))
         }
+
+        try await expectStartupError(
+            for: nil,
+            containing: "ModuleNotFoundError: No startup package",
+        )
 
         for name in ["zeta", "0-invalid", "alpha"] {
             let package = project.appending(name)
@@ -58,16 +73,11 @@ func projectStartupSelectsOnlyProjectModules() async throws {
         }
 
         for module in ["missing", "alpha.missing", "outside", "sys"] {
-            let session = try await runtime.session(
-                .project(directory: project.string, module: module),
+            try await expectStartupError(
+                for: module,
                 importPaths: [root.string],
+                containing: "ModuleNotFoundError: Startup module '\(module)'",
             )
-            try await withSession(session) { session in
-                let error = try await #require(throws: Python::ExecutionError.self) {
-                    try await session.initialize()
-                }
-                #expect(error.traceback.contains("ModuleNotFoundError: Startup module '\(module)'"))
-            }
         }
     }
 }
@@ -362,6 +372,121 @@ func invalidSavedManifestKeepsCurrentSlot() async throws {
     }
 }
 
+@Test(arguments: ["1.0", "2.0"])
+func firstSessionPackageSourceWins(version: String) async throws {
+    try await ProjectFixture.withFixture { fixture in
+        let first = try await fixture.preparePackageSource(
+            "first",
+            version: version,
+            value: 27,
+            archived: true,
+        )
+        let second = try await fixture.preparePackageSource("second", version: "3.0", value: 37)
+        let session = try await fixture.runtime.session(packages: [first, second])
+        try await withSession(session) { session in
+            #expect(try await session.packages.installed() == ["sharedbase": version])
+            let output = try await session.evaluate("""
+            import importlib.util
+            import sharedbase, unrelated
+            from importlib.metadata import distributions, version
+
+            assert sharedbase.VALUE == 27 and unrelated.VALUE == 19
+            assert version("sharedbase") == "\(version)"
+            assert [item.version for item in distributions(name="sharedbase")] == ["\(version)"]
+            assert importlib.util.find_spec("sharedbase_old") is None
+            """)
+            #expect(output.end == .finished)
+        }
+
+        let other = try await fixture.runtime.session()
+        try await withSession(other) { session in
+            #expect(try await session.packages.installed() == ["sharedbase": "1.0"])
+            let output = try await session
+                .evaluate("import sharedbase, sharedbase_old; print(sharedbase.VALUE)")
+            #expect(output.output.stdout == "17\n")
+        }
+    }
+}
+
+@Test
+func conflictingRequirementsDoNotFallBackToRuntimePackages() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        let project = try await fixture.preparePackageSource(
+            "project-packages",
+            version: "2.0",
+            value: 27,
+        )
+        _ = try await fixture.write("sharedbase<2\n", to: "project/requirements.txt")
+        let error = try await #require(throws: Python::Exception.self) {
+            try await fixture.runtime.session(
+                fixture.projectStartup,
+                environmentDirectory: fixture.environment,
+                packages: [project],
+            )
+        }
+        #expect(error.message.contains("Package dependency conflict"))
+        #expect(error.message.contains("sharedbase<2"))
+        #expect(error.message.contains("sharedbase==2.0"))
+    }
+}
+
+@Test
+func conversationInstallationOverridesAndRevealsTheProjectSource() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        let project = try await fixture.preparePackageSource(
+            "project-packages",
+            version: "2.0",
+            value: 27,
+        )
+        try await fixture.addSharedPackageWheels()
+
+        func withLocalEnvironment(_ test: (Python::Session) async throws -> Void) async throws {
+            let session = try await fixture.runtime.session(
+                environmentDirectory: fixture.environment,
+                packages: [project],
+            )
+            try await withSession(session, test)
+        }
+
+        try await withLocalEnvironment { session in
+            let override = try await session.packages.install(requirements: ["sharedbase>2"])
+            #expect(override == .applied)
+            let retained = try await session.packages.install(requirements: ["sharedbase>=2"])
+            #expect(retained == .applied)
+        }
+
+        _ = try await fixture.write("sharedbase<3\n", to: "project/requirements.txt")
+        let conflict = try await #require(throws: Python::Exception.self) {
+            try await fixture.runtime.session(
+                fixture.projectStartup,
+                environmentDirectory: fixture.environment,
+                packages: [project],
+            )
+        }
+        #expect(conflict.message.contains("sharedbase<3"))
+        #expect(conflict.message.contains("sharedbase==3.0"))
+
+        try await withLocalEnvironment { session in
+            #expect(try await session.packages.installed() == ["sharedbase": "3.0"])
+            let output = try await session.evaluate("""
+            import sharedbase
+            from importlib.metadata import version
+
+            assert version("sharedbase") == "3.0"
+            print(sharedbase.VALUE)
+            """)
+            #expect(output.output.stdout == "33\n")
+
+            #expect(try await session.packages.uninstall(["sharedbase"]) == .requiresReset)
+            try await session.reset()
+            #expect(try await session.packages.uninstall(["sharedbase"]) == .applied)
+            #expect(try await session.packages.installed() == ["sharedbase": "2.0"])
+            let fallback = try await session.evaluate("import sharedbase; print(sharedbase.VALUE)")
+            #expect(fallback.output.stdout == "27\n")
+        }
+    }
+}
+
 @Test
 func projectBundleLoadsFromEmbeddedBytesAndDisk() async throws {
     try await ProjectFixture.withFixture { fixture in
@@ -378,6 +503,7 @@ func projectBundleLoadsFromEmbeddedBytesAndDisk() async throws {
 
         try await buildArchive()
         let initial = try await FileSystem.shared.info(forFileAt: archive)
+
         try await buildArchive()
         let repeated = try await FileSystem.shared.info(forFileAt: archive)
         #expect(initial?.lastDataModificationTime == repeated?.lastDataModificationTime)

@@ -177,19 +177,27 @@ extension Module {
                     try Self.validateContext(in: function, at: 1)
                     classes[owner]?.methods.append(function)
                 case let .initializer(owner, function):
-                    guard function.parameters.count(where: \.isInjected) <= 1 else {
-                        throw Self.failure("A PythonInit can take at most one Context parameter.")
-                    }
-                    if classes[owner]?.initializer != nil {
-                        throw Self.failure("A class has more than one PythonInit.")
-                    }
-                    classes[owner]?.initializer = function
+                    try Self.attachInitializer(function, owner: owner, to: &classes)
                 case let .property(owner, property):
                     classes[owner]?.properties.append(property)
                 default:
                     break
                 }
             }
+        }
+
+        private static func attachInitializer(
+            _ function: Module.Function,
+            owner: ObjectIdentifier,
+            to classes: inout [ObjectIdentifier: Module.Class],
+        ) throws {
+            guard function.parameters.count(where: \.isInjected) <= 1 else {
+                throw failure("A PythonInit can take at most one Context parameter.")
+            }
+            if classes[owner]?.initializer != nil {
+                throw failure("A class has more than one PythonInit.")
+            }
+            classes[owner]?.initializer = function
         }
 
         private func functionsByModule(

@@ -208,6 +208,7 @@ func rollbackPreservesFileIOAndItsPosition() async throws {
     try await FileSystem.shared.withTemporaryDirectory { _, root in
         let path = root.appending("data")
         try await "abcd".write(toFileAt: path)
+
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(directory: root.string, transactional: true)
         defer { await session.close() }
@@ -220,6 +221,7 @@ func rollbackPreservesFileIOAndItsPosition() async throws {
         descriptor = file.fileno()
         assert file.read(1) == b'a'
         """)
+
         _ = try await #require(throws: Python::ExecutionError.self) {
             try await session.evaluate("""
             assert file.read(1) == b'b'
@@ -230,6 +232,7 @@ func rollbackPreservesFileIOAndItsPosition() async throws {
             raise ValueError('rollback')
             """)
         }
+
         let result = try await session.evaluate("""
         assert file is alias and id(file) == identity
         assert not file.closed and file.fileno() == descriptor

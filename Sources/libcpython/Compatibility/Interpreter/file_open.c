@@ -7,6 +7,7 @@
 
 typedef struct {
     int fd;
+
     bool closed;
     off_t offset;
 } Descriptor;
@@ -24,6 +25,7 @@ struct CPython_Files {
 
 static _Thread_local CPython_FileAccessCheck check_file;
 static _Thread_local void *check_context;
+
 static _Thread_local CPython_Files *files;
 
 CPython_Files *
@@ -140,6 +142,7 @@ CPython_BeginFileCheckpoint(void)
     if (files == NULL) {
         return 0;
     }
+
     for (size_t i = 0; i < files->count; ++i) {
         Descriptor *entry = &files->descriptors[i];
         entry->offset = lseek(entry->fd, 0, SEEK_CUR);
@@ -147,6 +150,7 @@ CPython_BeginFileCheckpoint(void)
             return -1;
         }
     }
+
     files->checkpoint_count = files->count;
     files->checkpoint = true;
     return 0;
@@ -162,6 +166,8 @@ CPython_FinishFileCheckpoint(bool restoring)
     size_t remaining = 0;
     for (size_t i = 0; i < files->count; ++i) {
         Descriptor entry = files->descriptors[i];
+
+        // Rollback drops newly opened descriptors. Commit releases descriptors closed by Python.
         if (restoring ? i >= files->checkpoint_count : entry.closed) {
             close(entry.fd);
             continue;
@@ -182,6 +188,7 @@ reserve_descriptor(void)
     if (files->count < files->capacity) {
         return 0;
     }
+
     size_t capacity = files->capacity == 0 ? 16 : files->capacity * 2;
     if (capacity > SIZE_MAX / sizeof(Descriptor)) {
         PyErr_NoMemory();
@@ -207,17 +214,20 @@ CPython_CheckFile(const char *path, int base, int flags, CPython_FileOperation o
     }
 
     bool follow = !(flags & O_NOFOLLOW) && (flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
-    CPython_FileTarget *target;
-    Py_BEGIN_ALLOW_THREADS target = CPython_PinFileTarget(path, base, follow);
-    Py_END_ALLOW_THREADS if (target == NULL)
-    {
+    PyThreadState *state = PyEval_SaveThread();
+    CPython_FileTarget *target = CPython_PinFileTarget(path, base, follow);
+    PyEval_RestoreThread(state);
+
+    if (target == NULL) {
         PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, filename);
         return NULL;
     }
-    int decision = check_file == NULL ? 0
-                                      : check_file(check_context, CPython_FileTargetPath(target),
-                                                   flags & O_ACCMODE, flags & ~O_ACCMODE, operation,
-                                                   CPython_FileTargetExists(target));
+
+    int decision = 0;
+    if (check_file != NULL) {
+        decision = check_file(check_context, CPython_FileTargetPath(target), flags & O_ACCMODE,
+                              flags & ~O_ACCMODE, operation, CPython_FileTargetExists(target));
+    }
     if (decision > 0) {
         return target;
     }
@@ -232,10 +242,11 @@ CPython_CheckFile(const char *path, int base, int flags, CPython_FileOperation o
 int
 CPython_OpenFile(const char *path, int base, int flags, mode_t mode, PyObject *filename)
 {
-    int fd;
     if (files == NULL) {
-        Py_BEGIN_ALLOW_THREADS fd = openat(base, path, flags, mode);
-        Py_END_ALLOW_THREADS return fd;
+        PyThreadState *state = PyEval_SaveThread();
+        int fd = openat(base, path, flags, mode);
+        PyEval_RestoreThread(state);
+        return fd;
     }
 
     CPython_FileTarget *target = CPython_CheckFile(path, base, flags, CPython_FileOpen, filename);
@@ -247,10 +258,12 @@ CPython_OpenFile(const char *path, int base, int flags, mode_t mode, PyObject *f
         return -1;
     }
 
-    Py_BEGIN_ALLOW_THREADS fd = CPython_OpenFileTarget(target, flags, mode);
+    PyThreadState *state = PyEval_SaveThread();
+    int fd = CPython_OpenFileTarget(target, flags, mode);
     CPython_FreeFileTarget(target);
-    Py_END_ALLOW_THREADS if (fd >= 0)
-    {
+    PyEval_RestoreThread(state);
+
+    if (fd >= 0) {
         files->descriptors[files->count++] = (Descriptor){.fd = fd};
     }
     return fd;

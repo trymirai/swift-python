@@ -50,6 +50,7 @@ extension Session {
             self.timeout = timeout
 
             self.state = .init(State(scope: scope, outputHandler: output))
+
             (self.incomingCalls, self.submissions) = AsyncStream.makeStream()
         }
 
@@ -106,8 +107,8 @@ extension Session {
                 result = await settling(session, self, result)
             }
 
-            // Callbacks may still be cleaning up when Python returns after an interruption.
             let interruption = finish()
+            // Python can return before interrupted Swift callbacks finish their cleanup.
             await callbacks
 
             if let interruption {
@@ -210,16 +211,12 @@ extension Session {
         ) {
             let (reason, calls) = state.withLock { state in
                 let transition = state.interrupt(requested)
-                // Keep the interpreter attached until the pending call is enqueued.
-                if
-                    requested != nil, transition.calls != nil,
-                    let key = state.evaluatingInterpreter,
-                    let interpreter = unsafe OpaquePointer(bitPattern: key)
-                {
-                    unsafe CPython_RequestEvaluationInterrupt(interpreter)
+                if requested != nil, transition.calls != nil {
+                    state.requestEvaluationInterrupt()
                 }
                 return transition
             }
+
             if let calls {
                 pipe.signal()
                 finishCalls(calls)
@@ -278,6 +275,7 @@ private extension Session.Control {
 
         var scope: (any Sendable)?
         var outputHandler: OutputHandler?
+
         var calls: [CallID: Invocation] = [:]
 
         mutating func start(until deadline: ContinuousClock.Instant?) {
@@ -306,6 +304,16 @@ private extension Session.Control {
                 return (reason, calls)
             case .interrupted, .finished:
                 return (phase.interruption, nil)
+            }
+        }
+
+        func requestEvaluationInterrupt() {
+            // The state lock keeps endEvaluation from clearing this pointer during the call.
+            if
+                let key = evaluatingInterpreter,
+                let interpreter = unsafe OpaquePointer(bitPattern: key)
+            {
+                unsafe CPython_RequestEvaluationInterrupt(interpreter)
             }
         }
 

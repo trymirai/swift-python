@@ -109,10 +109,12 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
         target.withLock { $0 = nil }
     }
 
-    let wait: @Sendable () async throws -> Python::Value = {
+    @Sendable
+    func wait() async throws -> Python::Value {
         lifecycle.withLock { $0.started = true }
         entered.continuation.yield(())
         defer { lifecycle.withLock { $0.cancelled = Task.isCancelled } }
+
         for await _ in suspended.stream {}
         try Task.checkCancellation()
         return .none
@@ -136,6 +138,7 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
     target.withLock { $0 = session }
 
     try await session.initialize()
+
     let timeout: Duration? = interruption == .timeout ? .seconds(2) : nil
     let evaluation = Task {
         try await session.evaluate("""

@@ -2,9 +2,9 @@
 //  Created by Anton Spivak
 //
 
-// Swift 6.4 can destroy an uninitialized opaque nonescapable result on a
-// throwing return path. Return a fully initialized projection, then validate it
-// before preparing the next argument. No Python exception remains pending.
+// On a throwing return path Swift 6.4 can destroy an uninitialized opaque
+// nonescapable result. Store failures in initialized projections and validate
+// each projection before preparing the next argument.
 
 /// Compiler support. Preparation owns or pins inputs before any borrowed view is issued.
 @_documentation(visibility: internal)

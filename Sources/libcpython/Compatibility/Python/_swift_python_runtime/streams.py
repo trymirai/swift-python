@@ -142,7 +142,6 @@ def capture(control, configuration: dict[str, int]):
             (sys, "__stdout__", _stdout),
             (sys, "stderr", _stderr),
             (sys, "__stderr__", _stderr),
-
             (_stdout, "target", stdout),
             (_stderr, "target", stderr),
         )

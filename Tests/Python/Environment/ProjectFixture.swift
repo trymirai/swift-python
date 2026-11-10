@@ -80,6 +80,28 @@ struct ProjectFixture {
         _ = try await builder.evaluate(#"wheel('sampledep', '2.0', 'VALUE = 2\n')"#)
     }
 
+    func addSharedPackageWheels() async throws {
+        _ = try await builder.evaluate(#"""
+        wheel('sharedbase', '2.0', 'VALUE = 22\n')
+        wheel('sharedbase', '3.0', 'VALUE = 33\n')
+        """#)
+    }
+
+    func preparePackageSource(
+        _ name: String,
+        version: String,
+        value: Int,
+        archived: Bool = false,
+    ) async throws -> Python::Runtime.PackageSource {
+        let path = root.appending(name + (archived ? ".zip" : "")).string
+        try await builder.set(path, forKey: "source_path")
+        try await builder.set(version, forKey: "source_version")
+        try await builder.set(value, forKey: "source_value")
+        _ = try await builder
+            .evaluate("write_base(Path(source_path), source_version, source_value)")
+        return archived ? .archive(path) : .directory(path)
+    }
+
     func takeIndexOffline() async throws {
         try await FileSystem.shared.moveItem(
             at: root.appending("simple"),
@@ -164,6 +186,11 @@ struct ProjectFixture {
         })
         index.write_text(json.dumps(data))
 
+    def write_zip(target, files):
+        with zipfile.ZipFile(target, "w") as archive:
+            for member, data in files.items():
+                archive.writestr(member, data)
+
     def wheel(name, version, source, requires=(), path=None):
         filename = f"{name}-{version}-py3-none-any.whl"
         metadata = f"{name}-{version}.dist-info"
@@ -180,16 +207,14 @@ struct ProjectFixture {
         write_record(files, metadata)
 
         target = root / filename
-        with zipfile.ZipFile(target, "w") as archive:
-            for member, data in files.items():
-                archive.writestr(member, data)
-
+        write_zip(target, files)
         index_wheel(name, target)
 
     def write_project():
         project = root / "project"
         package = project / "\#(projectModule)"
         package.mkdir(parents=True)
+
         (project / "pyproject.toml").write_text(
             '[project]\nname = "test-assistant"\nversion = "1.0"\ndependencies = ["sampledep>=1"]\n'
         )
@@ -200,14 +225,26 @@ struct ProjectFixture {
         (package / "helpers.py").write_text('def plus(left, right):\n    return left + right\n')
         (package / "message.txt").write_text("embedded resource")
 
-    def write_application_base():
-        base = root / "global"
-        (base / "sharedbase").mkdir(parents=True)
-        (base / "sharedbase/__init__.py").write_text("VALUE = 17\n")
-        (base / "sharedbase-1.0.dist-info").mkdir()
-        (base / "sharedbase-1.0.dist-info/METADATA").write_text(
-            "Metadata-Version: 2.4\nName: sharedbase\nVersion: 1.0\n"
-        )
+    def write_base(base, version, value, legacy=False):
+        metadata = f"sharedbase-{version}.dist-info"
+        files = {
+            "sharedbase/__init__.py": f"VALUE = {value}\n".encode(),
+            f"{metadata}/METADATA": (
+                f"Metadata-Version: 2.4\nName: sharedbase\nVersion: {version}\n"
+            ).encode(),
+        }
+        if legacy:
+            files["sharedbase_old.py"] = b"VALUE = 17\n"
+        write_record(files, metadata)
+
+        if base.suffix == ".zip":
+            write_zip(base, files)
+            return
+
+        for member, data in files.items():
+            file = base / member
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(data)
 
     wheel("sampleleaf", "1.0", "VALUE = 1\n")
     wheel("sampledep", "1.0", "from sampleleaf import VALUE\n", ("sampleleaf>=1",))
@@ -215,6 +252,7 @@ struct ProjectFixture {
     wheel("sampleplugin", "1.0", "VALUE = 10\n", ("sampledep>=1",), path="sampledep/plugin.py")
 
     write_project()
-    write_application_base()
+    write_base(root / "global", "1.0", 17, legacy=True)
+    (root / "global" / "unrelated.py").write_text("VALUE = 19\n")
     """#
 }

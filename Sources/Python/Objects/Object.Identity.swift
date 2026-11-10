@@ -21,17 +21,18 @@ public extension Object {
         func claim(_ instance: any _PClass, in storage: Interpreter.Storage) throws {
             let owner = ObjectIdentifier(instance)
             try state.withLock { state in
-                if let previous = state.owner {
-                    guard previous == owner else {
-                        throw Module.Catalog
-                            .failure("An instance identity cannot be shared by Swift objects.")
-                    }
-                    guard state.references === storage.references else {
-                        throw Reference.wrongInterpreter()
-                    }
-                } else {
+                guard let previous = state.owner else {
                     state.owner = owner
                     state.references = storage.references
+                    return
+                }
+
+                guard previous == owner else {
+                    throw Module.Catalog
+                        .failure("An instance identity cannot be shared by Swift objects.")
+                }
+                guard state.references === storage.references else {
+                    throw Reference.wrongInterpreter()
                 }
             }
         }
@@ -89,9 +90,9 @@ public extension Object {
 
 private extension Object.Identity {
     struct State {
-        weak var references: Reference.Store?
-        
         var owner: ObjectIdentifier?
+        weak var references: Reference.Store?
+
         var wrapper: Wrapper = .unbound
     }
 }

@@ -30,6 +30,7 @@ checks_root(SecCertificateRef root)
 
     X509_STORE *store = X509_STORE_new();
     X509_STORE_CTX *context = X509_STORE_CTX_new();
+
     bool initialized = store != NULL && context != NULL &&
                        X509_STORE_CTX_init(context, store, certificate, NULL) == 1;
 

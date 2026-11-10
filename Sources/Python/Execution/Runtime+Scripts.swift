@@ -32,6 +32,7 @@ public extension Runtime {
     ) async throws -> Execution {
         try Session.Control.validateTimeout(timeout)
         let definitions = try Module.Catalog.resolve(modules)
+
         let script = try await Self.readScript(at: path, scope: scope, delegate: delegate)
         let requirements = try await scriptRequirements(script.source)
 
@@ -71,6 +72,14 @@ extension Runtime {
             return (path, source, try Path(file.removingLastComponent()))
         }
 
+        return try await readAuthorizedScript(at: file, scope: scope, delegate: delegate)
+    }
+
+    private static func readAuthorizedScript(
+        at file: FilePath,
+        scope: (any Sendable)?,
+        delegate: any Session.Delegate,
+    ) async throws -> (filename: String, source: String, importDirectory: Path?) {
         let target = try await NIOThreadPool.singleton.runIfActive { try FileTarget(file) }
         let request = Session.FileAccessRequest(
             path: target.path,
@@ -96,6 +105,7 @@ extension Runtime {
         defer { try? descriptor.close() }
         var bytes = [UInt8]()
         var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+
         while true {
             let count = try buffer.withUnsafeMutableBytes { try unsafe descriptor.read(into: $0) }
             if count == 0 {

@@ -1,24 +1,25 @@
-"""Immutable interpreter facts and the application-supplied package base."""
+"""Immutable interpreter facts and a session's supplied package base."""
 
 import email.parser
 import importlib.metadata
 import sys
 import tempfile
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from packaging.markers import default_environment
 from packaging.specifiers import SpecifierSet
 from packaging.tags import parse_tag, sys_tags
-from packaging.utils import canonicalize_name
 from packaging.version import Version
 
+from ..packages import distribution_files, load_sources, select_distributions
 from .paths import absolute_path
 
 PYTHON_VERSION = Version(sys.version.split()[0])
 MARKER_ENVIRONMENT = default_environment()
 SUPPORTED_TAGS = frozenset(sys_tags())
+
 ABI = [sys.implementation.cache_tag, sys.platform, getattr(sys.implementation, "_multiarch", "")]
 
 
@@ -39,39 +40,24 @@ def _distribution(distribution: importlib.metadata.Distribution) -> dict:
     name = metadata["Name"]
     version = metadata["Version"] if name else None
     if not version:
-        raise ValueError("Application package metadata must contain Name and Version")
+        raise ValueError("Package metadata must contain Name and Version")
 
     requires_python = metadata.get("Requires-Python")
     if not supports_python(requires_python):
-        raise ValueError(f"Application package {name} requires Python {requires_python}")
+        raise ValueError(f"Package {name} requires Python {requires_python}")
 
     wheel = distribution.read_text("WHEEL")
     if wheel:
         wheel_metadata = email.parser.Parser().parsestr(wheel)
         tags = set().union(*(parse_tag(tag) for tag in wheel_metadata.get_all("Tag", [])))
         if tags and not tags.intersection(SUPPORTED_TAGS):
-            raise ValueError(f"Application package {name} has incompatible wheel tags")
+            raise ValueError(f"Package {name} has incompatible wheel tags")
 
     return {
-        "name": canonicalize_name(name),
         "version": str(Version(version)),
         "requires": metadata.get_all("Requires-Dist", []),
+        "files": sorted(distribution_files(distribution)),
     }
-
-
-def _read_package_base(paths: list[str]) -> tuple[dict, set[str]]:
-    base = {}
-    base_files = set()
-    for distribution in importlib.metadata.distributions(path=paths):
-        record = _distribution(distribution)
-        name = record["name"]
-        if name in base:
-            raise ValueError(f"Application package {name!r} is supplied by multiple sources")
-
-        base[name] = record
-        base_files.update(str(path) for path in distribution.files or ())
-
-    return base, base_files
 
 
 def _read_options(configuration: dict) -> tuple[Path, str]:
@@ -96,18 +82,21 @@ def _check_source_paths(sources: list[dict]) -> None:
             absolute_path(source["archive"])
 
 
-def load(configuration: dict, sources: list[dict], read) -> tuple[Configuration, dict]:
-    from ..packages import install
-
-    cache, index = _read_options(configuration)
-    paths = install(sources, read)
+def with_sources(configuration: Configuration, sources: list[dict], read) -> Configuration:
     _check_source_paths(sources)
+    selected, _ = select_distributions(load_sources(sources, read))
+    base = {name: _distribution(distribution) for name, (_, distribution) in selected.items()}
+    return replace(configuration, base=base)
 
-    base, base_files = _read_package_base(paths)
-    configuration = Configuration(cache, index, base)
-    return configuration, {
-        "cache": str(cache),
+
+def load(options: dict) -> Configuration:
+    cache, index = _read_options(options)
+    return Configuration(cache, index, {})
+
+
+def describe(configuration: Configuration) -> dict:
+    return {
+        "cache": str(configuration.cache),
         "abi": ABI,
-        "base": {name: record["version"] for name, record in base.items()},
-        "base_files": sorted(base_files),
+        "base": configuration.base,
     }

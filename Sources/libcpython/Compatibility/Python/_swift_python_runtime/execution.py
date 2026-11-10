@@ -21,6 +21,7 @@ def _report_exception(exception: BaseException, stderr, control) -> str:
         traceback.format_exception(type(exception), exception, exception.__traceback__.tb_next)
     )
     text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+
     if control("interrupted"):
         return text
 
@@ -41,7 +42,6 @@ def _successful_script_exit(exception: BaseException) -> bool:
 
 
 class _SourceCache:
-    # A later traceback can refer to code from a finished block.
     def __init__(self) -> None:
         self._sources = {}
         self._block = 0
@@ -56,6 +56,7 @@ class _SourceCache:
     def remember(self, code: CodeType, source: str, filename: str) -> None:
         entry = (len(source), None, source.splitlines(keepends=True), filename)
 
+        # Tracebacks can still reference nested code objects after the block returns.
         references = []
         live = 0
 
@@ -67,7 +68,6 @@ class _SourceCache:
                 if linecache.cache.get(filename) is entry:
                     linecache.cache.pop(filename, None)
 
-        # Keep the source until the last nested code object is collected.
         pending = [code]
         while pending:
             child = pending.pop()
@@ -144,7 +144,7 @@ def configure(paths: list[str]) -> None:
         filename = sources.block_filename(filename)
 
         with capture(control, streams) as (stdout, stderr):
-            # Interactive code can also replace sys.argv.
+            # Restore argv even if interactive code rebinds it.
             previous_argv = sys.argv
             failure = ""
 

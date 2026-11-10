@@ -30,7 +30,6 @@ def _download(wheel: Wheel, temporary: Path) -> None:
         temporary.open("xb") as output,
     ):
         size = 0
-
         while chunk := response.read(128 * 1024):
             size += len(chunk)
             if size > 256 * 1024 * 1024:
@@ -69,6 +68,7 @@ def _install_archive(wheel_path: Path, stage: Path) -> None:
         script_kind="posix",
         bytecode_optimization_levels=(),
     )
+
     with WheelFile.open(wheel_path) as source:
         source.validate_record(validate_contents=True)
         install_wheel(source, destination, {"INSTALLER": b"swift-python\n"})
@@ -133,13 +133,13 @@ class WheelCache:
     def unpack(self, wheel: Wheel) -> Path:
         parent = self.directory / "installed"
         parent.mkdir(parents=True, exist_ok=True)
+
         target = parent / wheel.digest
         if target.is_dir():
             return target
 
         # Stage beside the digest directory so publication is a single rename.
         stage = Path(tempfile.mkdtemp(prefix=".install-", dir=parent))
-
         try:
             wheel_path = self.download(wheel)
             _validate_archive(wheel_path, wheel)

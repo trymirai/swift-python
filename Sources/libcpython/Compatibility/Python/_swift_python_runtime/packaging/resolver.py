@@ -1,4 +1,4 @@
-"""Resolve a complete requirement set against the fixed application base."""
+"""Resolve requirements against the session's selected package sources."""
 
 import hashlib
 import json
@@ -6,6 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
+from dataclasses import replace
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -19,7 +20,7 @@ from .requirements import _requirements
 from .wheels import WheelCache
 
 
-def _is_pinned(version: Version, requirements: list[Requirement]) -> bool:
+def _has_exact_pin(version: Version, requirements: list[Requirement]) -> bool:
     return any(
         spec.operator in ("==", "===")
         and "*" not in spec.version
@@ -49,14 +50,17 @@ def _dependencies_for_extras(values: list[str], extras: frozenset[str]) -> list[
 
 
 class Provider(AbstractProvider):
-    def __init__(self, configuration: Configuration, installed: dict, update: bool) -> None:
+    def __init__(
+        self, configuration: Configuration, installed: dict, update: bool, pinned: set[str]
+    ) -> None:
         self.configuration = configuration
         self.installed = installed
         self.update = update
+        self.pinned = pinned
 
         self.wheels = WheelCache(configuration.cache)
-        self.index_files = {}
-        self.wheel_metadata = {}
+        self._index_cache = {}
+        self._wheel_metadata = {}
 
     def identify(self, requirement_or_candidate: Requirement | Candidate) -> str:
         return canonicalize_name(requirement_or_candidate.name)
@@ -79,13 +83,19 @@ class Provider(AbstractProvider):
         )
 
     def _index_files(self, name: str) -> list[dict]:
-        cached = self.index_files.get(name)
+        cached = self._index_cache.get(name)
         if cached is not None:
             return cached
 
+        files = self._fetch_index_files(name)
+        self._index_cache[name] = files
+        return files
+
+    def _fetch_index_files(self, name: str) -> list[dict]:
         url = urllib.parse.urljoin(self.configuration.index, name + "/")
         if urllib.parse.urlsplit(url).scheme == "file":
             url += "index.json"
+
         request = urllib.request.Request(
             url,
             headers={
@@ -100,12 +110,12 @@ class Provider(AbstractProvider):
         except urllib.error.HTTPError as error:
             if error.code != 404:
                 raise
-            files = []
-        else:
-            files = data["files"]
-
-        self.index_files[name] = files
-        return files
+            return []
+        except urllib.error.URLError as error:
+            if not isinstance(error.reason, FileNotFoundError):
+                raise
+            return []
+        return data["files"]
 
     def _index_wheels(self, name: str, requirements: list[Requirement]) -> Iterator[Wheel]:
         for file in self._index_files(name):
@@ -119,7 +129,7 @@ class Provider(AbstractProvider):
             if not supports_python(file.get("requires-python")):
                 continue
 
-            if file.get("yanked") and not _is_pinned(version, requirements):
+            if file.get("yanked") and not _has_exact_pin(version, requirements):
                 continue
 
             digest = file.get("hashes", {}).get("sha256", "")
@@ -137,6 +147,8 @@ class Provider(AbstractProvider):
         previous = self.installed.get(name)
         if previous and not self.update:
             yield Candidate(Wheel.from_record(name, previous), extras)
+            if name in self.pinned:
+                return
 
         wheels = sorted(
             self._index_wheels(name, requirements),
@@ -167,10 +179,10 @@ class Provider(AbstractProvider):
     def get_dependencies(self, candidate: Candidate) -> list[Requirement]:
         distribution = candidate.distribution
         if isinstance(distribution, Wheel):
-            metadata = self.wheel_metadata.get(distribution.digest)
+            metadata = self._wheel_metadata.get(distribution.digest)
             if metadata is None:
                 metadata = self.wheels.metadata(distribution)
-                self.wheel_metadata[distribution.digest] = metadata
+                self._wheel_metadata[distribution.digest] = metadata
 
             if not supports_python(metadata.get("Requires-Python")):
                 # An impossible requirement makes resolvelib reject this wheel and try another.
@@ -189,12 +201,28 @@ def _prepare_distribution(cache: WheelCache, wheel: Wheel) -> dict:
     return {"record": wheel.record(), "directory": str(site), "files": files}
 
 
+def _describe_conflict(provider: Provider, cause) -> str:
+    requirement = cause.requirement
+    message = str(requirement)
+    name = canonicalize_name(requirement.name)
+
+    source = provider.configuration.base.get(name)
+    if name in provider.pinned:
+        source = provider.installed[name]
+    if source is not None:
+        message += f" (selected source provides {name}=={source['version']})"
+
+    if parent := cause.parent:
+        message = f"{parent.name}=={parent.version} requires {message}"
+    return message
+
+
 def _resolve_wheels(provider: Provider, roots: list[Requirement]) -> dict[str, Wheel]:
     try:
         resolution = Resolver(provider, BaseReporter()).resolve(roots, max_rounds=1000)
     except ResolutionImpossible as error:
-        causes = ", ".join(str(cause.requirement) for cause in error.causes)
-        raise ValueError(f"No compatible pure-Python wheel set satisfies: {causes}") from None
+        causes = ", ".join(_describe_conflict(provider, cause) for cause in error.causes)
+        raise ValueError(f"Package dependency conflict: {causes}") from None
 
     return {
         name: candidate.distribution
@@ -203,28 +231,69 @@ def _resolve_wheels(provider: Provider, roots: list[Requirement]) -> dict[str, W
     }
 
 
-def _resolution_fingerprint(requirements: list[str], configuration: Configuration) -> str:
+def _resolution_fingerprint(
+    requirements: list[str], configuration: Configuration, overrides: set[str]
+) -> str:
     signature = {
         "requirements": requirements,
         "base": configuration.base,
+        "overrides": sorted(overrides),
         "abi": ABI,
         "index": configuration.index,
     }
     return hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
 
 
+def _select_overrides(request: dict, base: dict) -> tuple[set[str], set[str]]:
+    local = request["local"]
+    installed = request["installed"]
+    overrides = set(installed).difference(request["removed"])
+
+    # An existing local override stays selected until an explicit change replaces it.
+    pinned = set() if request["update"] else set(overrides)
+    for requirement in _requirements(local):
+        name = canonicalize_name(requirement.name)
+        if (previous := installed.get(name)) and not requirement.specifier.contains(
+            previous["version"], prereleases=None
+        ):
+            pinned.discard(name)
+        if (source := base.get(name)) and not requirement.specifier.contains(
+            source["version"], prereleases=None
+        ):
+            overrides.add(name)
+
+    overrides.intersection_update(base)
+    pinned.intersection_update(overrides)
+    return overrides, pinned
+
+
+def _check_base_collisions(distributions: dict, base: dict) -> None:
+    base_files = {file for package in base.values() for file in package["files"]}
+    if not base_files:
+        return
+
+    for distribution in distributions.values():
+        for file in distribution["files"]:
+            if file in base_files:
+                raise ValueError(f"Local package file conflicts with the application base: {file}")
+
+
 def prepare(request: dict, configuration: Configuration) -> dict:
-    requirements = request["requirements"]
-    fingerprint = _resolution_fingerprint(requirements, configuration)
+    overrides, pinned = _select_overrides(request, configuration.base)
+    installed = request["installed"]
+    requirements = request["requirements"] + request["local"]
+    fingerprint = _resolution_fingerprint(requirements, configuration, overrides)
     if request.get("fingerprint") == fingerprint and not request["update"]:
         return {"status": "unchanged"}
 
-    installed = request["installed"]
-    roots = _requirements(
-        requirements
-        + [name + "==" + record["version"] for name, record in configuration.base.items()]
+    roots = _requirements(requirements + list(configuration.base))
+    effective = replace(
+        configuration,
+        base={
+            name: package for name, package in configuration.base.items() if name not in overrides
+        },
     )
-    provider = Provider(configuration, installed, request["update"])
+    provider = Provider(effective, installed, request["update"], pinned)
     wheels = _resolve_wheels(provider, roots)
 
     if not request["replace_files"]:
@@ -237,4 +306,5 @@ def prepare(request: dict, configuration: Configuration) -> dict:
         name: _prepare_distribution(provider.wheels, wheel)
         for name, wheel in sorted(wheels.items())
     }
+    _check_base_collisions(distributions, effective.base)
     return {"status": "resolved", "fingerprint": fingerprint, "distributions": distributions}

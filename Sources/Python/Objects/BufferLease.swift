@@ -29,14 +29,7 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
         in owner: borrowing Owner,
     ) throws {
         let storage = try Interpreter.Storage.requireCurrent()
-        guard let arrayType = storage.arrayType else {
-            throw Session.Error.closed
-        }
-
-        let array = unsafe try arrayType.storage.pointer()
-        guard unsafe CPython_BufferIsSupported(object, isWritable ? 1 : 0, array) != 0 else {
-            throw Self.invalid("Expected bytes, bytearray, array.array or their memoryview.")
-        }
+        unsafe try Self.requireSupported(object, isWritable: isWritable, in: storage)
 
         let view = unsafe try Self.acquire(object, isWritable: isWritable)
         do {
@@ -96,6 +89,22 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
     }
 
     @unsafe
+    private static func requireSupported(
+        _ object: UnsafeMutablePointer<PyObject>,
+        isWritable: Bool,
+        in storage: Interpreter.Storage,
+    ) throws {
+        guard let arrayType = storage.arrayType else {
+            throw Session.Error.closed
+        }
+
+        let array = unsafe try arrayType.storage.pointer()
+        guard unsafe CPython_BufferIsSupported(object, isWritable ? 1 : 0, array) != 0 else {
+            throw invalid("Expected bytes, bytearray, array.array or their memoryview.")
+        }
+    }
+
+    @unsafe
     private static func acquire(
         _ object: UnsafeMutablePointer<PyObject>,
         isWritable: Bool,
@@ -130,6 +139,7 @@ public struct BufferLease<Element: BitwiseCopyable>: ~Copyable, ~Escapable {
         }
 
         unsafe try validateFormat(format)
+
         if
             let start = unsafe view.pointee.buf,
             Int(bitPattern: start) % MemoryLayout<Element>.alignment != 0

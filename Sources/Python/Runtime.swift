@@ -23,6 +23,7 @@ public struct Runtime: Sendable {
         packageIndex: String = "https://pypi.org/simple/",
     ) async throws {
         try await Self.startup.value
+
         let packages = try packages.map { try $0.resolved() }
         let cache = try cacheDirectory.map(Path.init)
         let packaging = Environment.Service.Lazy(
@@ -44,6 +45,10 @@ public struct Runtime: Sendable {
     /// Pass a stable `environmentDirectory` to reuse local packages
     /// across sessions. Call `Session.initialize(redirecting:)` to start Python explicitly.
     ///
+    /// Local installations take precedence over `packages` in the order supplied,
+    /// followed by the runtime's packages. The first source of each distribution
+    /// supplies its version. Incompatible requirements fail during preparation.
+    ///
     /// `directory` and `importPaths` grant read access alongside project and package roots.
     /// The delegate decides other access. Relative OS paths use the process working directory.
     ///
@@ -53,6 +58,7 @@ public struct Runtime: Sendable {
         _ startup: Session.Startup = .source(""),
         directory: String? = nil,
         environmentDirectory: String? = nil,
+        packages: [PackageSource] = [],
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
         transactional: Bool = false,
@@ -62,6 +68,7 @@ public struct Runtime: Sendable {
             startup,
             directory: directory,
             environmentDirectory: environmentDirectory,
+            packages: packages,
             importPaths: importPaths,
             modules: modules,
             moduleDefinitions: [],
@@ -74,6 +81,7 @@ public struct Runtime: Sendable {
         _ startup: Session.Startup = .source(""),
         directory: String? = nil,
         environmentDirectory: String? = nil,
+        packages: [PackageSource] = [],
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
         moduleDefinitions: [Module],
@@ -85,6 +93,7 @@ public struct Runtime: Sendable {
             startup,
             directory: directory.map(Path.init),
             environmentDirectory: environmentDirectory.map(Path.init),
+            packages: packages.map { try $0.resolved() },
             importPaths: importPaths.map(Path.init),
             modules: definitions,
             transactional: transactional,
@@ -96,6 +105,7 @@ public struct Runtime: Sendable {
         _ startup: Session.Startup = .source(""),
         directory: Path?,
         environmentDirectory: Path?,
+        packages: [PackageSource.Resolved] = [],
         importPaths: [Path],
         modules: [Module],
         transactional: Bool = false,
@@ -106,8 +116,10 @@ public struct Runtime: Sendable {
             directory: environmentDirectory,
             projectDirectory: try startup.projectDirectory.map(Path.init),
             requirements: requirements,
+            sessionPackages: packages,
             packaging: packaging,
         )
+
         let executor: Interpreter.Executor
         do {
             try await environment.prepare()
@@ -116,6 +128,7 @@ public struct Runtime: Sendable {
             await environment.close()
             throw error
         }
+
         return Session(
             executor: executor,
             directory: directory,

@@ -17,6 +17,7 @@ extension Environment.Service {
         let preparation = try await request(
             .prepare(
                 requirements: requirements,
+                base: configuration.base,
                 installed: [:],
                 fingerprint: nil,
                 update: false,
@@ -39,7 +40,6 @@ extension Environment.Service {
             try await Environment.stageFiles(
                 resolution,
                 into: sitePackages,
-                baseFiles: configuration.baseFiles,
                 execution: execution,
             )
             if let module {
@@ -64,12 +64,21 @@ extension Environment.Service {
             try await stageArchive(in: directory)
         }
 
+        try await Self.publishBundle(archive, at: destination, execution: execution)
+    }
+
+    private static func publishBundle(
+        _ archive: FilePath,
+        at destination: FilePath,
+        execution: Session.Control,
+    ) async throws {
         let isUnchanged: Bool
         do {
             isUnchanged = try await Self.archiveMatches(archive, at: destination)
         } catch is FileSystemError {
             isUnchanged = false
         }
+
         try execution.finishCheckingInterruption()
         if !isUnchanged {
             try Environment.replace(archive, with: destination)

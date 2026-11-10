@@ -24,10 +24,12 @@ extension Session.Stream {
 
         static func open(_ paths: [Session.Stream: Runtime.Path]) throws -> Descriptors {
             var descriptors = Descriptors()
+
             for stream in [Session.Stream.stdout, .stderr, .stdin] {
                 guard let path = paths[stream]?.file else {
                     continue
                 }
+
                 let descriptor: FileDescriptor = if stream == .stdin {
                     try .open(path, .readOnly, options: .closeOnExec)
                 } else {

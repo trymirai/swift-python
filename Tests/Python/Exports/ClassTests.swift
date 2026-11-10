@@ -61,8 +61,10 @@ private class Counter {
 
         if linkToSelf {
             try self.$next(self)
+            // The construction scope keeps the self-linked wrapper alive during collection.
             _ = try context.import(module: "gc").attribute("collect").call()
         }
+
         guard value >= 0 else {
             throw Python::Exception(
                 name: "ValueError",
@@ -300,6 +302,10 @@ func classIdentityAndSessionGenerations() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [LabeledCounterModule.self])
     let other = try await runtime.session(modules: [LabeledCounterModule.self])
+    defer {
+        await session.close()
+        await other.close()
+    }
 
     let peer = ExistingInstance()
     try await session.set(peer, forKey: "peer")
@@ -328,8 +334,6 @@ func classIdentityAndSessionGenerations() async throws {
     try await session.reset()
     await #expect(throws: Python::Exception.self) { try await session.set(peer, forKey: "peer") }
     await #expect(throws: Python::Exception.self) { try await managed { $0.number } }
-    await session.close()
-    await other.close()
 }
 
 // MARK: - CheckpointModule
@@ -430,9 +434,14 @@ func checkpointedEvaluationRestoresOriginalPythonAndSwiftObjects() async throws 
     #expect(restored.end == .finished)
 }
 
+// MARK: - PublicationError
+
+private enum PublicationError: Swift::Error, Equatable {
+    case failed
+}
+
 @Test(.timeLimit(.minutes(3)))
 func rollbackKeepsAnotherInterpreterAlive() async throws {
-    enum PublicationError: Swift::Error, Equatable { case failed }
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(transactional: true)
     let other = try await runtime.session()
@@ -461,7 +470,6 @@ func rollbackKeepsAnotherInterpreterAlive() async throws {
 
 @Test(.timeLimit(.minutes(3)))
 func checkpointedEvaluationWaitsForHostPublication() async throws {
-    enum PublicationError: Swift::Error, Equatable { case failed }
     let python = try await Python::Runtime()
     let session = try await python.session(.source("values = [1]"), transactional: true)
     defer { await session.close() }

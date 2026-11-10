@@ -17,11 +17,12 @@ public actor Session {
     private var importPaths: [Runtime.Path]
 
     private let startup: Startup
-    nonisolated let transactional: Bool
     private let modules: [Module]
-    private var delegate: (any Delegate)?
+    nonisolated let transactional: Bool
 
+    private var delegate: (any Delegate)?
     private(set) var environment: Environment?
+
     private var state: State = .idle
 
     /// Output from startup. Reset clears it, and close preserves the last captured value.
@@ -79,9 +80,6 @@ public actor Session {
             paths.append(directory.string)
         }
         paths.append(contentsOf: importPaths.lazy.map(\.string))
-        if let sitePackagesPath = environment?.sitePackagesPath {
-            paths.append(sitePackagesPath)
-        }
         return paths
     }
 
@@ -94,11 +92,12 @@ public actor Session {
         }
         try Task.checkCancellation()
 
+        let packages = try resolvedPackageSources()
         let opened = try Interpreter(
             execution: execution,
             importPaths: resolvedImportPaths,
             modules: modules,
-            packages: environment?.packaging.packages ?? [],
+            packages: packages,
             transactional: transactional,
             scheduleRelease: { [weak self] in Task { await self?.releasePendingReferences() } },
             session: self,
@@ -112,6 +111,14 @@ public actor Session {
             execution: execution,
         )
         state = .ready(consume opened, output)
+    }
+
+    private func resolvedPackageSources() throws -> [Runtime.PackageSource.Resolved] {
+        var packages = environment?.packageSources ?? []
+        if let sitePackagesPath = environment?.sitePackagesPath {
+            packages.insert(.directory(try Runtime.Path(sitePackagesPath)), at: 0)
+        }
+        return packages
     }
 
     private func releasePendingReferences() {

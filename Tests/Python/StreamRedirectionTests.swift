@@ -108,6 +108,7 @@ func fileBackedStreamsUseHostFileAccess() async throws {
         let session = try await runtime.session()
         defer { await session.close() }
 
+        let redirects: [Python::Session.Stream: FilePath] = [.stdout: stdout]
         _ = try await session.evaluate("""
         import builtins, io
 
@@ -115,7 +116,7 @@ func fileBackedStreamsUseHostFileAccess() async throws {
             raise PermissionError("managed file access")
 
         builtins.open = io.open = managed_open
-        """, redirecting: [.stdout: stdout])
+        """, redirecting: redirects)
 
         _ = try await session.evaluate("""
         print("host stream")
@@ -125,7 +126,7 @@ func fileBackedStreamsUseHostFileAccess() async throws {
             pass
         else:
             raise AssertionError("The user file adapter was bypassed")
-        """, redirecting: [.stdout: stdout])
+        """, redirecting: redirects)
         #expect(try await readOutput(at: stdout) == Array("host stream\n".utf8))
     }
 }

@@ -44,10 +44,11 @@ extension Session {
 
         private func waitForTurn() async throws {
             let ticket = Ticket()
+
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     let result = state.withLock { state -> Swift::Result<Void, any Swift::Error>? in
-                        // Check under the same lock used by the cancellation handler.
+                        // Check under the queue lock in case cancellation ran before enqueueing.
                         if Task.isCancelled {
                             return .failure(CancellationError())
                         }

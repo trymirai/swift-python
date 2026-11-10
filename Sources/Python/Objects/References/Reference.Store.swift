@@ -120,18 +120,8 @@ private extension Reference.Store {
         }
 
         mutating func enqueueRelease(of token: UInt64) -> Bool {
-            let pointer: UInt
-            if let created = checkpoint?.pointersByToken.removeValue(forKey: token) {
-                pointer = created
-            } else {
-                guard let existing = pointersByToken.removeValue(forKey: token) else {
-                    return false
-                }
-                if checkpoint != nil {
-                    checkpoint?.releases.append(existing)
-                    return false
-                }
-                pointer = existing
+            guard let pointer = removeForRelease(token) else {
+                return false
             }
 
             pendingReleases.append(pointer)
@@ -140,6 +130,21 @@ private extension Reference.Store {
             }
             isScheduled = true
             return true
+        }
+
+        private mutating func removeForRelease(_ token: UInt64) -> UInt? {
+            if let created = checkpoint?.pointersByToken.removeValue(forKey: token) {
+                return created
+            }
+            guard let pointer = pointersByToken.removeValue(forKey: token) else {
+                return nil
+            }
+            if checkpoint != nil {
+                // A baseline reference is still included in the saved refcounts.
+                checkpoint?.releases.append(pointer)
+                return nil
+            }
+            return pointer
         }
 
         mutating func takePendingReleases() -> [UInt] {
@@ -158,8 +163,9 @@ private extension Reference.Store {
             guard var saved = exchange(&checkpoint, with: nil) else {
                 preconditionFailure("A Python reference checkpoint is not active.")
             }
+
             let pending = takePendingReleases()
-            // Rollback restores refcounts. Only commit applies speculative releases.
+            // Rollback already undoes the retains made during the block.
             if !restoring {
                 pointersByToken.merge(saved.pointersByToken) { _, _ in
                     preconditionFailure("A Python reference token cannot be reused.")

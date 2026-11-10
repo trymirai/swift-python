@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-// Encode directly into CF-owned storage; no temporary DER buffer crosses the FFI boundary.
 static SecCertificateRef
 copy_sec_certificate(X509 *certificate)
 {
@@ -17,6 +16,8 @@ copy_sec_certificate(X509 *certificate)
     if (data == NULL) {
         return NULL;
     }
+
+    // OpenSSL writes the DER directly into Core Foundation's storage.
     CFDataSetLength(data, size);
     unsigned char *bytes = CFDataGetMutableBytePtr(data);
     SecCertificateRef result = NULL;
@@ -90,16 +91,15 @@ create_system_trust(X509_STORE_CTX *context, X509 *leaf)
     return trust;
 }
 
-static STACK_OF(X509) *
-copy_x509_chain(CFArrayRef certificates, CFIndex first, CFIndex end)
+static STACK_OF(X509) * copy_x509_chain(CFArrayRef certificates, CFIndex first, CFIndex end)
 {
     STACK_OF(X509) *result = sk_X509_new_null();
     if (result == NULL) {
         return NULL;
     }
     for (CFIndex index = first; index < end; index++) {
-        X509 *certificate =
-            CPython_CopyX509Certificate((SecCertificateRef)CFArrayGetValueAtIndex(certificates, index));
+        X509 *certificate = CPython_CopyX509Certificate(
+            (SecCertificateRef)CFArrayGetValueAtIndex(certificates, index));
         if (certificate == NULL || !sk_X509_push(result, certificate)) {
             X509_free(certificate);
             sk_X509_pop_free(result, X509_free);
@@ -141,8 +141,7 @@ verify_system_chain(X509_STORE_CTX *context, CFArrayRef chain, CFIndex count)
 static int
 verify_with_system_policy(X509_STORE_CTX *context, SecTrustRef trust)
 {
-    // Verification must not introduce hidden network requests. The peer chain and system cache
-    // suffice.
+    // Limit verification to the peer chain and the system cache.
     OSStatus status = SecTrustSetNetworkFetchAllowed(trust, false);
     X509_VERIFY_PARAM *parameters = X509_STORE_CTX_get0_param(context);
     if (status == errSecSuccess &&

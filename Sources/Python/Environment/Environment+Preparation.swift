@@ -69,7 +69,10 @@ extension Environment {
         )
 
         let request = Service.Request.prepare(
-            requirements: project + requirements + local.ordered,
+            requirements: project + requirements,
+            base: configuration.base,
+            local: local.ordered,
+            removed: local.removed,
             installed: previous.packages,
             fingerprint: previous.fingerprint,
             update: change.updatesInstalledVersions,
@@ -88,21 +91,12 @@ extension Environment {
             resolution = resolved
         }
 
-        var next = previous
-        next.local = local.byName
-        if let resolution {
-            next.fingerprint = resolution.fingerprint
-            next.packages = resolution.distributions.mapValues(\.record)
-        }
-
-        let replacesFiles = !next.hasSameWheels(as: previous)
-        if !replacesFiles, let resolution {
-            try Self.validateBaseFiles(resolution, against: configuration.baseFiles)
-        }
-
+        let next = previous.updating(local: local.byName, resolution: resolution)
         guard next != previous else {
             return .applied
         }
+
+        let replacesFiles = !next.hasSameWheels(as: previous)
         try await save(
             next,
             replacingFiles: replacesFiles ? resolution : nil,
@@ -119,9 +113,24 @@ extension Environment {
         configuration: Configuration,
         using service: Service,
         execution: Session.Control,
-    ) async throws -> (byName: [String: String], ordered: [String]) {
+    ) async throws -> (byName: [String: String], ordered: [String], removed: [String]) {
         var byName = manifest.local
         var order = byName.keys.sorted()
+        var removed = [String]()
+
+        func remove(_ name: String) throws {
+            let isSupplied = configuration.base[name] != nil
+            let overridesBase = isSupplied && manifest.packages[name] != nil
+            guard byName.removeValue(forKey: name) != nil || overridesBase else {
+                let message = if isSupplied {
+                    "Package '\(name)' belongs to a supplied source and cannot be uninstalled locally"
+                } else {
+                    "Package '\(name)' is required by the project or another package"
+                }
+                throw Exception(name: "ValueError", message: message)
+            }
+            removed.append(name)
+        }
 
         switch change {
         case let .install(requirements):
@@ -140,24 +149,13 @@ extension Environment {
                 execution: execution,
             )
             for name in names {
-                guard configuration.baseVersions[name] == nil else {
-                    throw Exception(
-                        name: "ValueError",
-                        message: "Application package '\(name)' cannot be uninstalled locally",
-                    )
-                }
-                guard byName.removeValue(forKey: name) != nil else {
-                    throw Exception(
-                        name: "ValueError",
-                        message: "Package '\(name)' is required by the project or another package",
-                    )
-                }
+                try remove(name)
             }
         case .resolve, .update:
             break
         }
 
         // Among local requirements, saved names precede newly added names.
-        return (byName, order.compactMap { byName[$0] })
+        return (byName, order.compactMap { byName[$0] }, removed)
     }
 }

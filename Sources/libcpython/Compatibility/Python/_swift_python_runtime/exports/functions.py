@@ -40,12 +40,12 @@ def _bind_parameters(parameters, native: bool) -> tuple[str, str, list, list[Par
     names = []
     declarations = []
     defaults = []
-
     visible = []
 
     for parameter, annotation, has_default, default in parameters:
         parameter = identifier(parameter)
         names.append(parameter)
+
         declaration = f"{parameter}: {annotation!r}" if annotation else parameter
         bound_default = _DEFAULT if native else default
 
@@ -77,6 +77,7 @@ class FunctionFactory:
     def create(self, record, module: ModuleType, *, member: bool = False):
         name, documentation, returns, asynchronous, parameters, native, index = record
         name = identifier(name)
+
         if member and is_reserved_member(name):
             raise ValueError("Native classes do not export Python special methods")
 

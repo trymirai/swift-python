@@ -20,7 +20,6 @@ extension Session.Control {
             var reader: Int32 = -1
             var writer: Int32 = -1
             // Swift System's closeOnExec pipe option requires Apple OS 27.
-            // Keep this initializer for the 26.4 deployment baseline.
             let status = unsafe CPython_NewPipe(&reader, &writer)
             guard status == 0 else {
                 throw Errno(rawValue: status)

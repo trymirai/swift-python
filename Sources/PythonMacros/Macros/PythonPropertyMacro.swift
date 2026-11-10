@@ -72,19 +72,11 @@ struct PythonPropertyMacro: PeerMacro {
         }
 
         let (type, field) = try property.storageSource()
+        let accessLevels = ["private", "fileprivate", "internal", "package", "public", "open"]
         let access = property.variable
             .modifiers
-            .first {
-                [
-                    "private",
-                    "fileprivate",
-                    "internal",
-                    "package",
-                    "public",
-                    "open",
-                ]
-                .contains($0.name.text)
-            }?.name
+            .first { accessLevels.contains($0.name.text) }?
+            .name
             .text
 
         let writeMethods = writeMethods(for: property, type: type, field: field, access: access)

@@ -40,15 +40,13 @@ struct Interpreter: ~Copyable {
         storage.session = session
 
         let packagePaths = try pThread.withAttached(execution: execution) { attachment in
-            let posix = try Object.import(module: "posix", in: attachment)
-            try Object.check(
-                unsafe CPython_RestrictPOSIXModule(posix.pointer),
-                "Unable to restrict the POSIX module.",
-            )
-            try Object.installImporter(in: attachment)
+            try Self.prepareImports(in: attachment)
             let packagePaths = try Self.installPackages(packages, in: attachment)
 
-            try Self.configureExecution(importPaths: importPaths + packagePaths, in: attachment)
+            try Self.configureExecution(
+                importPaths: Self.searchPaths(importPaths, packages: packagePaths),
+                in: attachment,
+            )
 
             try Self.cacheArrayType(in: attachment)
             try Self.installExports(modules, in: attachment)
@@ -67,7 +65,8 @@ struct Interpreter: ~Copyable {
         try pThread.withAttached(execution: execution) { attachment in
             let module = try Object.import(module: "_swift_python_runtime.imports", in: attachment)
             let update = try module.attribute("update_imports")
-            _ = try update.call(Object(encoding: [paths + packagePaths, modules], in: attachment))
+            let searchPaths = Self.searchPaths(paths, packages: packagePaths)
+            _ = try update.call(Object(encoding: [searchPaths, modules], in: attachment))
         }
         pThread.storage.fileAccess?.replaceImportPaths(paths)
     }
@@ -88,6 +87,20 @@ struct Interpreter: ~Copyable {
 }
 
 private extension Interpreter {
+    static func searchPaths(_ imports: [String], packages: [String]) -> [String] {
+        let packagePaths = Set(packages)
+        return imports.filter { !packagePaths.contains($0) } + packages
+    }
+
+    static func prepareImports(in attachment: borrowing PThread.Attachment) throws {
+        let posix = try Object.import(module: "posix", in: attachment)
+        try Object.check(
+            unsafe CPython_RestrictPOSIXModule(posix.pointer),
+            "Unable to restrict the POSIX module.",
+        )
+        try Object.installImporter(in: attachment)
+    }
+
     static func installPackages(
         _ packages: [Runtime.PackageSource.Resolved],
         in attachment: borrowing PThread.Attachment,

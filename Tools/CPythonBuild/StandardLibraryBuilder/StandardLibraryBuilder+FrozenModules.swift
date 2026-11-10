@@ -17,6 +17,7 @@ extension StandardLibraryBuilder {
             let frozenHeaders = Set(upstream.split(separator: "\n").compactMap { line in
                 line.hasPrefix(include) ? String(line.dropFirst(include.count).dropLast()) : nil
             })
+
             let frozenSource = upstream.replacing(
                 include,
                 with: "#include \"Bootstrap/Python/frozen_modules/",

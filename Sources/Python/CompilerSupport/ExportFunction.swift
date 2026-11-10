@@ -25,6 +25,7 @@ public struct _ExportFunction: Sendable {
 
     let name: String
     let documentation: String?
+
     let parameters: [Parameter]
     let returnAnnotation: String?
 

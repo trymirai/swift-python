@@ -7,8 +7,7 @@ import SystemPackage
 
 extension StandardLibraryBuilder {
     func buildFreezer() async throws -> FilePath {
-        // Host compilation must not inherit SwiftBuild's destination SDK/deployment
-        // variables: a Linux/iOS build still needs a runnable host C freezer.
+        // The freezer runs on the build host, even when SwiftBuild targets another platform.
         let hostEnvironment = Environment.custom([
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "LC_ALL": "C",
@@ -102,8 +101,9 @@ extension StandardLibraryBuilder {
         environment: Environment,
     ) async throws {
         workspace.logger.info("Configuring the CPython host freezer")
+        let configure = workspace.sourceDirectory.appending("configure")
         let result = try await Subprocess::run(
-            .path(.init(workspace.sourceDirectory.appending("configure").string)),
+            .path(.init(configure.string)),
             arguments: [
                 "--quiet",
                 "--build=\(host)",

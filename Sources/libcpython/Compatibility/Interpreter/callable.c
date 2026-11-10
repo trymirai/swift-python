@@ -6,6 +6,7 @@
 
 typedef struct {
     HostValue lifetime;
+
     pthread_t thread;
 
     void *context;
@@ -64,7 +65,9 @@ CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *ar
     }
     *function = (SwiftFunction){
         .lifetime = {.dispose = free_function},
+
         .thread = pthread_self(),
+
         .context = context,
         .call = call,
         .destroy = destroy,

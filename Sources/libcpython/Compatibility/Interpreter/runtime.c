@@ -9,6 +9,7 @@ CPython_InitializeRuntime(void)
     if (CPython_InstallFileAudit() < 0) {
         return PyStatus_Error("Unable to install the Python file audit hook.");
     }
+
     PyConfig config;
     PyConfig_InitIsolatedConfig(&config);
 
@@ -18,6 +19,7 @@ CPython_InitializeRuntime(void)
 
     PyStatus status = CPython_Initialize(&config);
     PyConfig_Clear(&config);
+
     if (!PyStatus_Exception(status)) {
         CPython_InstallHeapTracking();
     }
@@ -48,6 +50,7 @@ CPython_NewThreadState(PyThreadState **state, CPython_Heap **heap)
     if (heap != NULL) {
         *heap = NULL;
     }
+
     PyThreadState *bootstrap = PyThreadState_New(PyInterpreterState_Main());
     if (bootstrap == NULL) {
         return PyStatus_NoMemory();
@@ -73,7 +76,9 @@ CPython_NewThreadState(PyThreadState **state, CPython_Heap **heap)
 
     PyEval_RestoreThread(bootstrap);
     CPython_BindHeap(tracking);
+
     PyStatus status = Py_NewInterpreterFromConfig(state, &config);
+
     CPython_BindHeap(NULL);
     delete_bootstrap_state(bootstrap, *state != NULL);
 

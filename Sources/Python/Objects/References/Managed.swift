@@ -4,7 +4,7 @@
 
 // MARK: - Managed
 
-/// Retains an exported instance's Python object and accesses it on its session.
+/// Holds an exported instance's Python wrapper and resolves it on the owning session.
 public struct Managed<Instance: _PClass>: Sendable {
     private let session: Session
     private let reference: Reference
@@ -26,7 +26,7 @@ public struct Managed<Instance: _PClass>: Sendable {
 }
 
 public extension Managed where Instance: Sendable {
-    /// Resolves the instance on its session before running asynchronous Swift code.
+    /// Resolves the instance on its session and retains its wrapper across suspension.
     func callAsFunction<Result: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Instance) async throws -> Result,
     ) async throws -> Result {

@@ -1,11 +1,13 @@
 """Integrate archive modules, resources and distributions with importlib."""
 
 import importlib.metadata
+import os
 from _frozen_importlib_external import SourceLoader
 from importlib.machinery import ModuleSpec
+from importlib.machinery import PathFinder as ImportPathFinder
 from importlib.util import spec_from_file_location
 
-from .archive import Archive
+from .archive import Archive, normalize_name
 from .resources import Resource, ResourceReader
 
 
@@ -37,7 +39,7 @@ class PathFinder:
         self.path = path
 
     def find_spec(self, fullname: str, target=None) -> ModuleSpec | None:
-        path = fullname.replace(".", "/")
+        path = (self.path + "/" + fullname.rsplit(".", 1)[-1]).lstrip("/")
 
         for candidate in (path + "/__init__.py", path + ".py"):
             if candidate in self.archive.names:
@@ -66,17 +68,54 @@ class PathFinder:
                 yield prefix + name, True
 
 
-class MetadataFinder:
-    def __init__(self, archives: list[Archive]) -> None:
-        self.archives = archives
+class FilteredFinder:
+    """Hide modules owned by a distribution superseded in an earlier root."""
 
-    def find_spec(self, fullname: str, path=None, target=None) -> None:
-        return None
+    def __init__(self, finder, hidden: set[str]) -> None:
+        self.finder = finder
+        self.hidden = hidden
+
+    def find_spec(self, fullname: str, target=None) -> ModuleSpec | None:
+        spec = self.finder.find_spec(fullname, target)
+        if spec is not None and spec.origin is not None:
+            if os.path.normpath(spec.origin) in self.hidden:
+                return None
+        return spec
+
+    def __getattr__(self, name: str):
+        return getattr(self.finder, name)
+
+    def iter_modules(self, prefix: str = ""):
+        from pkgutil import iter_importer_modules
+
+        for name, is_package in iter_importer_modules(self.finder):
+            if self.find_spec(name) is not None:
+                yield prefix + name, is_package
+
+
+class MetadataFinder(ImportPathFinder):
+    def __init__(self, paths, selected) -> None:
+        self.packages = {path: {} for path in paths}
+
+        for name, (path, distribution) in selected.items():
+            self.packages[path][name] = distribution
 
     def find_distributions(
         self,
         context: importlib.metadata.DistributionFinder.Context = importlib.metadata.DistributionFinder.Context(),
     ):
-        for archive in self.archives:
-            if archive.root in context.path:
-                yield from archive.distributions(context.name)
+        name = normalize_name(context.name) if context.name is not None else None
+
+        for path in dict.fromkeys(context.path):
+            packages = self.packages.get(path)
+            if packages is None:
+                yield from directory_distributions(path, context.name)
+            elif name is None:
+                yield from packages.values()
+            elif name in packages:
+                yield packages[name]
+
+
+def directory_distributions(path: str, name: str | None = None):
+    context = importlib.metadata.DistributionFinder.Context(path=[path], name=name)
+    return ImportPathFinder.find_distributions(context)

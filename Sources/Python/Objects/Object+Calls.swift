@@ -74,11 +74,13 @@ extension Object {
         using execution: Session.Control,
     ) throws -> Object {
         let context = unsafe Unmanaged.passUnretained(execution).toOpaque()
+
         execution.beginEvaluation(in: CPython_InterpreterKey(nil))
         defer {
             execution.endEvaluation()
             withExtendedLifetime(execution) {}
         }
+
         let result = arguments.withUnsafeBufferPointer { arguments in
             unsafe CPython_CallInterruptibly(
                 pointer,

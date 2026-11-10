@@ -35,8 +35,9 @@ extension PythonInitMacro: PeerMacro {
                 "PythonInit must be synchronous, non-generic and non-failable; throwing is supported.",
             )
         }
+
+        // The function exporter needs the constructed class as the result type.
         var method = FunctionDeclSyntax(name: .identifier("init"), signature: initializer.signature)
-        // The parsed initializer signature has no result clause; attach the concrete class result.
         method.signature
             .returnClause = ReturnClauseSyntax(type: TypeSyntax(stringLiteral: owner.name))
         let function = try FunctionExpansion(declaration: method, owner: owner)

@@ -14,6 +14,7 @@ extension Interpreter {
         try pThread.withAttached { attachment in
             let storage = attachment.storage
             precondition(storage.checkpoint == .inactive)
+
             guard CPython_BeginFileCheckpoint() == 0 else {
                 throw Runtime.Failure("Unable to checkpoint the file descriptors.")
             }
@@ -21,6 +22,7 @@ extension Interpreter {
                 CPython_FinishFileCheckpoint(true)
                 throw Runtime.Failure("Unable to capture the Python interpreter checkpoint.")
             }
+
             storage.references.beginCheckpoint()
             storage.classRegistry?.beginCheckpoint()
             storage.checkpoint = .active

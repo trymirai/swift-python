@@ -27,14 +27,15 @@ struct FunctionExpansion {
         let metadata = (isInstanceMethod ? [".receiver"] : []) + parameters.map(\.metadataSource)
 
         let receiver = isInstanceMethod ? "__self" : owner.name
+        let receiverBinding = isInstanceMethod
+            ? "let __self = try arguments.receiver(as: \(owner.name).self)"
+            : ""
+
         let invocation = invocationSource(
             receiver: receiver,
             parameters: parameters,
             isAsynchronous: isAsynchronous,
         )
-        let receiverBinding = isInstanceMethod
-            ? "let __self = try arguments.receiver(as: \(owner.name).self)"
-            : ""
         let body = callBody(
             invoking: invocation,
             returning: returnType,

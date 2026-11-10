@@ -5,7 +5,7 @@
 // MARK: - Runtime.PackageSource
 
 public extension Runtime {
-    /// An immutable source of application-wide Python packages.
+    /// An immutable source of installed Python packages for a runtime or session.
     enum PackageSource: Sendable {
         /// An existing site-packages directory, including distribution metadata.
         case directory(String)
