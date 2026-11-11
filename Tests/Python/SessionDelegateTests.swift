@@ -33,7 +33,7 @@ private actor RecordingFileAccessDelegate: Python::Session.Delegate {
 
 @Test(.timeLimit(.minutes(1)))
 func sessionDelegateChecksNativeFileOpens() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+    try await withTemporaryDirectory { directory in
         let readableName = RecordingFileAccessDelegate.readableName
         let protectedName = RecordingFileAccessDelegate.protectedName
         let readable = directory.appending(readableName)
@@ -90,7 +90,7 @@ func sessionDelegateChecksNativeFileOpens() async throws {
 
 @Test(.timeLimit(.minutes(1)))
 func hostStreamsBypassPathOpenDelegate() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+    try await withTemporaryDirectory { directory in
         let input = directory.appending(RecordingFileAccessDelegate.readableName)
         let log = directory.appending(RecordingFileAccessDelegate.protectedName)
         try await "input\n".write(toFileAt: input)
@@ -138,7 +138,7 @@ func hostStreamsBypassPathOpenDelegate() async throws {
 
 @Test(.timeLimit(.minutes(1)))
 func standaloneScriptUsesOneDelegateForSourceAndPythonFileAccess() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+    try await withTemporaryDirectory { directory in
         let script = directory.appending(RecordingFileAccessDelegate.scriptName)
         let protected = directory.appending(RecordingFileAccessDelegate.protectedName)
         try await "keep".write(toFileAt: protected)
@@ -201,7 +201,8 @@ private actor SuspendedFileAccessDelegate: Python::Session.Delegate {
     let path: FilePath
     let entered: AsyncStream<Void>.Continuation
 
-    private(set) var cancelled = false
+    private let suspended: AsyncStream<Void> = .init { _ in }
+    private(set) var cancelled: Bool = false
 
     init(path: FilePath, entered: AsyncStream<Void>.Continuation) {
         self.path = path
@@ -216,7 +217,8 @@ private actor SuspendedFileAccessDelegate: Python::Session.Delegate {
         entered.yield(())
         defer { cancelled = Task.isCancelled }
 
-        try await Task.sleep(for: .seconds(30))
+        for await _ in suspended {}
+        try Task.checkCancellation()
         return true
     }
 }
@@ -231,7 +233,7 @@ private enum FileOpenInterruption: CaseIterable {
 
 @Test(.timeLimit(.minutes(1)), arguments: FileOpenInterruption.allCases)
 private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterruption) async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+    try await withTemporaryDirectory { directory in
         let path = directory.appending("delegate-cancelled.txt")
         let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         defer { entered.continuation.finish() }
@@ -285,7 +287,7 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
 
 @Test(.timeLimit(.minutes(1)), arguments: [false, true])
 func closingASessionPreservesItsFileAccessPolicy(hasDelegate: Bool) async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+    try await withTemporaryDirectory { directory in
         let protected = directory.appending(RecordingFileAccessDelegate.protectedName)
         try await "keep".write(toFileAt: protected)
 

@@ -123,27 +123,33 @@ extension Environment.Service {
         to destination: FilePath,
         execution: Session.Control,
     ) async throws {
-        let files = FileSystem.shared
         for entry in try await projectEntries(in: source) {
             try execution.checkInterruption()
+            try await copyProjectEntry(entry, to: destination, execution: execution)
+        }
+    }
 
-            let name = entry.name.string
-            let target = destination.appending(entry.name)
-            guard let info = try await files.info(forFileAt: entry.path) else {
-                throw Exception(name: "FileNotFoundError", message: entry.path.string)
+    private static func copyProjectEntry(
+        _ entry: DirectoryEntry,
+        to destination: FilePath,
+        execution: Session.Control,
+    ) async throws {
+        let files = FileSystem.shared
+        let name = entry.name.string
+        let target = destination.appending(entry.name)
+        guard let info = try await files.info(forFileAt: entry.path) else {
+            throw Exception(name: "FileNotFoundError", message: entry.path.string)
+        }
+
+        if info.type == .directory {
+            // A directory link can escape the project tree or form a cycle.
+            let link = try await files.info(forFileAt: entry.path, infoAboutSymbolicLink: true)
+            guard link?.type != .symlink else {
+                return
             }
-            if info.type == .directory {
-                // A directory link can escape the project tree or form a cycle.
-                guard
-                    try await files.info(forFileAt: entry.path, infoAboutSymbolicLink: true)?
-                        .type != .symlink
-                else {
-                    continue
-                }
-                try await copyDirectory(entry.path, to: target, execution: execution)
-            } else if !name.hasSuffix(".pyc") && !name.hasSuffix(".pyo") {
-                try await copyProjectFile(entry.path, to: target)
-            }
+            try await copyDirectory(entry.path, to: target, execution: execution)
+        } else if !name.hasSuffix(".pyc") && !name.hasSuffix(".pyo") {
+            try await copyProjectFile(entry.path, to: target)
         }
     }
 
@@ -182,11 +188,9 @@ extension Environment.Service {
         at destination: FilePath,
     ) async throws -> Bool {
         let files = FileSystem.shared
+        let existing = try await files.info(forFileAt: destination, infoAboutSymbolicLink: true)
         guard
-            let existing = try await files.info(
-                forFileAt: destination,
-                infoAboutSymbolicLink: true,
-            ),
+            let existing,
             existing.type == .regular,
             try await files.info(forFileAt: archive)?.size == existing.size
         else {

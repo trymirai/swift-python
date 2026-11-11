@@ -42,6 +42,12 @@ CPython_SetSubprocesses(CPython_Subprocesses *scope)
     current = scope;
 }
 
+CPython_Subprocesses *
+CPython_CurrentSubprocesses(void)
+{
+    return current;
+}
+
 bool
 CPython_AllowsSubprocesses(void)
 {

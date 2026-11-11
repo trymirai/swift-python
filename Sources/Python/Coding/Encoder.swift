@@ -41,15 +41,7 @@ public struct Encoder: ~Copyable, ~Escapable {
     public mutating func encode(_ value: consuming Object) throws {
         _ = try Interpreter.Storage.requireCurrent()
         let pointer = unsafe value.release()
-
-        let output: Output = if unsafe CPython_ValueTypeOf(pointer) == CPython_ValueDictionary {
-            unsafe .dictionary(pointer)
-        } else if unsafe CPython_IsList(pointer) {
-            unsafe .list(pointer)
-        } else {
-            unsafe .value(pointer)
-        }
-        unsafe assign(output)
+        unsafe assign(Output(pointer))
     }
 
     public mutating func encode(_ value: Bool) throws {
@@ -263,6 +255,16 @@ private extension Encoder {
         case value(UnsafeMutablePointer<PyObject>)
         case list(UnsafeMutablePointer<PyObject>)
         case dictionary(UnsafeMutablePointer<PyObject>)
+
+        init(_ pointer: UnsafeMutablePointer<PyObject>) {
+            if unsafe CPython_ValueTypeOf(pointer) == CPython_ValueDictionary {
+                unsafe self = .dictionary(pointer)
+            } else if unsafe CPython_IsList(pointer) {
+                unsafe self = .list(pointer)
+            } else {
+                unsafe self = .value(pointer)
+            }
+        }
 
         var pointer: UnsafeMutablePointer<PyObject> {
             switch unsafe self {

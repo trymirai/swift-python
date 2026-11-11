@@ -13,6 +13,7 @@ typedef struct {
 
 struct CPython_Heap {
     unsigned char *snapshot;
+    HostValueCheckpoint host_values;
 };
 
 typedef struct {
@@ -31,10 +32,12 @@ typedef struct {
 static pthread_mutex_t ledger_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic size_t heap_count;
 
-static Allocation *ledger;
-static size_t capacity;
-static size_t count;
-static size_t occupied; // Includes tombstones, which lengthen lookups.
+static struct {
+    Allocation *slots;
+    size_t capacity;
+    size_t count;
+    size_t occupied; // Includes tombstones, which lengthen lookups.
+} ledger;
 
 static Domain domains[3];
 
@@ -43,6 +46,8 @@ static _Thread_local CPython_Heap *active_heap;
 static _Thread_local bool in_allocator;
 
 enum { empty = 0, deleted = 1 };
+
+// Allocation ledger. Callers hold ledger_lock while reading or changing entries.
 
 static Allocation *
 find_slot(Allocation *slots, size_t slot_count, uintptr_t address)
@@ -71,45 +76,45 @@ rebuild_ledger(size_t target)
     if (slots == NULL) {
         return false;
     }
-    for (size_t index = 0; index < capacity; index++) {
-        Allocation *slot = &ledger[index];
+    for (size_t index = 0; index < ledger.capacity; index++) {
+        Allocation *slot = &ledger.slots[index];
         if (slot->address > deleted) {
             *find_slot(slots, target, slot->address) = *slot;
         }
     }
-    free(ledger);
-    ledger = slots;
-    capacity = target;
-    occupied = count;
+    free(ledger.slots);
+    ledger.slots = slots;
+    ledger.capacity = target;
+    ledger.occupied = ledger.count;
     return true;
 }
 
 static bool
 reserve_slot(void)
 {
-    if (occupied < capacity / 2) {
+    if (ledger.occupied < ledger.capacity / 2) {
         return true;
     }
-    if (capacity == 0) {
+    if (ledger.capacity == 0) {
         return rebuild_ledger(1024);
     }
 
-    // Rehash at the current capacity if tombstones account for most of the occupied slots.
-    if (count < capacity / 4) {
-        return rebuild_ledger(capacity);
+    // Reuse the capacity when tombstones account for most occupied slots.
+    if (ledger.count < ledger.capacity / 4) {
+        return rebuild_ledger(ledger.capacity);
     }
-    return capacity <= SIZE_MAX / sizeof(Allocation) / 2 && rebuild_ledger(capacity * 2);
+    return ledger.capacity <= SIZE_MAX / sizeof(Allocation) / 2 && rebuild_ledger(ledger.capacity * 2);
 }
 
 static Allocation *
 lookup(void *pointer)
 {
-    if (pointer == NULL || capacity == 0) {
+    if (pointer == NULL || ledger.capacity == 0) {
         return NULL;
     }
 
     uintptr_t address = (uintptr_t)pointer;
-    Allocation *slot = find_slot(ledger, capacity, address);
+    Allocation *slot = find_slot(ledger.slots, ledger.capacity, address);
     return slot->address == address ? slot : NULL;
 }
 
@@ -120,10 +125,10 @@ record(Domain *domain, CPython_Heap *owner, void *pointer, size_t size)
         return;
     }
     uintptr_t address = (uintptr_t)pointer;
-    Allocation *slot = find_slot(ledger, capacity, address);
+    Allocation *slot = find_slot(ledger.slots, ledger.capacity, address);
     assert(slot->address <= deleted);
-    occupied += slot->address == empty;
-    count++;
+    ledger.occupied += slot->address == empty;
+    ledger.count++;
     *slot = (Allocation){
         .address = address, .size = size == 0 ? 1 : size, .owner = owner, .domain = domain};
 }
@@ -132,7 +137,7 @@ static void
 remove_allocation(Allocation *slot)
 {
     *slot = (Allocation){.address = deleted};
-    count--;
+    ledger.count--;
 }
 
 static inline void *
@@ -141,6 +146,8 @@ allocate_untracked(PyMemAllocatorEx *allocator, size_t elements, size_t size, bo
     return zeroed ? allocator->calloc(allocator->ctx, elements, size)
                   : allocator->malloc(allocator->ctx, size);
 }
+
+// Allocator hooks. Recursive allocator calls bypass tracking.
 
 static void *
 allocate(Domain *domain, size_t elements, size_t size, bool zeroed)
@@ -269,6 +276,8 @@ CPython_InstallHeapTracking(void)
     return 0;
 }
 
+// Heap ownership and thread attachment.
+
 CPython_Heap *
 CPython_NewHeap(void)
 {
@@ -284,34 +293,44 @@ CPython_FreeHeap(CPython_Heap *heap)
 {
     assert(heap->snapshot == NULL);
     pthread_mutex_lock(&ledger_lock);
-    for (size_t index = 0; index < capacity; index++) {
-        Allocation *slot = &ledger[index];
+    for (size_t index = 0; index < ledger.capacity; index++) {
+        Allocation *slot = &ledger.slots[index];
         if (slot->owner == heap) {
             // Some allocations outlive their interpreter. CPython still owns their storage.
             remove_allocation(slot);
         }
     }
     if (atomic_fetch_sub_explicit(&heap_count, 1, memory_order_relaxed) == 1) {
-        free(ledger);
-        ledger = NULL;
-        capacity = 0;
-        assert(count == 0);
-        occupied = 0;
+        free(ledger.slots);
+        ledger.slots = NULL;
+        ledger.capacity = 0;
+        assert(ledger.count == 0);
+        ledger.occupied = 0;
     }
     pthread_mutex_unlock(&ledger_lock);
     free(heap);
 }
 
-void
+CPython_Heap *
 CPython_BindHeap(CPython_Heap *heap)
 {
+    CPython_Heap *previous = active_heap;
     active_heap = heap;
+    return previous;
+}
+
+HostValueCheckpoint *
+CPython_CurrentHostCheckpoint(void)
+{
+    return active_heap == NULL ? NULL : &active_heap->host_values;
 }
 
 typedef struct {
     uintptr_t start;
     uintptr_t end;
 } Range;
+
+// Snapshots exclude live synchronization and registry state.
 
 static int
 compare_ranges(const void *left, const void *right)
@@ -343,7 +362,11 @@ copy_allocation_ranges(const Allocation *slot, unsigned char *snapshot, bool res
 
     for (size_t field = 0; field < excluded_count && cursor < end; field++) {
         Range range = excluded[field];
-        if (range.end <= cursor || range.start >= end) {
+        // Exclusions are sorted, so later ranges cannot overlap this allocation.
+        if (range.start >= end) {
+            break;
+        }
+        if (range.end <= cursor) {
             continue;
         }
         if (range.start > cursor) {
@@ -391,8 +414,8 @@ copy_private_bytes(PyThreadState *state, CPython_Heap *heap, bool restoring)
     };
     qsort(excluded, Py_ARRAY_LENGTH(excluded), sizeof(*excluded), compare_ranges);
 
-    for (size_t index = 0; index < capacity; index++) {
-        Allocation *slot = &ledger[index];
+    for (size_t index = 0; index < ledger.capacity; index++) {
+        Allocation *slot = &ledger.slots[index];
         if (!is_snapshot_allocation(slot, heap, interpreter) || (restoring && !slot->baseline)) {
             continue;
         }
@@ -407,8 +430,8 @@ static unsigned char *
 allocate_snapshot(CPython_Heap *heap, PyInterpreterState *interpreter)
 {
     size_t bytes = 0;
-    for (size_t index = 0; index < capacity; index++) {
-        Allocation *slot = &ledger[index];
+    for (size_t index = 0; index < ledger.capacity; index++) {
+        Allocation *slot = &ledger.slots[index];
         if (!is_snapshot_allocation(slot, heap, interpreter)) {
             continue;
         }
@@ -424,9 +447,9 @@ allocate_snapshot(CPython_Heap *heap, PyInterpreterState *interpreter)
 static void
 mark_baseline_allocations(CPython_Heap *heap)
 {
-    for (size_t index = 0; index < capacity; index++) {
-        if (ledger[index].owner == heap) {
-            ledger[index].baseline = true;
+    for (size_t index = 0; index < ledger.capacity; index++) {
+        if (ledger.slots[index].owner == heap) {
+            ledger.slots[index].baseline = true;
         }
     }
 }
@@ -469,8 +492,8 @@ static void
 finish_checkpoint_allocations(CPython_Heap *heap, bool restoring)
 {
     in_allocator = true;
-    for (size_t index = 0; index < capacity; index++) {
-        Allocation *slot = &ledger[index];
+    for (size_t index = 0; index < ledger.capacity; index++) {
+        Allocation *slot = &ledger.slots[index];
         if (slot->owner != heap) {
             continue;
         }

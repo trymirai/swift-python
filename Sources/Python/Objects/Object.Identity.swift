@@ -19,46 +19,15 @@ public extension Object {
         }
 
         func claim(_ instance: any _PClass, in storage: Interpreter.Storage) throws {
-            let owner = ObjectIdentifier(instance)
-            try state.withLock { state in
-                guard let previous = state.owner else {
-                    state.owner = owner
-                    state.references = storage.references
-                    return
-                }
-
-                guard previous == owner else {
-                    throw Module.Catalog
-                        .failure("An instance identity cannot be shared by Swift objects.")
-                }
-                guard state.references === storage.references else {
-                    throw Reference.wrongInterpreter()
-                }
-            }
+            try state.withLock { try $0.claim(ObjectIdentifier(instance), in: storage.references) }
         }
 
         func beginWrapperConstruction() throws {
-            try state.withLock { state in
-                switch state.wrapper {
-                case .unbound:
-                    state.wrapper = .constructing(previous: nil)
-                case let .bound(wrapper):
-                    state.wrapper = .constructing(previous: wrapper)
-                case .constructing:
-                    throw Exception(
-                        name: "RuntimeError",
-                        message: "Python wrapper construction is already in progress.",
-                    )
-                }
-            }
+            try state.withLock { try $0.wrapper.beginConstruction() }
         }
 
         func endWrapperConstruction() {
-            state.withLock { state in
-                if case let .constructing(previous) = state.wrapper {
-                    state.wrapper = previous.map(Wrapper.bound) ?? .unbound
-                }
-            }
+            state.withLock { $0.wrapper.endConstruction() }
         }
 
         var wrapper: WeakReference? {
@@ -76,12 +45,7 @@ public extension Object {
         }
 
         func bind(_ wrapper: WeakReference) throws {
-            try state.withLock { state in
-                guard case .constructing = state.wrapper else {
-                    throw Module.Catalog.failure("The Swift instance is already initialized.")
-                }
-                state.wrapper = .bound(wrapper)
-            }
+            try state.withLock { try $0.wrapper.bind(wrapper) }
         }
     }
 }
@@ -94,6 +58,22 @@ private extension Object.Identity {
         weak var references: Reference.Store?
 
         var wrapper: Wrapper = .unbound
+
+        mutating func claim(_ owner: ObjectIdentifier, in references: Reference.Store) throws {
+            guard let previous = self.owner else {
+                self.owner = owner
+                self.references = references
+                return
+            }
+
+            guard previous == owner else {
+                throw Module.Catalog
+                    .failure("An instance identity cannot be shared by Swift objects.")
+            }
+            guard self.references === references else {
+                throw Reference.wrongInterpreter()
+            }
+        }
     }
 }
 
@@ -104,5 +84,32 @@ private extension Object.Identity {
         case unbound
         case constructing(previous: WeakReference?)
         case bound(WeakReference)
+
+        mutating func beginConstruction() throws {
+            switch self {
+            case .unbound:
+                self = .constructing(previous: nil)
+            case let .bound(wrapper):
+                self = .constructing(previous: wrapper)
+            case .constructing:
+                throw Exception(
+                    name: "RuntimeError",
+                    message: "Python wrapper construction is already in progress.",
+                )
+            }
+        }
+
+        mutating func endConstruction() {
+            if case let .constructing(previous) = self {
+                self = previous.map(Self.bound) ?? .unbound
+            }
+        }
+
+        mutating func bind(_ wrapper: WeakReference) throws {
+            guard case .constructing = self else {
+                throw Module.Catalog.failure("The Swift instance is already initialized.")
+            }
+            self = .bound(wrapper)
+        }
     }
 }

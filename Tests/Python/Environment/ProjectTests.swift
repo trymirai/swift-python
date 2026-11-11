@@ -9,7 +9,7 @@ import Testing
 
 @Test
 func projectStartupSelectsOnlyProjectModules() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let project = root.appending("project")
         let files = FileSystem.shared
         try await files.createDirectory(
@@ -123,7 +123,7 @@ func projectPreparesPackagesBeforeStartupAndKeepsModuleGlobals() async throws {
 
 @Test
 func sessionInitializesSiteForPackageDirectories() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let files = FileSystem.shared
         let packages = root.appending("packages")
         let dependency = packages.appending("extra")
@@ -157,6 +157,8 @@ func sessionInitializesSiteForPackageDirectories() async throws {
     }
 }
 
+// MARK: Environment ownership and publication
+
 @Test
 func projectEnvironmentRequiresAnExclusiveLease() async throws {
     try await ProjectFixture.withFixture { fixture in
@@ -178,7 +180,7 @@ func projectEnvironmentRequiresAnExclusiveLease() async throws {
 
 @Test
 func environmentClaimsItsSlotsBeforeReapingStaging() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
         let environment = root.appending("environment")
         let slot = environment.appending("site-packages-a")
@@ -412,6 +414,8 @@ func invalidSavedManifestKeepsCurrentSlot() async throws {
     }
 }
 
+// MARK: Package source precedence
+
 @Test(arguments: ["1.0", "2.0"])
 func firstSessionPackageSourceWins(version: String) async throws {
     try await ProjectFixture.withFixture { fixture in
@@ -562,6 +566,8 @@ func conversationInstallationOverridesAndRevealsTheProjectSource() async throws 
         }
     }
 }
+
+// MARK: Project bundles
 
 @Test
 func projectBundleLoadsFromEmbeddedBytesAndDisk() async throws {

@@ -141,17 +141,15 @@ def installation_tools() -> None:
     """Load the pinned installer libraries only in the service interpreter."""
     import _swift_python
 
-    paths = []
-
+    archives = []
     for name in _swift_python.children("_swift_python_packages"):
         if not name.endswith(".whl"):
             continue
 
         data = _swift_python.read("_swift_python_packages/" + name)
         root = "embedded:/installer/" + name
-        archive = Archive(root, io.BytesIO(data))
+        archives.append(Archive(root, io.BytesIO(data)))
 
-        sys.path_hooks.insert(0, _archive_hook((archive,)))
-        paths.append(root)
-
-    sys.path[:0] = paths
+    if archives:
+        sys.path_hooks.insert(0, _archive_hook(tuple(archives)))
+    sys.path[:0] = [archive.root for archive in archives]

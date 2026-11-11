@@ -283,9 +283,9 @@ def _check_base_collisions(distributions: dict, base: dict) -> None:
 
 
 def _changes_installed_wheels(wheels: dict[str, Wheel], installed: dict) -> bool:
-    selected = {name: wheel.digest for name, wheel in wheels.items()}
-    existing = {name: record["digest"] for name, record in installed.items()}
-    return selected != existing
+    return wheels.keys() != installed.keys() or any(
+        wheel.digest != installed[name]["digest"] for name, wheel in wheels.items()
+    )
 
 
 def prepare(request: dict, configuration: Configuration) -> dict:

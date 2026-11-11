@@ -18,7 +18,8 @@ from .streams import install as install_streams
 
 
 def _report_exception(exception: BaseException, stderr, control) -> str:
-    # Skip the outer frame that catches the block's exception.
+    # Skip the catching frame. Compilation and startup imports stay there so their
+    # failures do not expose extra runtime helper frames.
     text = "".join(
         traceback.format_exception(type(exception), exception, exception.__traceback__.tb_next)
     )
@@ -41,6 +42,16 @@ def _successful_script_exit(exception: BaseException) -> bool:
         exception.code is None
         or (isinstance(exception.code, int) and int.__index__(exception.code) == 0)
     )
+
+
+def _configure_site(package_paths: list[str]) -> None:
+    # Directory package sources support site startup files. Embedded archives use a virtual path.
+    for path in package_paths:
+        if os.path.isabs(path):
+            site.addsitedir(path)
+    site.setquit()
+    site.setcopyright()
+    site.sethelper()
 
 
 class _SourceCache:
@@ -89,14 +100,7 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
     update_imports((paths, []))
     install_streams()
     configure_restricted_loop()
-
-    # Directory package sources support site startup files. Embedded archives use a virtual path.
-    for path in package_paths:
-        if os.path.isabs(path):
-            site.addsitedir(path)
-    site.setquit()
-    site.setcopyright()
-    site.sethelper()
+    _configure_site(package_paths)
 
     namespace = sys.modules["__main__"].__dict__
     sources = _SourceCache()

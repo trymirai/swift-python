@@ -13,10 +13,7 @@ public protocol _PClass: AnyObject, SendableMetatype, Encodable, Decodable {
 public extension _PClass {
     func encode(to encoder: inout Encoder) throws {
         let storage = try Interpreter.Storage.requireCurrent()
-        guard let registry = storage.classRegistry else {
-            throw Interpreter.ClassRegistry.unregistered()
-        }
-
+        let registry = try storage.requireClassRegistry()
         let object = try registry.wrapper(for: self, in: encoder)
         let pointer = unsafe object.release()
 

@@ -114,8 +114,4 @@ extension DeclModifierListSyntax {
     var declaresStaticMember: Bool {
         contains { $0.name.text == "static" || $0.name.text == "class" }
     }
-
-    var importedReceiver: String {
-        declaresStaticMember ? "Self.withClass" : "self"
-    }
 }

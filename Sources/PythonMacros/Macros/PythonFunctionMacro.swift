@@ -83,19 +83,20 @@ extension PythonFunctionMacro: BodyMacro {
         let name = annotation.nameSource(default: method.name.identifier?.name ?? method.name.text)
         let type = method.signature.returnClause?.type.trimmedDescription ?? "Swift::Void"
 
-        func asynchronousBody() -> CodeBlockItemSyntax {
-            let receiver = method.modifiers.declaresStaticMember ? "Self" : "self.__p_reference"
-            return CodeBlockItemSyntax(stringLiteral: """
-            return try await \(receiver)._pAwaitMethod(\(name), \(arguments)) {
+        func forwardingBody(_ call: String) -> CodeBlockItemSyntax {
+            CodeBlockItemSyntax(stringLiteral: """
+            return \(call)(\(name), \(arguments)) {
                 try $0.decode(as: (\(type)).self)
             }
             """)
         }
 
         func synchronousBody() -> CodeBlockItemSyntax {
-            let receiver = method.modifiers.importedReceiver
+            if method.modifiers.declaresStaticMember {
+                return forwardingBody("try Self._pCallMethod")
+            }
             return CodeBlockItemSyntax(stringLiteral: """
-            return try \(receiver) { object in
+            return try self { object in
                 let method = try object.attribute(\(name))
                 return try method.call(\(arguments)).decode(as: (\(type)).self)
             }
@@ -103,7 +104,8 @@ extension PythonFunctionMacro: BodyMacro {
         }
 
         if effects.asyncSpecifier != nil {
-            return [asynchronousBody()]
+            let receiver = method.modifiers.declaresStaticMember ? "Self" : "self.__p_reference"
+            return [forwardingBody("try await \(receiver)._pAwaitMethod")]
         }
         return [synchronousBody()]
     }

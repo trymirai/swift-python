@@ -7,7 +7,7 @@ public import SystemPackage
 // MARK: - Path
 
 /// A reference to a `pathlib.Path` in the current Python session.
-/// Use its Swift members inside `Session.enqueue` or a synchronous Swift export.
+/// Use its Swift members inside `Session.enqueue` or a Swift export.
 @PythonImportedClass(module: "pathlib", name: "Path")
 public struct Path {
     @PythonProperty(isReadOnly: true)
@@ -22,18 +22,18 @@ public struct Path {
     @PythonProperty(isReadOnly: true)
     public var parts: [String]
 
-    /// Creates a path in the attached interpreter.
-    public init(_ path: String) throws {
-        self = try Self.withClass { try $0.call(path).decode() }
+    /// Creates a path in the supplied context.
+    public init(_ path: String, in context: Context) throws {
+        self = try context.construct(Self.self, arguments: [path])
     }
 
     /// Creates a path from a Unicode Swift system path.
-    public init(_ path: FilePath) throws {
+    public init(_ path: FilePath, in context: Context) throws {
         guard let string = String(validating: path) else {
             throw Exception(name: "ValueError", message: "Expected a UTF-8 file path.")
         }
 
-        try self.init(string)
+        try self.init(string, in: context)
     }
 
     @PythonFunction("__fspath__")
@@ -42,12 +42,7 @@ public struct Path {
     /// Converts the Python path to a Swift system path.
     public var filePath: FilePath {
         get throws {
-            let path = try string()
-            guard !path.utf8.contains(0) else {
-                throw Exception(name: "ValueError", message: "A file path cannot contain NUL.")
-            }
-
-            return FilePath(path)
+            try FilePath(self)
         }
     }
 
@@ -77,4 +72,17 @@ public struct Path {
 
     @PythonFunction("is_dir")
     public func isDirectory() throws -> Bool
+}
+
+// MARK: - FilePath
+
+public extension FilePath {
+    /// Copies a Python path into a Swift system path.
+    init(_ path: Python::Path) throws {
+        let value = try path.string()
+        guard !value.utf8.contains(0) else {
+            throw Exception(name: "ValueError", message: "A file path cannot contain NUL.")
+        }
+        self.init(value)
+    }
 }

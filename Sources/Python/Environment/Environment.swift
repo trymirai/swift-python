@@ -23,7 +23,7 @@ final class Environment {
     let requirements: [String]
 
     private let packaging: Service.Lazy
-    
+
     private var sessionPackages: [Runtime.PackageSource.Resolved]
     private var sessionConfiguration: Configuration?
 
@@ -60,6 +60,7 @@ final class Environment {
         self.directory = directory
         self.projectDirectory = projectDirectory
         self.requirements = requirements
+
         self.sessionPackages = sessionPackages
         self.packaging = packaging
     }
@@ -87,6 +88,27 @@ final class Environment {
         return (service, configuration)
     }
 
+    func installed() async throws -> [String: String] {
+        guard needsPreparation || manifest != nil else {
+            return [:]
+        }
+        let (_, configuration) = try await open()
+
+        let localVersions = manifest?.packages.mapValues(\.version) ?? [:]
+        return configuration.base.mapValues(\.version).merging(localVersions) { _, local in local }
+    }
+
+    func close() async {
+        if let storage {
+            self.storage = nil
+            try? storage.lease.close()
+        }
+        if let temporary {
+            self.temporary = nil
+            await Self.discard(temporary)
+        }
+    }
+
     private func resolveConfiguration(
         using service: Service,
         application: Configuration,
@@ -110,30 +132,11 @@ final class Environment {
         sessionConfiguration = configuration
         return configuration
     }
+}
 
-    func installed() async throws -> [String: String] {
-        guard needsPreparation || manifest != nil else {
-            return [:]
-        }
-        let (_, configuration) = try await open()
+// MARK: Environment + Package publication
 
-        let localVersions = manifest?.packages.mapValues(\.version) ?? [:]
-        return configuration.base.mapValues(\.version).merging(localVersions) { _, local in local }
-    }
-
-    func close() async {
-        if let storage {
-            self.storage = nil
-            try? storage.lease.close()
-        }
-        if let temporary {
-            self.temporary = nil
-            await Self.discard(temporary)
-        }
-    }
-
-    // MARK: Package publication
-
+extension Environment {
     func save(
         _ next: Manifest,
         replacingFiles resolution: Preparation.Resolution?,
@@ -183,7 +186,7 @@ final class Environment {
         let stagedManifest = storage.stagedManifestPath
         defer { try? Self.unlinkIfPresent(stagedManifest) }
 
-        try await Self.discardOnFailure(staged) {
+        func stagePackages() async throws {
             if let staged, let resolution {
                 try await FileSystem.shared.removeItem(at: staged)
                 try await Self.stageFiles(
@@ -192,13 +195,20 @@ final class Environment {
                     execution: execution,
                 )
             }
+        }
 
+        func publishManifest() async throws {
             let publication = Publication(active: active, manifest: next)
             try await Self.writePublication(publication, to: stagedManifest, using: service)
 
             // Publishing the manifest switches both the active slot and its package records.
             try execution.finishCheckingInterruption()
             try Self.replace(stagedManifest, with: storage.manifestPath)
+        }
+
+        try await Self.discardOnFailure(staged) {
+            try await stagePackages()
+            try await publishManifest()
         }
 
         self.manifest = next
@@ -227,6 +237,7 @@ final class Environment {
                 template: configuration.scratchDirectory.appending("XXXXXXXX"),
             )
         }
+
         try await Self.discardOnFailure(staged) {
             if let staged {
                 try await Self.stageFiles(
@@ -251,9 +262,11 @@ final class Environment {
         try execution.finishCheckingInterruption()
         manifest = next
     }
+}
 
-    // MARK: Filesystem operations
+// MARK: Environment + Filesystem operations
 
+extension Environment {
     static func identifier() -> String {
         let value = String(UInt128.random(in: .min ... .max), radix: 16)
         return String(repeating: "0", count: 32 - value.utf8.count) + value
@@ -289,7 +302,7 @@ final class Environment {
     }
 }
 
-// MARK: - Persistent storage
+// MARK: Environment.Storage
 
 private extension Environment {
     struct Storage {
@@ -306,19 +319,17 @@ private extension Environment {
             root.appending(".environment.json.tmp")
         }
     }
+}
 
+// MARK: Environment + Persistent storage
+
+private extension Environment {
     static func openStorage(
         at root: FilePath,
         using service: Service,
         expectedABI: [String],
     ) async throws -> (storage: Storage, manifest: Manifest?) {
-        let files = FileSystem.shared
-        do {
-            try await files.createDirectory(at: root, withIntermediateDirectories: true)
-        } catch var error as FileSystemError where error.code == .fileAlreadyExists {
-            error.code = .invalidArgument
-            throw error
-        }
+        try await createStorageDirectory(at: root)
 
         var opened = Storage(root: root, lease: try acquireLease(at: root))
         do {
@@ -339,6 +350,15 @@ private extension Environment {
             return (opened, publication?.manifest)
         } catch {
             try? opened.lease.close()
+            throw error
+        }
+    }
+
+    static func createStorageDirectory(at root: FilePath) async throws {
+        do {
+            try await FileSystem.shared.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch var error as FileSystemError where error.code == .fileAlreadyExists {
+            error.code = .invalidArgument
             throw error
         }
     }
@@ -401,9 +421,10 @@ private extension Environment {
 
     static func prepareSlots(in storage: Storage, claimed: Bool) async throws {
         let files = FileSystem.shared
-        let stagingPaths = Slot.allCases
+        var stagingPaths = Slot.allCases
             .filter { $0 != storage.active }
-            .map { $0.packages(in: storage.root) } + [storage.stagedManifestPath]
+            .map { $0.packages(in: storage.root) }
+        stagingPaths.append(storage.stagedManifestPath)
 
         // Only a marked root owns the inactive slot and temporary manifest.
         for path in stagingPaths {
@@ -414,6 +435,8 @@ private extension Environment {
             }
         }
     }
+
+    // MARK: Staging cleanup
 
     static func discard(_ path: FilePath) async {
         // A separate task lets cleanup finish after the operation is cancelled.
@@ -442,6 +465,8 @@ private extension Environment {
         name.utf8.count == 64 && name.utf8
             .allSatisfy { (48 ... 57).contains($0) || (97 ... 102).contains($0) }
     }
+
+    // MARK: Exclusive lease
 
     static let leaseMarker: UInt8 = 1
 

@@ -16,6 +16,13 @@ struct HostValue {
     void (*dispose)(HostValue *);
 };
 
+typedef struct {
+    bool active;
+
+    HostValue *created;
+    HostValue *retired;
+} HostValueCheckpoint;
+
 PyObject *host_value_capsule(HostValue *value, const char *name, PyCapsule_Destructor destroy);
 void checkpoint_release_host_value(HostValue *value);
 

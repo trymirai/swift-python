@@ -14,6 +14,9 @@ import Testing
 
 @PythonImportedClass(module: "report_fixture", name: "Report")
 private struct ImportedReport {
+    @PythonProperty
+    static var category: String
+
     @PythonProperty("display_name")
     var title: String
 
@@ -88,6 +91,10 @@ private enum ImportedTypes {
         async let updated = report.refresh()
         async let created = ImportedReport.make("other")
         _ = try await created
+        try ImportedReport.$category("updated")
+        guard try ImportedReport.category == "updated" else {
+            throw Python::Exception(name: "ValueError", message: "Unexpected class property.")
+        }
         return try await updated
     }
 
@@ -145,9 +152,9 @@ private final class ImportedRecord {
     }
 }
 
-@Test
+@Test(.timeLimit(.minutes(1)))
 func importedTypesSupplyLazyAnnotationsAndPreserveIdentity() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         try await reportFixtureSource.write(toFileAt: root.appending("report_fixture.py"))
 
         let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
@@ -157,7 +164,7 @@ func importedTypesSupplyLazyAnnotationsAndPreserveIdentity() async throws {
         )
 
         try await withSession(session) { session in
-            let execution = try await session.evaluate(importedTypesChecks, timeout: .seconds(10))
+            let execution = try await session.evaluate(importedTypesChecks)
             #expect(execution.end == .finished)
         }
     }
@@ -167,6 +174,8 @@ private let reportFixtureSource = """
 import asyncio
 
 class Report:
+    category = "report"
+
     def __init__(self, title='Report'):
         self.display_name = title
         self.started = asyncio.Event()
@@ -334,7 +343,7 @@ func aSwiftTaskCannotBorrowAnotherTasksPythonAttachment() async throws {
 
     try await withSession(session) { session in
         let task = try await session.enqueue { context in
-            let day = try Python::Date(year: 2000, month: 2, day: 29)
+            let day = try Python::Date(year: 2000, month: 2, day: 29, in: context)
             let attachedContext = context
             return Task.immediate {
                 try day.object(in: attachedContext).attribute("year").decode(as: Int.self)
@@ -352,13 +361,13 @@ func standardImportedTypesSupportSwiftConstructionAndConversion() async throws {
     let session = try await runtime.session()
 
     try await withSession(session) { session in
-        try await session.enqueue { _ in
+        try await session.enqueue { context in
             func checkCalendarDate() throws -> Python::Date {
-                let day = try Python::Date(year: 2000, month: 2, day: 29)
+                let day = try Python::Date(year: 2000, month: 2, day: 29, in: context)
                 #expect(try day.isoFormat() == "2000-02-29")
                 #expect(try day.weekday() == 1)
                 #expect(throws: Python::Exception.self) {
-                    try Python::Date(year: 2001, month: 2, day: 29)
+                    try Python::Date(year: 2001, month: 2, day: 29, in: context)
                 }
                 return day
             }
@@ -371,6 +380,7 @@ func standardImportedTypesSupportSwiftConstructionAndConversion() async throws {
                     hour: 12,
                     microsecond: 125_000,
                     fold: 1,
+                    in: context,
                 )
                 #expect(try local.date().isoFormat() == day.isoFormat())
                 #expect(try local.microsecond == 125_000)
@@ -379,30 +389,30 @@ func standardImportedTypesSupportSwiftConstructionAndConversion() async throws {
             }
 
             func checkUTCDateTime() throws {
-                let utc = try Python::DateTime(utcTimestamp: -0.125)
+                let utc = try Python::DateTime(utcTimestamp: -0.125, in: context)
                 #expect(try utc.isoFormat() == "1969-12-31T23:59:59.875000+00:00")
                 #expect(try utc.timestamp() == -0.125)
 
                 #if canImport(Foundation)
                 let instant = Foundation::Date(timeIntervalSince1970: 0.25)
-                let dateTime = try Python::DateTime(instant)
+                let dateTime = try Python::DateTime(instant, in: context)
                 #expect(try dateTime.timeZoneName() == "UTC")
                 #expect(abs(try dateTime.foundationDate().timeIntervalSince(instant)) < 0.000_001)
                 #endif
             }
 
             func checkPathConversions() throws {
-                let base = try Python::Path("reports")
+                let base = try Python::Path("reports", in: context)
                 let path = try base.joinPath("résumé.txt").withSuffix(".md")
                 #expect(try path.stem == "résumé")
                 #expect(try path.suffix == ".md")
                 #expect(try path.parts == ["reports", "résumé.md"])
                 #expect(try path.relativeTo(base).string() == "résumé.md")
                 #expect(try path.filePath == FilePath("reports/résumé.md"))
-                #expect(try Python::Path(path.filePath).string() == path.string())
+                #expect(try Python::Path(path.filePath, in: context).string() == path.string())
                 #expect(try !path.isAbsolute())
 
-                let invalidPath = try Python::Path("a\0b")
+                let invalidPath = try Python::Path("a\0b", in: context)
                 #expect(throws: Python::Exception.self) { try invalidPath.filePath }
             }
 

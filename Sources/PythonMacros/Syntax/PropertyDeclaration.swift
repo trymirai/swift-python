@@ -71,10 +71,6 @@ struct PropertyDeclaration {
         return variable.modifiers.first { levels.contains($0.name.text) }?.name.text
     }
 
-    var receiver: String {
-        variable.modifiers.importedReceiver
-    }
-
     func importedTypeSource() throws -> String {
         guard let type = uninitializedVariableType else {
             throw MacroExpansionErrorMessage(

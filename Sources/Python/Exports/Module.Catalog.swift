@@ -8,47 +8,7 @@ internal import libcpython
 
 extension Module {
     struct Catalog {
-        private enum Entry {
-            case classDefinition(Module.Class)
-
-            case method(ObjectIdentifier, Module.Function)
-            case initializer(ObjectIdentifier, Module.Function)
-            case property(ObjectIdentifier, Module.Class.Property)
-
-            case function(
-                module: any ModuleHost.Type,
-                function: _ExportFunction,
-            )
-        }
-
         private var exports: [Entry] = []
-
-        private init() {
-            var seen = Set<ObjectIdentifier>()
-            for provider in Self.discoverProviders() {
-                guard seen.insert(ObjectIdentifier(provider)).inserted else {
-                    continue
-                }
-                provider._pExport(to: &self)
-            }
-        }
-
-        private static func discoverProviders() -> [any _ExportProvider.Type] {
-            var providers = [any _ExportProvider.Type]()
-            withUnsafeMutablePointer(to: &providers) { collector in
-                let context = UnsafeMutableRawPointer(collector)
-                unsafe CPython_DiscoverExports(context) { collector, type in
-                    let provider = unsafe type
-                        .assumingMemoryBound(to: (any _ExportProvider.Type).self)
-                        .pointee
-                    unsafe collector.assumingMemoryBound(to: [any _ExportProvider.Type].self)
-                        .pointee
-                        .append(provider)
-                }
-            }
-
-            return providers
-        }
 
         static func resolve(
             _ moduleTypes: [any ModuleHost.Type],
@@ -83,182 +43,232 @@ extension Module {
             )
         }
 
-        private static func assembleModules(
-            _ selected: some Sequence<any ModuleHost.Type>,
-            addingTo definitions: [Module],
-            functionsByModule: [ObjectIdentifier: [Module.Function]],
-            classesByModule: [ObjectIdentifier: [Module.Class]],
-        ) throws -> [Module] {
-            var result = definitions
-            var names = Set(definitions.map(\.name))
-            let sortedModules = selected.sorted { $0._pModuleName < $1._pModuleName }
-            for type in sortedModules {
-                let name = type._pModuleName
-                guard names.insert(name).inserted else {
-                    throw Self.failure("Python module '\(name)' was declared twice.")
-                }
-
-                let key = ObjectIdentifier(type)
-                result.append(try Self.makeModule(
-                    type,
-                    name: name,
-                    functions: functionsByModule[key, default: []],
-                    classes: classesByModule[key, default: []],
-                ))
-            }
-            return result
-        }
-
         static func failure(_ message: String) -> Exception {
             Exception(name: "TypeError", message: message)
         }
 
-        private func makeClassDefinitions() throws -> [ObjectIdentifier: Module.Class] {
-            var classes = [ObjectIdentifier: Module.Class]()
-            for case let .classDefinition(definition) in exports {
+        private init() {
+            var seen = Set<ObjectIdentifier>()
+            for provider in Self.discoverProviders() {
+                guard seen.insert(ObjectIdentifier(provider)).inserted else {
+                    continue
+                }
+                provider._pExport(to: &self)
+            }
+        }
+
+        private static func discoverProviders() -> [any _ExportProvider.Type] {
+            var providers = [any _ExportProvider.Type]()
+            withUnsafeMutablePointer(to: &providers) { collector in
+                let context = UnsafeMutableRawPointer(collector)
+                unsafe CPython_DiscoverExports(context) { collector, type in
+                    let provider = unsafe type
+                        .assumingMemoryBound(to: (any _ExportProvider.Type).self)
+                        .pointee
+                    unsafe collector.assumingMemoryBound(to: [any _ExportProvider.Type].self)
+                        .pointee
+                        .append(provider)
+                }
+            }
+
+            return providers
+        }
+    }
+}
+
+// MARK: Module.Catalog + Class definitions
+
+private extension Module.Catalog {
+    private func makeClassDefinitions() throws -> [ObjectIdentifier: Module.Class] {
+        var classes = [ObjectIdentifier: Module.Class]()
+        for case let .classDefinition(definition) in exports {
+            let key = ObjectIdentifier(definition.type)
+            guard classes.updateValue(definition, forKey: key) == nil else {
+                throw Self.failure("A Swift class was exported twice.")
+            }
+        }
+
+        // Walk through unexported Swift bases to find the Python superclass.
+        func exportedSuperclass(of type: AnyClass) -> (any _PClass.Type)? {
+            var superclass: AnyClass? = _getSuperclass(type)
+            while let candidate = superclass {
+                if let base = classes[ObjectIdentifier(candidate)] {
+                    return base.type
+                }
+                superclass = _getSuperclass(candidate)
+            }
+            return nil
+        }
+
+        for (key, definition) in classes {
+            if let superclass = exportedSuperclass(of: definition.type) {
+                classes[key]?.superclass = superclass
+            }
+        }
+
+        try attachMembers(to: &classes)
+        return classes
+    }
+
+    private static func includeSuperclassModules(
+        in selectedModules: inout [ObjectIdentifier: any ModuleHost.Type],
+        classes: [ObjectIdentifier: Module.Class],
+        classesByModule: [ObjectIdentifier: [Module.Class]],
+    ) {
+        var pending = Array(selectedModules.keys)
+        while let module = pending.popLast() {
+            // Including a module also includes the bases of its other classes.
+            for definition in classesByModule[module, default: []] {
                 guard
-                    classes
-                        .updateValue(definition, forKey: ObjectIdentifier(definition.type)) == nil
+                    let superclass = definition.superclass,
+                    let parent = classes[ObjectIdentifier(superclass)]
                 else {
-                    throw Self.failure("A Swift class was exported twice.")
+                    continue
                 }
-            }
-
-            // Walk through unexported Swift bases to find the Python superclass.
-            func exportedSuperclass(of type: AnyClass) -> (any _PClass.Type)? {
-                var superclass: AnyClass? = _getSuperclass(type)
-                while let candidate = superclass {
-                    if let base = classes[ObjectIdentifier(candidate)] {
-                        return base.type
-                    }
-                    superclass = _getSuperclass(candidate)
-                }
-                return nil
-            }
-
-            for (key, definition) in classes {
-                if let superclass = exportedSuperclass(of: definition.type) {
-                    classes[key]?.superclass = superclass
-                }
-            }
-
-            try attachMembers(to: &classes)
-            return classes
-        }
-
-        private static func includeSuperclassModules(
-            in selectedModules: inout [ObjectIdentifier: any ModuleHost.Type],
-            classes: [ObjectIdentifier: Module.Class],
-            classesByModule: [ObjectIdentifier: [Module.Class]],
-        ) {
-            var pending = Array(selectedModules.keys)
-            while let module = pending.popLast() {
-                // Including a module also includes the bases of its other classes.
-                for definition in classesByModule[module, default: []] {
-                    guard
-                        let superclass = definition.superclass,
-                        let parent = classes[ObjectIdentifier(superclass)]
-                    else {
-                        continue
-                    }
-                    let parentModule = ObjectIdentifier(parent.module)
-                    if selectedModules[parentModule] == nil {
-                        selectedModules[parentModule] = parent.module
-                        pending.append(parentModule)
-                    }
+                let parentModule = ObjectIdentifier(parent.module)
+                if selectedModules[parentModule] == nil {
+                    selectedModules[parentModule] = parent.module
+                    pending.append(parentModule)
                 }
             }
         }
+    }
 
-        private func attachMembers(to classes: inout [ObjectIdentifier: Module.Class]) throws {
-            for export in exports {
-                switch export {
-                case let .method(owner, function):
-                    try Self.validateContext(in: function, at: 1)
-                    classes[owner]?.methods.append(function)
-                case let .initializer(owner, function):
-                    try Self.attachInitializer(function, owner: owner, to: &classes)
-                case let .property(owner, property):
-                    classes[owner]?.properties.append(property)
-                default:
-                    break
-                }
+    private func attachMembers(to classes: inout [ObjectIdentifier: Module.Class]) throws {
+        for export in exports {
+            switch export {
+            case let .method(owner, function):
+                try Self.validateContext(in: function, at: 1)
+                classes[owner]?.methods.append(function)
+            case let .initializer(owner, function):
+                try Self.attachInitializer(function, owner: owner, to: &classes)
+            case let .property(owner, property):
+                classes[owner]?.properties.append(property)
+            default:
+                break
+            }
+        }
+    }
+
+    private static func attachInitializer(
+        _ function: Module.Function,
+        owner: ObjectIdentifier,
+        to classes: inout [ObjectIdentifier: Module.Class],
+    ) throws {
+        guard function.parameters.count(where: \.isInjected) <= 1 else {
+            throw failure("A PythonInit can take at most one Context parameter.")
+        }
+        if classes[owner]?.initializer != nil {
+            throw failure("A class has more than one PythonInit.")
+        }
+        classes[owner]?.initializer = function
+    }
+}
+
+// MARK: Module.Catalog + Module assembly
+
+private extension Module.Catalog {
+    private static func assembleModules(
+        _ selected: some Sequence<any ModuleHost.Type>,
+        addingTo definitions: [Module],
+        functionsByModule: [ObjectIdentifier: [Module.Function]],
+        classesByModule: [ObjectIdentifier: [Module.Class]],
+    ) throws -> [Module] {
+        var result = definitions
+        var names = Set(definitions.map(\.name))
+        let sortedModules = selected.sorted { $0._pModuleName < $1._pModuleName }
+        for type in sortedModules {
+            let name = type._pModuleName
+            guard names.insert(name).inserted else {
+                throw Self.failure("Python module '\(name)' was declared twice.")
+            }
+
+            let key = ObjectIdentifier(type)
+            result.append(try Self.makeModule(
+                type,
+                name: name,
+                functions: functionsByModule[key, default: []],
+                classes: classesByModule[key, default: []],
+            ))
+        }
+        return result
+    }
+
+    private func functionsByModule(
+        in modules: [ObjectIdentifier: any ModuleHost.Type],
+    ) -> [ObjectIdentifier: [Module.Function]] {
+        var functions = [ObjectIdentifier: [Module.Function]]()
+        for case let .function(owner, function) in exports {
+            let key = ObjectIdentifier(owner)
+            if modules[key] != nil {
+                functions[key, default: []].append(function)
+            }
+        }
+        return functions
+    }
+
+    private static func validateContext(
+        in function: Module.Function,
+        at contextIndex: Int,
+    ) throws {
+        for (index, parameter) in function.parameters.enumerated() {
+            if
+                case let .context(isUnlabeled) = parameter.kind,
+                index != contextIndex || !isUnlabeled
+            {
+                throw failure("A PythonFunction Context must be the first unlabeled parameter.")
+            }
+        }
+    }
+
+    private static func makeModule(
+        _ type: any ModuleHost.Type,
+        name: String,
+        functions: [Module.Function],
+        classes: [Module.Class],
+    ) throws -> Module {
+        let functions = functions.sorted { $0.name < $1.name }
+        var names = Set<String>()
+        for function in functions {
+            try validateContext(in: function, at: 0)
+            guard names.insert(function.name).inserted else {
+                throw Self
+                    .failure("Python export '\(name).\(function.name)' was declared twice.")
             }
         }
 
-        private static func attachInitializer(
-            _ function: Module.Function,
-            owner: ObjectIdentifier,
-            to classes: inout [ObjectIdentifier: Module.Class],
-        ) throws {
-            guard function.parameters.count(where: \.isInjected) <= 1 else {
-                throw failure("A PythonInit can take at most one Context parameter.")
+        var module = Module(
+            name,
+            documentation: type._pModuleDocumentation,
+            source: type._pModuleSource,
+            functions: functions,
+        )
+
+        module.classes = classes.sorted { $0.key < $1.key }
+        for index in module.classes.indices {
+            guard names.insert(module.classes[index].name).inserted else {
+                throw Self.failure("A class and another export have the same Python name.")
             }
-            if classes[owner]?.initializer != nil {
-                throw failure("A class has more than one PythonInit.")
-            }
-            classes[owner]?.initializer = function
+            try module.classes[index].validateMembers()
         }
+        return module
+    }
+}
 
-        private func functionsByModule(
-            in modules: [ObjectIdentifier: any ModuleHost.Type],
-        ) -> [ObjectIdentifier: [Module.Function]] {
-            var functions = [ObjectIdentifier: [Module.Function]]()
-            for case let .function(owner, function) in exports {
-                let key = ObjectIdentifier(owner)
-                if modules[key] != nil {
-                    functions[key, default: []].append(function)
-                }
-            }
-            return functions
-        }
+// MARK: - Module.Catalog.Entry
 
-        private static func validateContext(
-            in function: Module.Function,
-            at contextIndex: Int,
-        ) throws {
-            for (index, parameter) in function.parameters.enumerated() {
-                if
-                    case let .context(isUnlabeled) = parameter.kind,
-                    index != contextIndex || !isUnlabeled
-                {
-                    throw failure("A PythonFunction Context must be the first unlabeled parameter.")
-                }
-            }
-        }
+private extension Module.Catalog {
+    enum Entry {
+        case classDefinition(Module.Class)
 
-        private static func makeModule(
-            _ type: any ModuleHost.Type,
-            name: String,
-            functions: [Module.Function],
-            classes: [Module.Class],
-        ) throws -> Module {
-            let functions = functions.sorted { $0.name < $1.name }
-            var names = Set<String>()
-            for function in functions {
-                try validateContext(in: function, at: 0)
-                guard names.insert(function.name).inserted else {
-                    throw Self
-                        .failure("Python export '\(name).\(function.name)' was declared twice.")
-                }
-            }
+        case method(ObjectIdentifier, Module.Function)
+        case initializer(ObjectIdentifier, Module.Function)
+        case property(ObjectIdentifier, Module.Class.Property)
 
-            var module = Module(
-                name,
-                documentation: type._pModuleDocumentation,
-                source: type._pModuleSource,
-                functions: functions,
-            )
-
-            module.classes = classes.sorted { $0.key < $1.key }
-            for index in module.classes.indices {
-                guard names.insert(module.classes[index].name).inserted else {
-                    throw Self.failure("A class and another export have the same Python name.")
-                }
-                try module.classes[index].validateMembers()
-            }
-            return module
-        }
+        case function(
+            module: any ModuleHost.Type,
+            function: _ExportFunction,
+        )
     }
 }
 

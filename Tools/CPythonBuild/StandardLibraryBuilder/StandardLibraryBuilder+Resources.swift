@@ -6,27 +6,7 @@ import _NIOFileSystem
 
 extension StandardLibraryBuilder {
     func writeResources(_ library: Library) async throws {
-        // Escape arbitrary bytes as C11 string contents, including trigraphs and octal digits.
-        let literals = (0 ... 255).map { byte in
-            switch byte {
-            case 9:
-                "\\t"
-            case 10:
-                "\\n"
-            case 13:
-                "\\r"
-            case 34:
-                "\\\""
-            case 63:
-                "\\?"
-            case 92:
-                "\\\\"
-            case 32 ... 126:
-                String(Unicode.Scalar(UInt8(byte)))
-            default:
-                "\\\(byte >> 6)\((byte >> 3) & 7)\(byte & 7)"
-            }
-        }
+        let literals = (0 ... 255).map(Self.resourceByteLiteral)
 
         func encodeChunk(_ bytes: some Collection<UInt8>, column: inout Int) -> String {
             var source = ""
@@ -71,6 +51,28 @@ extension StandardLibraryBuilder {
             }
 
             try await Self.writeResourceCatalog(library.resources, to: &writer)
+        }
+    }
+
+    // Escape C11 string contents, including trigraphs and octal digits.
+    private static func resourceByteLiteral(_ byte: Int) -> String {
+        switch byte {
+        case 9:
+            "\\t"
+        case 10:
+            "\\n"
+        case 13:
+            "\\r"
+        case 34:
+            "\\\""
+        case 63:
+            "\\?"
+        case 92:
+            "\\\\"
+        case 32 ... 126:
+            String(Unicode.Scalar(UInt8(byte)))
+        default:
+            "\\\(byte >> 6)\((byte >> 3) & 7)\(byte & 7)"
         }
     }
 

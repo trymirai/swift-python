@@ -149,7 +149,7 @@ extension Object {
         return unsafe try Self.take(result, in: self)
     }
 
-    private static func interrupt(_ context: UnsafeMutableRawPointer?) -> Bool {
+    static func interrupt(_ context: UnsafeMutableRawPointer?) -> Bool {
         guard let context = unsafe context else {
             return false
         }

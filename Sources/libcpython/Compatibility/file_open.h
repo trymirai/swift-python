@@ -44,6 +44,17 @@ typedef struct CPython_Files CPython_Files;
 typedef int (*CPython_FileAccessCheck)(void *_Nonnull context, const char *_Nonnull path, int mode,
                                        int options, CPython_FileOperation operation, bool exists);
 
+typedef struct {
+    CPython_FileAccessCheck _Nullable check;
+    void *_Nullable context;
+    CPython_Files *_Nullable files;
+
+    int input;
+    int output;
+    int error;
+} CPython_FileAccessState;
+
+CPython_FileAccessState CPython_CurrentFileAccess(void);
 CPython_Files *_Nullable CPython_NewFiles(void);
 void CPython_FreeFiles(CPython_Files *_Nullable files);
 void CPython_SetFileAccessCheck(CPython_FileAccessCheck _Nullable check, void *_Nullable context,
@@ -83,6 +94,7 @@ typedef struct CPython_Subprocess CPython_Subprocess;
 CPython_Subprocesses *_Nullable CPython_NewSubprocesses(void);
 void CPython_FreeSubprocesses(CPython_Subprocesses *_Nonnull scope);
 void CPython_SetSubprocesses(CPython_Subprocesses *_Nullable scope);
+CPython_Subprocesses *_Nullable CPython_CurrentSubprocesses(void);
 bool CPython_AllowsSubprocesses(void);
 void CPython_StopSubprocesses(CPython_Subprocesses *_Nonnull scope);
 int CPython_JoinSubprocesses(CPython_Subprocesses *_Nonnull scope);

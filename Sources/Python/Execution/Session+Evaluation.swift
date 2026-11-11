@@ -21,10 +21,12 @@ public extension Session {
         filename: String? = nil,
         timeout: Duration? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
+        in context: Context? = nil,
         _ output: (@Sendable (Output.Stream, String) -> Void)? = nil,
     ) async throws -> Execution {
         try await run(
             .interactive(source),
+            in: context,
             scope: scope,
             filename: filename,
             timeout: timeout,
@@ -42,11 +44,13 @@ public extension Session {
         filename: String? = nil,
         timeout: Duration? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
+        in context: Context? = nil,
         committing: @escaping @Sendable (Commit) async throws -> Void,
         output: (@Sendable (Output.Stream, String) -> Void)? = nil,
     ) async throws -> Execution {
         try await run(
             .interactive(source),
+            in: context,
             scope: scope,
             filename: filename,
             timeout: timeout,
@@ -69,8 +73,9 @@ public extension Session {
     nonisolated func initialize(
         scope: (any Sendable)? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
+        in context: Context? = nil,
     ) async throws {
-        try await withExecution(scope: scope) { session, execution in
+        try await withExecution(in: context, scope: scope) { session, execution in
             let redirects = try redirects.mapValues(Runtime.Path.init)
             try session.openInterpreterIfNeeded(execution: execution, redirecting: redirects)
         }
@@ -79,29 +84,32 @@ public extension Session {
     /// Runs synchronously on this session's interpreter thread in the operation queue.
     /// Scoped Python objects and views cannot escape the closure or cross an await.
     nonisolated func enqueue<R: Sendable & ~Copyable>(
+        in context: Context? = nil,
         scope: (any Sendable)? = nil,
         _ body: @Sendable (borrowing Context) throws -> R,
     ) async throws -> R {
-        try await enqueue(in: nil, scope: scope, body)
+        try await enqueue(generation: nil, in: context, scope: scope, body)
     }
 
     /// Runs asynchronous Swift work with a context bound to the current generation.
     /// Each asynchronous context operation takes its own turn in the session queue.
     nonisolated func enqueue<R: Sendable & ~Copyable>(
+        in parent: Context? = nil,
         _ body: @Sendable (borrowing Context) async throws -> R,
     ) async throws -> R {
-        let context = try await enqueue { $0 }
+        let context = try await enqueue(in: parent) { $0 }
         return try await body(context)
     }
 }
 
 extension Session {
     nonisolated func enqueue<R: Sendable & ~Copyable>(
-        in generation: Reference.Store?,
+        generation: Reference.Store?,
+        in context: Context? = nil,
         scope: (any Sendable)? = nil,
         _ body: @Sendable (borrowing Context) throws -> R,
     ) async throws -> R {
-        let result = try await withExecution(scope: scope) { session, execution in
+        let result = try await withExecution(in: context, scope: scope) { session, execution in
             try session
                 .withInterpreter(execution: execution, generation: generation) { interpreter in
                     Session.Transfer(try interpreter.withContext(body, execution: execution))
@@ -112,6 +120,7 @@ extension Session {
 
     nonisolated func run(
         _ source: Interpreter.Source,
+        in context: Context? = nil,
         scope: (any Sendable)?,
         filename: String?,
         timeout: Duration?,
@@ -125,6 +134,7 @@ extension Session {
 
         let settlement = transactional ? Self.checkpointSettlement(committing: committing) : nil
         return try await withExecution(
+            in: context,
             timeout: timeout,
             scope: scope,
             output: output,
@@ -185,10 +195,7 @@ private extension Session {
 
                 if let committing {
                     let commit = Commit(checking: control.finishCheckingInterruption)
-                    let path = Control.sessionPath + [session.origin]
-                    try await Control.$sessionPath.withValue(path) {
-                        try await committing(commit)
-                    }
+                    try await committing(commit)
                 }
 
                 try control.finishCheckingInterruption()

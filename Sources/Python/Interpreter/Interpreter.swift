@@ -36,7 +36,6 @@ struct Interpreter: ~Copyable {
         )
         let storage = pThread.storage
 
-        storage.sessionOrigin = session.origin
         storage.session = session
 
         let packagePaths = try pThread.withAttached(execution: execution) { attachment in
@@ -79,7 +78,7 @@ struct Interpreter: ~Copyable {
     ) throws -> R {
         try pThread.withAttached(execution: execution) { attachment in
             let context = Context(storage: attachment.storage)
-            return try body(context)
+            return try CurrentContext.withAttached { try body(context) }
         }
     }
 
@@ -91,7 +90,9 @@ struct Interpreter: ~Copyable {
 private extension Interpreter {
     static func searchPaths(_ imports: [String], packages: [String]) -> [String] {
         let packagePaths = Set(packages)
-        return imports.filter { !packagePaths.contains($0) } + packages
+        var paths = imports.filter { !packagePaths.contains($0) }
+        paths.append(contentsOf: packages)
+        return paths
     }
 
     static func prepareImports(in attachment: borrowing PThread.Attachment) throws {

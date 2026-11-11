@@ -83,29 +83,30 @@ extension Environment {
         let preparation = try await service.request(request, execution: execution)
         try execution.checkInterruption()
 
-        let resolution: Preparation.Resolution?
+        func publish(_ resolution: Preparation.Resolution?) async throws {
+            let next = previous.updating(local: local.byName, resolution: resolution)
+            guard next != previous else {
+                return
+            }
+
+            let replacesFiles = !next.hasSameWheels(as: previous)
+            try await save(
+                next,
+                replacingFiles: replacesFiles ? resolution : nil,
+                using: service,
+                configuration: configuration,
+                execution: execution,
+            )
+        }
+
         switch preparation {
         case .unchanged:
-            resolution = nil
+            try await publish(nil)
         case .requiresReset:
             return .requiresReset
-        case let .resolved(resolved):
-            resolution = resolved
+        case let .resolved(resolution):
+            try await publish(resolution)
         }
-
-        let next = previous.updating(local: local.byName, resolution: resolution)
-        guard next != previous else {
-            return .applied
-        }
-
-        let replacesFiles = !next.hasSameWheels(as: previous)
-        try await save(
-            next,
-            replacingFiles: replacesFiles ? resolution : nil,
-            using: service,
-            configuration: configuration,
-            execution: execution,
-        )
         return .applied
     }
 

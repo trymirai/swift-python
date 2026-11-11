@@ -11,13 +11,17 @@ internal import libcpython
 @safe
 public struct Context: Sendable {
     let references: Reference.Store
+
     private weak var session: Session?
+
     private weak var execution: Session.Control?
+    private(set) weak var streams: Session.Stream.Descriptors?
 
     init(storage: Interpreter.Storage) {
         references = storage.references
         session = storage.session
         execution = storage.execution
+        streams = PThread.Scope.current?.streams
     }
 
     init() throws {
@@ -119,6 +123,17 @@ public struct Context: Sendable {
         }
         return session
     }
+
+    func checkExecution() throws {
+        guard let execution else {
+            throw Session.Error.closed
+        }
+        try execution.withAccess {}
+    }
+
+    func belongs(to session: Session) -> Bool {
+        self.session === session
+    }
 }
 
 public extension Context {
@@ -126,7 +141,7 @@ public extension Context {
         _ name: String,
         as type: T.Type = T.self,
     ) async throws -> T {
-        try await requireSession().enqueue(in: references) { try $0.get(name, as: type) }
+        try await withSessionContext { try $0.get(name, as: type) }
     }
 
     func set<T: Encodable & Sendable & ~Copyable>(
@@ -134,12 +149,91 @@ public extension Context {
         forKey name: String,
     ) async throws {
         let transfer = Session.Transfer(consume value)
-        try await requireSession().enqueue(in: references) {
+        try await withSessionContext {
             try $0.set(transfer.take(), forKey: name)
         }
     }
 
     func remove(_ name: String) async throws {
-        try await requireSession().enqueue(in: references) { try $0.remove(name) }
+        try await withSessionContext { try $0.remove(name) }
+    }
+
+    private func withSessionContext<Result: Sendable & ~Copyable>(
+        _ body: @Sendable (borrowing Context) throws -> Result,
+    ) async throws -> Result {
+        if execution != nil {
+            return try withAccess(body)
+        }
+        return try await requireSession().enqueue(generation: references, body)
+    }
+}
+
+// MARK: - Context + Attachment
+
+extension Context {
+    func withAccess<Result: ~Copyable>(
+        _ body: (borrowing Context) throws -> Result,
+    ) throws -> Result {
+        if PThread.Scope.current?.matchesTask == true {
+            try checkAccess()
+            return try body(self)
+        }
+        guard let execution else {
+            throw Session.Error.closed
+        }
+        return try execution.withAccess {
+            let streams = self.streams
+            defer { withExtendedLifetime(streams) {} }
+            return try withAttached(body)
+        }
+    }
+
+    private func withAttached<Result: ~Copyable>(
+        _ body: (borrowing Context) throws -> Result,
+    ) throws -> Result {
+        try checkCancellation()
+        return unsafe try references.view.withStorage { storage, guardPointer in
+            guard storage.references === references else {
+                throw Reference.wrongInterpreter()
+            }
+            return try PThread.Scope
+                .run(storage: storage, execution: execution, streams: streams) { scope in
+                    try storage.withFileAccess {
+                        unsafe try withThreadState(in: storage, guardedBy: guardPointer) {
+                            try withAttachedContext(in: scope, body)
+                        }
+                    }
+                }
+        }
+    }
+
+    private func withAttachedContext<Result: ~Copyable>(
+        in scope: PThread.Scope,
+        _ body: (borrowing Context) throws -> Result,
+    ) throws -> Result {
+        try scope.withEvaluation {
+            _ = try Interpreter.Storage.requireCurrent()
+            try checkCancellation()
+            return try scope.storage.withConstructionScope {
+                try body(Context(storage: scope.storage))
+            }
+        }
+    }
+
+    @unsafe
+    private func withThreadState<Result: ~Copyable>(
+        in storage: Interpreter.Storage,
+        guardedBy guardPointer: OpaquePointer,
+        _ body: () throws -> Result,
+    ) throws -> Result {
+        guard let token = unsafe PyThreadState_Ensure(guardPointer) else {
+            throw Runtime.Failure("Unable to attach to the Python interpreter.")
+        }
+        let previousHeap = unsafe CPython_BindHeap(storage.heap)
+        defer {
+            unsafe PyThreadState_Release(token)
+            _ = unsafe CPython_BindHeap(previousHeap)
+        }
+        return try body()
     }
 }

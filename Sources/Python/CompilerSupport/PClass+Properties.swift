@@ -22,7 +22,9 @@ extension _PClass {
     public func _pGetProperty<Value: Decodable & ~Copyable>(
         _ property: Object.Property<Value>,
     ) throws -> Value {
-        try pPropertyOrNone(property).decode(as: Value.self)
+        try withPropertyAccess {
+            try pPropertyOrNone(property).decode(as: Value.self)
+        }
     }
 
     @_documentation(visibility: internal)
@@ -30,8 +32,19 @@ extension _PClass {
         _ value: borrowing Value,
         for property: Object.Property<Value>,
     ) throws {
-        let fields = try pFields()
-        try fields.set(value, forKey: property.key)
+        try withPropertyAccess {
+            let fields = try pFields()
+            try fields.set(value, forKey: property.key)
+        }
+    }
+
+    private func withPropertyAccess<Result: ~Copyable>(
+        _ body: () throws -> Result,
+    ) throws -> Result {
+        if _pIdentity.wrapper == nil {
+            _ = try Interpreter.Storage.requireCurrent()
+        }
+        return try CurrentContext.run { _ in try body() }
     }
 
     @_lifetime(borrow self)
@@ -82,9 +95,7 @@ extension _PClass {
             }
             wrapper = unsafe _overrideLifetime(consume bound, borrowing: self)
         } else {
-            guard let registry = storage.classRegistry else {
-                throw Interpreter.ClassRegistry.unregistered()
-            }
+            let registry = try storage.requireClassRegistry()
             wrapper = try registry.wrapper(for: self, in: self)
             try storage.retainConstructedWrapper(wrapper)
         }

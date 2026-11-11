@@ -8,6 +8,7 @@
 typedef struct {
     int fd;
     bool closed;
+
     uint64_t pipe;
 
     off_t offset;
@@ -17,29 +18,23 @@ struct CPython_Files {
     Descriptor *descriptors;
     size_t count;
     size_t capacity;
+
     uint64_t next_pipe;
 
     size_t checkpoint_count;
     bool checkpoint;
-
-    int streams[3];
 };
 
 static _Thread_local CPython_FileAccessCheck check_file;
 static _Thread_local void *check_context;
 
 static _Thread_local CPython_Files *files;
+static _Thread_local int streams[3] = {-1, -1, -1};
 
 CPython_Files *
 CPython_NewFiles(void)
 {
-    CPython_Files *state = calloc(1, sizeof(*state));
-    if (state != NULL) {
-        for (size_t i = 0; i < 3; ++i) {
-            state->streams[i] = -1;
-        }
-    }
-    return state;
+    return calloc(1, sizeof(CPython_Files));
 }
 
 void
@@ -62,6 +57,13 @@ CPython_SetFileAccessCheck(CPython_FileAccessCheck check, void *context, CPython
     files = state;
 }
 
+CPython_FileAccessState
+CPython_CurrentFileAccess(void)
+{
+    return (CPython_FileAccessState){check_file, check_context, files,
+                                    streams[0], streams[1], streams[2]};
+}
+
 bool
 CPython_RestrictedFiles(void)
 {
@@ -71,18 +73,15 @@ CPython_RestrictedFiles(void)
 void
 CPython_SetStreamDescriptors(int input, int output, int error)
 {
-    if (files != NULL) {
-        files->streams[0] = input;
-        files->streams[1] = output;
-        files->streams[2] = error;
-    }
+    streams[0] = input;
+    streams[1] = output;
+    streams[2] = error;
 }
 
 static bool
 is_stream(int fd)
 {
-    return fd >= 0 &&
-           (fd == files->streams[0] || fd == files->streams[1] || fd == files->streams[2]);
+    return fd >= 0 && (fd == streams[0] || fd == streams[1] || fd == streams[2]);
 }
 
 static Descriptor *
@@ -285,6 +284,27 @@ CPython_DuplicateFileDescriptor(int fd)
     return duplicate;
 }
 
+static CPython_FileTarget *
+authorize_target(CPython_FileTarget *target, int flags, CPython_FileOperation operation,
+                 PyObject *filename)
+{
+    int decision = 0;
+    if (check_file != NULL) {
+        decision = check_file(check_context, CPython_FileTargetPath(target), flags & O_ACCMODE,
+                              flags & ~O_ACCMODE, operation, CPython_FileTargetExists(target));
+    }
+    if (decision > 0) {
+        return target;
+    }
+
+    CPython_FreeFileTarget(target);
+    if (decision == 0) {
+        errno = EACCES;
+        PyErr_SetFromErrnoWithFilenameObject(PyExc_PermissionError, filename);
+    }
+    return NULL;
+}
+
 CPython_FileTarget *
 CPython_CheckFile(const char *path, int base, int flags, CPython_FileOperation operation,
                   PyObject *filename)
@@ -303,21 +323,7 @@ CPython_CheckFile(const char *path, int base, int flags, CPython_FileOperation o
         return NULL;
     }
 
-    int decision = 0;
-    if (check_file != NULL) {
-        decision = check_file(check_context, CPython_FileTargetPath(target), flags & O_ACCMODE,
-                              flags & ~O_ACCMODE, operation, CPython_FileTargetExists(target));
-    }
-    if (decision > 0) {
-        return target;
-    }
-
-    CPython_FreeFileTarget(target);
-    if (decision == 0) {
-        errno = EACCES;
-        PyErr_SetFromErrnoWithFilenameObject(PyExc_PermissionError, filename);
-    }
-    return NULL;
+    return authorize_target(target, flags, operation, filename);
 }
 
 int

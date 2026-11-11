@@ -15,40 +15,43 @@ extension Session.Control {
         typealias Outcome = Swift::Result<Reply, any Swift::Error>
 
         private let operation: @Sendable () async throws -> Reply
-        private let origin: [ObjectIdentifier]
+        private let context: Context?
 
-        private let state: Mutex<State> = .init(State())
+        private let state: Mutex<State>
+
         let pipe: Pipe
-
-        private let completion: AsyncStream<Void>
-        private let completionSignal: AsyncStream<Void>.Continuation
 
         init(
             _ operation: @escaping @Sendable () async throws -> Reply,
-            sessionID: ObjectIdentifier?,
+            context: Context? = nil,
         ) throws {
-            var origin = Session.Control.sessionPath
-            if let sessionID {
-                origin.append(sessionID)
-            }
-
             self.pipe = try Pipe()
 
             self.operation = operation
-            self.origin = origin
-
-            (self.completion, self.completionSignal) = AsyncStream.makeStream()
+            self.context = context
+            self.state = .init(State(streams: context?.streams))
         }
 
         func run() async {
-            await withDiscardingTaskGroup { group in
-                group.addTask { await self.invoke() }
+            await withTaskCancellationHandler {
+                await withDiscardingTaskGroup { group in
+                    group.addTask { await self.invoke() }
 
-                // Either completion or cancellation closes this stream.
-                for await _ in completion {}
+                    await waitForCompletion()
+                    cancel()
+                    group.cancelAll()
+                }
+            } onCancel: {
+                self.cancel()
+            }
+        }
 
-                cancel()
-                group.cancelAll()
+        private func waitForCompletion() async {
+            await withCheckedContinuation { continuation in
+                let finished = state.withLock { $0.waitForCompletion(continuation) }
+                if finished {
+                    continuation.resume()
+                }
             }
         }
 
@@ -57,13 +60,11 @@ extension Session.Control {
                 return
             }
 
-            await Session.Control.$sessionPath.withValue(origin) {
-                do {
-                    try Task.checkCancellation()
-                    finish(.success(try await operation()))
-                } catch {
-                    finish(.failure(error))
-                }
+            do {
+                try Task.checkCancellation()
+                finish(.success(try await operation()))
+            } catch {
+                finish(.failure(error))
             }
         }
 
@@ -71,19 +72,41 @@ extension Session.Control {
             state.withLock { $0.take() }
         }
 
+        func withContext<Result: ~Copyable>(
+            _ body: (borrowing Context) throws -> Result,
+        ) throws -> Result {
+            try checkActive()
+            guard let context else {
+                throw Session.Error.closed
+            }
+            return try context.withAccess(body)
+        }
+
+        func checkActive() throws {
+            guard state.withLock({ $0.phase.isPending }) else {
+                throw Session.Error.closed
+            }
+        }
+
         func cancel() {
             finish(.failure(CancellationError()))
         }
 
         private func finish(_ outcome: Outcome) {
-            let pendingMethods = state.withLock { $0.finish(outcome) }
-            guard let pendingMethods else {
+            guard let pendingMethods = state.withLock({ $0.finish(outcome) }) else {
                 return
             }
-
-            pipe.signal()
-            completionSignal.finish()
+            signalCompletion()
             pendingMethods.forEach { $0.cancel() }
+        }
+
+        private func signalCompletion() {
+            let (continuation, streams) = state.withLock {
+                (exchange(&$0.completion, with: nil), exchange(&$0.streams, with: nil))
+            }
+            pipe.signal()
+            continuation?.resume()
+            withExtendedLifetime(streams) {}
         }
 
         func submit(_ method: any ImportedMethodRequest) throws {
@@ -108,15 +131,14 @@ extension Session.Control {
 
         func poll() throws -> [any ImportedMethodRequest]? {
             try state.withLock { state in
-                guard state.phase.isPending else {
-                    return nil
-                }
-
                 if state.notified {
                     try pipe.consumeNotification()
                     state.notified = false
                 }
 
+                guard state.phase.isPending else {
+                    return nil
+                }
                 return exchange(&state.methods, with: [])
             }
         }
@@ -156,7 +178,18 @@ extension Session.Control.Call {
         var phase: Phase = .pending
 
         var methods: [any ImportedMethodRequest] = []
-        var notified = false
+        var notified: Bool = false
+
+        var completion: CheckedContinuation<Void, Never>?
+        var streams: Session.Stream.Descriptors?
+
+        mutating func waitForCompletion(_ continuation: CheckedContinuation<Void, Never>) -> Bool {
+            guard phase.isPending else {
+                return true
+            }
+            completion = continuation
+            return false
+        }
 
         mutating func take() -> Outcome? {
             guard case let .ready(outcome) = phase else {
@@ -194,9 +227,9 @@ extension Session.Control {
         func run() async {
             switch self {
             case let .export(call):
-                await Session.Control.$currentExport.withValue(call) { await call.run() }
+                await CurrentContext.withExport(call) { await call.run() }
             case let .fileAccess(call):
-                await Session.Control.$currentExport.withValue(nil) { await call.run() }
+                await CurrentContext.withExport(nil) { await call.run() }
             }
         }
 

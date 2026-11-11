@@ -37,7 +37,7 @@ struct ProjectFixture {
     // MARK: Session fixtures
 
     static func withFixture(_ test: @Sendable (Self) async throws -> Void) async throws {
-        try await FileSystem.shared.withTemporaryDirectory { _, root in
+        try await withTemporaryDirectory { root in
             let builderRuntime = try await Python::Runtime(
                 cacheDirectory: root.appending("fixture-cache").string,
             )

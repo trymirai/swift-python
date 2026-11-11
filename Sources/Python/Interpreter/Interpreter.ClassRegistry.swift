@@ -4,12 +4,23 @@
 
 internal import libcpython
 
+extension Interpreter.Storage {
+    func requireClassRegistry() throws -> Interpreter.ClassRegistry {
+        guard let classRegistry else {
+            throw Interpreter.ClassRegistry.unregistered()
+        }
+        return classRegistry
+    }
+}
+
+// MARK: - Interpreter.ClassRegistry
+
 extension Interpreter {
     // All Python references in this registry belong to exactly one interpreter generation.
     final class ClassRegistry {
-        private let classKeys: Set<String>
-        private var isInstalled: Bool = false
+        private let classBindings: [String: (module: String, name: String)]
 
+        private var isInstalled: Bool = false
         private var typesByKey: [String: Reference] = [:]
         private var keysByTypeAddress: [UInt: String] = [:]
         private var wrapperFactory: Reference?
@@ -17,7 +28,13 @@ extension Interpreter {
         private var savedWrappers: [ObjectIdentifier: (Object.Identity, WeakReference?)]?
 
         init(modules: [Module]) {
-            classKeys = Set(modules.flatMap(\.classes).map(\.key))
+            classBindings = Dictionary(uniqueKeysWithValues: modules.flatMap { module in
+                module.classes.map { ($0.key, (module: module.name, name: $0.name)) }
+            })
+        }
+
+        func binding(for classKey: String) -> (module: String, name: String)? {
+            classBindings[classKey]
         }
 
         func register(
@@ -28,7 +45,7 @@ extension Interpreter {
             let address = unsafe UInt(bitPattern: type.pointer)
             guard
                 !isInstalled, typesByKey[key] == nil, keysByTypeAddress[address] == nil,
-                classKeys.contains(key)
+                classBindings[key] != nil
             else {
                 throw Module.Catalog.failure("Class registration is closed or invalid.")
             }
@@ -190,9 +207,9 @@ extension Interpreter {
                 "Invalid Swift object payload.",
             )
 
+            let payload = unsafe Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
             guard
-                let instance = unsafe Unmanaged<AnyObject>.fromOpaque(pointer)
-                    .takeUnretainedValue() as? any _PClass,
+                let instance = payload as? any _PClass,
                 String(reflecting: Swift::type(of: instance)) == key
             else {
                 throw Module.Catalog.failure("The Swift object payload has a different class.")

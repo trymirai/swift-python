@@ -99,23 +99,17 @@ func explicitBufferLeaseMutatesAndReadsPythonStorage() async throws {
     """)
     try await session.enqueue { context in
         let invalid = try context.object("invalid_buffer")
-        do {
+        try expectPythonException("BufferError") {
             let lease = try invalid.buffer(as: UInt8.self)
             _ = lease.count
-            Issue.record("Expected an unsupported exporter to fail.")
-        } catch let exception as Python::Exception {
-            #expect(exception.name == "BufferError")
         }
 
         let object = try context.object("values")
         let lease = try object.mutableBuffer(as: UInt8.self)
         try lease.withMutableSpan { span in
             span[1] = 42
-            do {
+            try expectPythonException("RuntimeError") {
                 try context.set(span.count, forKey: "unsafe_reentry")
-                Issue.record("Expected Python reentry during the buffer borrow to fail.")
-            } catch let exception as Python::Exception {
-                #expect(exception.name == "RuntimeError")
             }
         }
         let sum = try lease.withSpan(BufferModule.sum)

@@ -154,11 +154,8 @@ func attributesSupportNULAndModuleNamesRejectIt() async throws {
         try named.setAttribute("value\0tail", to: 43)
         #expect(try named.attribute("value\0tail").decode(as: Int.self) == 43)
 
-        do {
+        try expectPythonException("ValueError") {
             _ = try context.import(module: "sys\0tail")
-            Issue.record("Expected a NUL module name to fail.")
-        } catch let exception as Python::Exception {
-            #expect(exception.name == "ValueError")
         }
     }
     await session.close()
@@ -312,11 +309,8 @@ private struct RecoveringEncoding: Python::Encodable {
 
     func encode(to encoder: inout Python::Encoder) throws {
         try tuple.encode(to: &encoder)
-        do {
+        try expectPythonException("TypeError") {
             try encoder.encode(12, at: 0)
-            Issue.record("Expected encoding into a tuple to fail.")
-        } catch let error as Python::Exception {
-            #expect(error.name == "TypeError")
         }
         try encoder.encode(42)
     }

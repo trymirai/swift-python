@@ -81,27 +81,36 @@ extension Interpreter {
                 in: attachment,
             )
 
-            let descriptors = try Session.Stream.Descriptors.open(redirects)
-            let numbers = descriptors.numbers
-            let streams = try Object(encoding: numbers, in: attachment)
-            CPython_SetStreamDescriptors(
-                numbers["stdin"] ?? -1,
-                numbers["stdout"] ?? -1,
-                numbers["stderr"] ?? -1,
-            )
-            defer {
-                // Clear the native borrowing slots before the descriptor owner closes them.
-                CPython_SetStreamDescriptors(-1, -1, -1)
-                withExtendedLifetime(descriptors) {}
+            return try Self.withRedirectedStreams(redirects, in: attachment) { streams in
+                let result = unsafe try function.callInterruptibly(
+                    [source.pointer, filename.pointer, control.pointer, streams.pointer],
+                    using: execution,
+                )
+
+                return try result.decode(as: Reply.self).outputOrThrow()
             }
-
-            let result = unsafe try function.callInterruptibly(
-                [source.pointer, filename.pointer, control.pointer, streams.pointer],
-                using: execution,
-            )
-
-            return try result.decode(as: Reply.self).outputOrThrow()
         }
+    }
+
+    private static func withRedirectedStreams<Result>(
+        _ redirects: [Session.Stream: Runtime.Path],
+        in attachment: borrowing PThread.Attachment,
+        _ body: (borrowing Object) throws -> Result,
+    ) throws -> Result {
+        let descriptors = try Session.Stream.Descriptors.open(redirects)
+        let scope = PThread.Scope.current!
+        let previousStreams = scope.streams
+        scope.streams = descriptors
+        let streams = try Object(encoding: descriptors.numbers, in: attachment)
+        Session.Stream.Descriptors.bind(descriptors)
+        defer {
+            scope.streams = previousStreams
+            // Clear the native borrowing slots before the descriptor owner closes them.
+            Session.Stream.Descriptors.bind(nil)
+            withExtendedLifetime(descriptors) {}
+        }
+
+        return try body(streams)
     }
 }
 

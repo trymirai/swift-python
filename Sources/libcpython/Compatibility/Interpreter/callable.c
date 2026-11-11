@@ -1,13 +1,12 @@
 #include "../interpreter.h"
 #include "host_value.h"
 
-#include <pthread.h>
 #include <stdlib.h>
 
 typedef struct {
     HostValue lifetime;
 
-    pthread_t thread;
+    uintptr_t interpreter;
 
     void *context;
     PyObject *(*call)(void *context, PyObject *arguments);
@@ -41,8 +40,8 @@ call_function(PyObject *capsule, PyObject *arguments)
         return NULL;
     }
 
-    if (!pthread_equal(function->thread, pthread_self())) {
-        PyErr_SetString(PyExc_RuntimeError, "A Swift callback must run on its interpreter thread.");
+    if (function->interpreter != CPython_InterpreterKey(NULL)) {
+        PyErr_SetString(PyExc_RuntimeError, "A Swift callback belongs to another interpreter.");
         return NULL;
     }
     return function->call(function->context, arguments);
@@ -66,7 +65,7 @@ CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *ar
     *function = (SwiftFunction){
         .lifetime = {.dispose = free_function},
 
-        .thread = pthread_self(),
+        .interpreter = CPython_InterpreterKey(NULL),
 
         .context = context,
         .call = call,

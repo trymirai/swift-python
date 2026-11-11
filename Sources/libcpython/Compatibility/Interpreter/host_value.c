@@ -1,20 +1,8 @@
 #include "host_value.h"
+#include "checkpoint.h"
 #include "../interpreter.h"
 
 #include <assert.h>
-
-static _Thread_local struct {
-    uintptr_t interpreter;
-
-    HostValue *created;
-    HostValue *retired;
-} checkpoint;
-
-static bool
-is_active(void)
-{
-    return checkpoint.interpreter != 0 && checkpoint.interpreter == CPython_InterpreterKey(NULL);
-}
 
 static void
 insert(HostValue **head, HostValue *value)
@@ -61,20 +49,21 @@ drain(HostValue **head, bool dispose)
 void
 checkpoint_begin_host_values(void)
 {
-    assert(checkpoint.interpreter == 0);
-    checkpoint.interpreter = CPython_InterpreterKey(NULL);
-    assert(checkpoint.interpreter != 0);
+    HostValueCheckpoint *checkpoint = CPython_CurrentHostCheckpoint();
+    assert(checkpoint != NULL && !checkpoint->active);
+    checkpoint->active = true;
 }
 
 void
 checkpoint_finish_host_values(bool commit)
 {
-    assert(is_active());
+    HostValueCheckpoint *checkpoint = CPython_CurrentHostCheckpoint();
+    assert(checkpoint != NULL && checkpoint->active);
     // Disposers can release more values. Those releases must happen outside the checkpoint.
-    checkpoint.interpreter = 0;
+    checkpoint->active = false;
 
-    drain(&checkpoint.retired, commit);
-    drain(&checkpoint.created, !commit);
+    drain(&checkpoint->retired, commit);
+    drain(&checkpoint->created, !commit);
 }
 
 PyObject *
@@ -86,8 +75,9 @@ host_value_capsule(HostValue *value, const char *name, PyCapsule_Destructor dest
         return NULL;
     }
 
-    if (is_active()) {
-        insert(&checkpoint.created, value);
+    HostValueCheckpoint *checkpoint = CPython_CurrentHostCheckpoint();
+    if (checkpoint != NULL && checkpoint->active) {
+        insert(&checkpoint->created, value);
     }
     return capsule;
 }
@@ -95,10 +85,11 @@ host_value_capsule(HostValue *value, const char *name, PyCapsule_Destructor dest
 void
 checkpoint_release_host_value(HostValue *value)
 {
-    if (value->list == &checkpoint.created) {
+    HostValueCheckpoint *checkpoint = CPython_CurrentHostCheckpoint();
+    if (checkpoint != NULL && value->list == &checkpoint->created) {
         remove_value(value);
-    } else if (is_active()) {
-        insert(&checkpoint.retired, value);
+    } else if (checkpoint != NULL && checkpoint->active) {
+        insert(&checkpoint->retired, value);
         return;
     }
     value->dispose(value);

@@ -15,6 +15,10 @@ PyStatus CPython_NewThreadState(PyThreadState *_Nullable *_Nonnull state,
 void CPython_EndThreadState(PyThreadState *_Nonnull state, CPython_Heap *_Nullable heap);
 void CPython_AttachThreadState(PyThreadState *_Nonnull state, CPython_Heap *_Nullable heap);
 void CPython_DetachThreadState(void);
+PyInterpreterView *_Nullable CPython_NewInterpreterView(PyThreadState *_Nonnull state);
+CPython_Heap *_Nullable CPython_BindHeap(CPython_Heap *_Nullable heap);
+void *_Nullable CPython_SetScope(void *_Nullable scope);
+void *_Nullable CPython_CurrentScope(void);
 
 int CPython_BeginCheckpoint(void);
 void CPython_FinishCheckpoint(bool restoring);
@@ -35,6 +39,15 @@ PyObject *_Nullable CPython_CallInterruptibly(
     size_t argument_count,
     void *_Nullable context,
     bool (*_Nonnull interrupt)(void *_Nullable context));
+
+typedef struct {
+    void *_Nullable context;
+    bool (*_Nonnull interrupt)(void *_Nullable context);
+} CPython_Evaluation;
+
+CPython_Evaluation *_Nullable CPython_SetEvaluation(CPython_Evaluation *_Nullable evaluation);
+void CPython_InterruptThreadState(PyThreadState *_Nonnull state);
+bool CPython_TakeThreadInterruption(void);
 
 void CPython_RequestEvaluationInterrupt(PyInterpreterState *_Nonnull interpreter);
 

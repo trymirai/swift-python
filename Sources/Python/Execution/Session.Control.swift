@@ -21,12 +21,6 @@ extension Session {
             Swift::Result<Result, any Swift::Error>,
         ) async -> Swift::Result<Result, any Swift::Error>
 
-        @TaskLocal
-        static var sessionPath: [ObjectIdentifier] = []
-
-        @TaskLocal
-        static var currentExport: ExportCall?
-
         enum Interruption: Sendable {
             case stopped
             case timedOut
@@ -108,6 +102,9 @@ extension Session {
                 result = .failure(error)
             }
 
+            // Every native access must detach before checkpoint settlement or close.
+            await finishAccesses()
+
             if settling != nil || subprocesses != nil {
                 settleCallsAndSubprocesses(on: session, result: &result)
             }
@@ -165,6 +162,25 @@ extension Session {
                 try await ContinuousClock().sleep(until: deadline)
                 requestInterruption(.timedOut)
             } catch {}
+        }
+
+        func withAccess<Result: ~Copyable>(_ body: () throws -> Result) throws -> Result {
+            try checkInterruption()
+            try state.withLock { try $0.beginAccess() }
+            defer {
+                let completion = state.withLock { $0.endAccess() }
+                completion?.resume()
+            }
+            return try body()
+        }
+
+        private func finishAccesses() async {
+            await withCheckedContinuation { continuation in
+                let finished = state.withLock { $0.finishAccesses(continuation) }
+                if finished {
+                    continuation.resume()
+                }
+            }
         }
 
         // MARK: Callback dispatch
@@ -229,11 +245,13 @@ extension Session {
         // MARK: Interruption and settlement
 
         func beginEvaluation(in interpreter: UInt) {
-            state.withLock { $0.evaluatingInterpreter = interpreter }
+            let thread = unsafe UInt(bitPattern: PyThreadState_Get())
+            state.withLock { $0.beginEvaluation(in: interpreter, on: thread) }
         }
 
         func endEvaluation() {
-            state.withLock { $0.evaluatingInterpreter = nil }
+            let thread = unsafe UInt(bitPattern: PyThreadState_Get())
+            state.withLock { $0.endEvaluation(on: thread) }
         }
 
         @discardableResult
@@ -243,7 +261,20 @@ extension Session {
 
         func deliverInterruption() -> Bool {
             _ = interrupt()
-            return state.withLock { $0.markInterruptionDelivered() }
+            let current = unsafe UInt(bitPattern: PyThreadState_Get())
+            let delivery = state.withLock { $0.markInterruptionDelivered(on: current) }
+            guard let (delivered, threads) = delivery else {
+                return false
+            }
+            // Registration and removal require this interpreter's GIL, so these states
+            // cannot disappear before the interruption is queued. No user code runs here.
+            for thread in threads {
+                if let pointer = unsafe UnsafeMutablePointer<PyThreadState>(bitPattern: thread) {
+                    unsafe CPython_InterruptThreadState(pointer)
+                }
+            }
+            let queued = CPython_TakeThreadInterruption()
+            return delivered || queued
         }
 
         private func interrupt(_ requested: Interruption? = nil) -> (
@@ -309,12 +340,24 @@ extension Session {
 
 private extension Session.Control {
     struct State {
+        struct Evaluation {
+            var depth: Int = 0
+            var interrupted: Bool = false
+        }
+
         // A call snapshot tells the caller to close admission for this transition.
         typealias Transition = (reason: Interruption?, calls: [CallID: Invocation]?)
 
         var phase: Phase = .ready
+
         var evaluatingInterpreter: UInt?
+        var evaluatingThreads: [UInt: Evaluation] = [:]
+
         var calls: [CallID: Invocation] = [:]
+
+        var activeAccesses: Int = 0
+        var accessesClosed: Bool = false
+        var accessCompletion: CheckedContinuation<Void, Never>?
 
         var scope: (any Sendable)?
         var outputHandler: OutputHandler?
@@ -323,6 +366,27 @@ private extension Session.Control {
             if case .ready = phase {
                 phase = .running(deadline)
             }
+        }
+
+        mutating func beginAccess() throws {
+            guard phase.isRunning, !accessesClosed else {
+                throw Session.Error.closed
+            }
+            activeAccesses += 1
+        }
+
+        mutating func endAccess() -> CheckedContinuation<Void, Never>? {
+            activeAccesses -= 1
+            return activeAccesses == 0 ? exchange(&accessCompletion, with: nil) : nil
+        }
+
+        mutating func finishAccesses(_ continuation: CheckedContinuation<Void, Never>) -> Bool {
+            accessesClosed = true
+            guard activeAccesses != 0 else {
+                return true
+            }
+            accessCompletion = continuation
+            return false
         }
 
         mutating func admit(_ call: Invocation, id: CallID) throws {
@@ -341,10 +405,29 @@ private extension Session.Control {
                 guard let reason = phase.expiration ?? requested else {
                     return (nil, nil)
                 }
-                phase = .interrupted(reason, delivered: false)
+                phase = .interrupted(reason)
                 return (reason, calls)
             case .interrupted, .finished:
                 return (phase.interruption, nil)
+            }
+        }
+
+        mutating func beginEvaluation(in interpreter: UInt, on thread: UInt) {
+            precondition(evaluatingInterpreter == nil || evaluatingInterpreter == interpreter)
+            evaluatingInterpreter = interpreter
+            evaluatingThreads[thread, default: .init()].depth += 1
+        }
+
+        mutating func endEvaluation(on thread: UInt) {
+            evaluatingThreads[thread]!.depth -= 1
+            if evaluatingThreads[thread]!.depth == 0 {
+                evaluatingThreads.removeValue(forKey: thread)
+            }
+
+            if evaluatingThreads.isEmpty {
+                evaluatingInterpreter = nil
+            } else if phase.interruption != nil {
+                requestEvaluationInterrupt()
             }
         }
 
@@ -358,12 +441,22 @@ private extension Session.Control {
             }
         }
 
-        mutating func markInterruptionDelivered() -> Bool {
-            guard case let .interrupted(reason, false) = phase else {
-                return false
+        mutating func markInterruptionDelivered(on current: UInt) -> (Bool, [UInt])? {
+            guard phase.interruption != nil else {
+                return nil
             }
-            phase = .interrupted(reason, delivered: true)
-            return true
+
+            var delivered = false
+            var threads = [UInt]()
+            for (thread, evaluation) in evaluatingThreads where !evaluation.interrupted {
+                evaluatingThreads[thread]!.interrupted = true
+                if thread == current {
+                    delivered = true
+                } else {
+                    threads.append(thread)
+                }
+            }
+            return (delivered, threads)
         }
 
         mutating func settleCalls() -> [CallID: Invocation] {
@@ -392,7 +485,7 @@ private extension Session.Control {
         case ready
         case running(ContinuousClock.Instant?)
         case settling(ContinuousClock.Instant?)
-        case interrupted(Interruption, delivered: Bool)
+        case interrupted(Interruption)
         case finished(Interruption?)
 
         var isRunning: Bool {
@@ -405,7 +498,7 @@ private extension Session.Control {
 
         var interruption: Interruption? {
             switch self {
-            case let .interrupted(reason, _):
+            case let .interrupted(reason):
                 reason
             case let .finished(reason):
                 reason

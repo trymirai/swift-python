@@ -1,6 +1,7 @@
 """Assemble Python classes and bind their instances to Swift peers."""
 
 from collections import namedtuple
+from inspect import Signature
 from types import ModuleType
 
 from .functions import FunctionFactory, identifier, is_reserved_member, require_free_name
@@ -37,16 +38,27 @@ class NativeClasses:
         constructor = create(constructor, module) if constructor is not None else None
         members = {method[0]: create(method, module, member=True) for method in methods}
 
-        for property_name, property_doc, getter, setter in properties:
+        def prepare_property(record):
+            property_name, property_doc, getter, setter = record
             identifier(property_name)
             if is_reserved_member(property_name):
                 raise ValueError("Reserved native property name")
 
-            members[property_name] = property(
-                create(getter, module),
+            getter = create(getter, module)
+            annotation = getter.__signature__.return_annotation
+            if annotation is not Signature.empty:
+                property_doc = f"{annotation}\n\n{property_doc or ''}".rstrip()
+
+            descriptor = property(
+                getter,
                 create(setter, module) if setter is not None else None,
                 doc=property_doc,
             )
+            return property_name, descriptor
+
+        for record in properties:
+            property_name, descriptor = prepare_property(record)
+            members[property_name] = descriptor
 
         return _PreparedClass(module, key, base, name, documentation, constructor, members)
 
@@ -70,15 +82,20 @@ class NativeClasses:
 
     def _install_pending(self, pending: list[_PreparedClass]) -> None:
         while pending:
-            ready = [
-                record for record in pending if record.base is None or record.base in self._types
-            ]
+            ready = []
+            blocked = []
+            for record in pending:
+                if record.base is None or record.base in self._types:
+                    ready.append(record)
+                else:
+                    blocked.append(record)
+
             if not ready:
                 raise TypeError("A native class base module is missing")
 
             for record in ready:
                 self._make_class(record)
-                pending.remove(record)
+            pending[:] = blocked
 
     def wrap(self, key, capsule):
         wrapper = object.__new__(self._types[key])

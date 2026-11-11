@@ -31,15 +31,15 @@ extension ExprSyntax {
 
 extension TypeSyntax {
     func concreteSpelling(owner: String) -> String {
-        var text = trimmedDescription
+        let source = trimmedDescription
+        var text = source
         for prefix in ["borrowing ", "consuming ", "inout "] {
             if text.hasPrefix(prefix) {
                 text.removeFirst(prefix.count)
             }
         }
 
-        return ConcreteSelfRewriter(owner)
-            .rewrite(TypeSyntax(stringLiteral: text))
-            .trimmedDescription
+        let type = text == source ? self : TypeSyntax(stringLiteral: text)
+        return ConcreteSelfRewriter(owner).rewrite(type).trimmedDescription
     }
 }

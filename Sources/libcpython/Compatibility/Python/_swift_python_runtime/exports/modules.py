@@ -104,7 +104,7 @@ def _execute_sources(
             {
                 dependency: None
                 for dependency in dependencies
-                if dependency.partition(".")[0] not in module.__dict__
+                if dependency != name and dependency.partition(".")[0] not in module.__dict__
             }
         )
         if header:

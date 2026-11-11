@@ -10,16 +10,25 @@ public extension _ExportFunction {
         let text: String
         let imports: [(module: String, name: String)]
 
+        private let suffix: String
+        // Exported class names resolve when encoding, after their modules have been selected.
+        private let classKey: String?
+
         // The Swift binder injects Context before calling the function.
         let isContext: Bool
 
         init(
             text: String,
+            suffix: String = "",
+            classKey: String? = nil,
             imports: [(module: String, name: String)] = [],
             isContext: Bool = false,
         ) {
             self.text = text
             self.imports = imports
+
+            self.suffix = suffix
+            self.classKey = classKey
 
             self.isContext = isContext
         }
@@ -28,9 +37,8 @@ public extension _ExportFunction {
             self.init(reflecting: type)
         }
 
-        // This overload can inspect imported types and their containers through Any.Type.
         public init<T>(_ type: T.Type) {
-            self = Self.imported(for: type) ?? Self(reflecting: type)
+            self = Self.known(for: type) ?? Self(reflecting: type)
         }
 
         private init<T: ~Copyable & ~Escapable>(reflecting type: T.Type) {
@@ -40,21 +48,34 @@ public extension _ExportFunction {
             )
         }
 
-        private static func imported(for type: Any.Type) -> Self? {
+        private static func known(for type: Any.Type) -> Self? {
             if let imported = type as? any _PImported.Type {
                 let binding = imported._pImport
                 return .init(text: "\(binding.module).\(binding.name)", imports: [binding])
             }
-
-            return (type as? any ImportedAnnotationContainer.Type)?.importedAnnotation
+            if let container = type as? any AnnotationContainer.Type {
+                return container.annotation
+            }
+            if type is any _PClass.Type {
+                return .init(text: "", classKey: String(reflecting: type))
+            }
+            if let raw = type as? any RawRepresentable.Type {
+                return rawAnnotation(for: raw)
+            }
+            return nil
         }
 
-        // A container only spells its element type when that type requires an import.
-        fileprivate static func imported(
-            for type: Any.Type,
-            wrapping format: (String) -> String,
-        ) -> Self? {
-            imported(for: type).map { .init(text: format($0.text), imports: $0.imports) }
+        private static func rawAnnotation<T: RawRepresentable>(for _: T.Type) -> Self {
+            Self(T.RawValue.self)
+        }
+
+        fileprivate func wrapped(prefix: String, suffix: String) -> Self {
+            .init(
+                text: prefix + text,
+                suffix: self.suffix + suffix,
+                classKey: classKey,
+                imports: imports,
+            )
         }
 
         private static func reflectedText<T: ~Copyable & ~Escapable>(for type: T.Type) -> String {
@@ -86,37 +107,47 @@ public extension _ExportFunction {
 
 extension _ExportFunction.Annotation: Encodable {
     public func encode(to encoder: inout Encoder) throws {
-        try encoder.encode(text, at: 0)
+        var text = self.text
+        var imports = self.imports
+        if let classKey {
+            let storage = try Interpreter.Storage.requireCurrent()
+            guard let binding = storage.classRegistry?.binding(for: classKey) else {
+                throw Interpreter.ClassRegistry.unregistered()
+            }
+            text += "\(binding.module).\(binding.name)"
+            imports.append(binding)
+        }
+        try encoder.encode(text + suffix, at: 0)
         try encoder.encode(imports.map { [$0.module, $0.name] }, at: 1)
     }
 }
 
-// MARK: - ImportedAnnotationContainer
+// MARK: - AnnotationContainer
 
-private protocol ImportedAnnotationContainer {
-    static var importedAnnotation: _ExportFunction.Annotation? { get }
+private protocol AnnotationContainer {
+    static var annotation: _ExportFunction.Annotation { get }
 }
 
-// MARK: - Optional + ImportedAnnotationContainer
+// MARK: - Optional + AnnotationContainer
 
-extension Optional: ImportedAnnotationContainer where Wrapped: Copyable {
-    fileprivate static var importedAnnotation: _ExportFunction.Annotation? {
-        _ExportFunction.Annotation.imported(for: Wrapped.self) { "\($0) | None" }
+extension Optional: AnnotationContainer where Wrapped: Copyable {
+    fileprivate static var annotation: _ExportFunction.Annotation {
+        _ExportFunction.Annotation(Wrapped.self).wrapped(prefix: "", suffix: " | None")
     }
 }
 
-// MARK: - Array + ImportedAnnotationContainer
+// MARK: - Array + AnnotationContainer
 
-extension Array: ImportedAnnotationContainer {
-    fileprivate static var importedAnnotation: _ExportFunction.Annotation? {
-        _ExportFunction.Annotation.imported(for: Element.self) { "list[\($0)]" }
+extension Array: AnnotationContainer {
+    fileprivate static var annotation: _ExportFunction.Annotation {
+        _ExportFunction.Annotation(Element.self).wrapped(prefix: "list[", suffix: "]")
     }
 }
 
-// MARK: - Dictionary + ImportedAnnotationContainer
+// MARK: - Dictionary + AnnotationContainer
 
-extension Dictionary: ImportedAnnotationContainer where Key == String {
-    fileprivate static var importedAnnotation: _ExportFunction.Annotation? {
-        _ExportFunction.Annotation.imported(for: Value.self) { "dict[str, \($0)]" }
+extension Dictionary: AnnotationContainer where Key == String {
+    fileprivate static var annotation: _ExportFunction.Annotation {
+        _ExportFunction.Annotation(Value.self).wrapped(prefix: "dict[str, ", suffix: "]")
     }
 }

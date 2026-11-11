@@ -227,7 +227,7 @@ func cancellingOnePythonAwaitCancelsOnlyItsSwiftCallback() async throws {
     else:
         raise AssertionError("Expected the first callback to be cancelled")
     assert await answer == 42
-    """, timeout: .seconds(5))
+    """)
 }
 
 func nextSignal(from stream: AsyncStream<Void>) async -> Void? {

@@ -32,13 +32,25 @@ struct PThread: ~Copyable {
                 default: "Unable to create a Python interpreter.",
             ))
         }
+
+        let storage: Interpreter.Storage
+        do {
+            let view = unsafe try Interpreter.View(state: pointer)
+            storage = unsafe Interpreter.Storage(
+                key: CPython_InterpreterKey(pointer),
+                heap: heap,
+                view: view,
+                fileAccess: fileAccess,
+                schedule: scheduleRelease,
+            )
+        } catch {
+            unsafe CPython_EndThreadState(pointer, heap)
+            throw error
+        }
+
         unsafe self.pointer = pointer
         unsafe self.heap = heap
-        self.storage = unsafe Interpreter.Storage(
-            key: CPython_InterpreterKey(pointer),
-            fileAccess: fileAccess,
-            schedule: scheduleRelease,
-        )
+        self.storage = storage
     }
 
     deinit {
@@ -66,36 +78,26 @@ struct PThread: ~Copyable {
         releasingReferences: Bool = true,
         _ body: (borrowing Attachment) throws -> Result,
     ) rethrows -> Result {
-        // withUnsafeCurrentTask requires a Copyable result.
-        var result: Result?
+        precondition(unsafe PyThreadState_GetUnchecked() == nil)
+        unsafe CPython_AttachThreadState(pointer, heap)
+        defer { CPython_DetachThreadState() }
 
-        unsafe try withUnsafeCurrentTask { task in
-            precondition(unsafe PyThreadState_GetUnchecked() == nil)
-            unsafe CPython_AttachThreadState(pointer, heap)
-
-            unsafe storage.attachedTask = task
-            storage.execution = execution
-            defer {
-                storage.execution = nil
-                unsafe storage.attachedTask = nil
-                CPython_DetachThreadState()
-            }
-
-            result = try storage.withFileAccess {
-                if releasingReferences {
-                    storage.releasePendingReferences()
+        return try Scope.run(storage: storage, execution: execution) { scope in
+            try storage.withFileAccess {
+                try scope.withEvaluation {
+                    if releasingReferences {
+                        storage.releasePendingReferences()
+                    }
+                    return try Self.withAttachment(to: storage, body)
                 }
-                return try Self.withAttachment(to: storage, body)
             }
         }
-
-        return result!
     }
 
     // CPython enters Swift callbacks with the originating state already attached.
     // This scope borrows that attachment without releasing it on return.
     @unsafe
-    static func withCurrent<Result>(
+    static func withCallbackAttachment<Result>(
         _ body: (borrowing Attachment) throws -> Result,
     ) throws -> Result {
         let storage = try Interpreter.Storage.requireCurrent()

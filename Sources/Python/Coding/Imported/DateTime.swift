@@ -9,7 +9,7 @@ public import Foundation
 // MARK: - DateTime
 
 /// A reference to a `datetime.datetime` in the current Python session.
-/// Use its Swift members inside `Session.enqueue` or a synchronous Swift export.
+/// Use its Swift members inside `Session.enqueue` or a Swift export.
 @PythonImportedClass(module: "datetime", name: "datetime")
 public struct DateTime {
     @PythonProperty(isReadOnly: true)
@@ -42,23 +42,23 @@ public struct DateTime {
         second: Int = 0,
         microsecond: Int = 0,
         fold: Int = 0,
+        in context: Context,
     ) throws {
-        self = try Self.withClass { type in
-            try type.call(
-                arguments: [year, month, day, hour, minute, second, microsecond],
-                keywords: [("fold", fold)],
-            )
-            .decode()
-        }
+        self = try context.construct(
+            Self.self,
+            arguments: [year, month, day, hour, minute, second, microsecond],
+            keywords: [("fold", fold)],
+        )
     }
 
     /// Creates a UTC datetime from seconds since the Unix epoch.
-    public init(utcTimestamp seconds: Double) throws {
-        self = try Self.withClass { type in
-            let utc = try Object.import(module: "datetime", in: type).attribute("UTC")
-            let timestamp = try Object(encoding: seconds, in: type)
-            return try type.attribute("fromtimestamp").call(timestamp, utc).decode()
-        }
+    public init(utcTimestamp seconds: Double, in context: Context) throws {
+        try self.init(timestamp: seconds, utcOffset: 0, in: context)
+    }
+
+    /// Parses a Python ISO datetime in the supplied context.
+    public init(isoFormat text: String, in context: Context) throws {
+        self = try context.call(Self.self, method: "fromisoformat", arguments: [text])
     }
 
     /// Returns the current local time as a naive datetime.
@@ -83,16 +83,78 @@ public struct DateTime {
     public func timeZoneName() throws -> String?
 }
 
+private extension DateTime {
+    init(timestamp: Double, utcOffset: Int, in context: Context) throws {
+        let offset = try context.construct(
+            module: "datetime",
+            name: "timedelta",
+            keywords: [("seconds", utcOffset)],
+        )
+        let zone = try context.construct(module: "datetime", name: "timezone", arguments: [offset])
+        self = try context.call(Self.self, method: "fromtimestamp", arguments: [timestamp, zone])
+    }
+}
+
 #if canImport(Foundation)
 public extension DateTime {
     /// Creates a UTC datetime for a Foundation instant.
-    init(_ instant: Foundation::Date) throws {
-        try self.init(utcTimestamp: instant.timeIntervalSince1970)
+    init(_ instant: Foundation::Date, in context: Context) throws {
+        try self.init(utcTimestamp: instant.timeIntervalSince1970, in: context)
+    }
+
+    /// Creates a datetime with the zone's UTC offset at this instant.
+    init(_ instant: Foundation::Date, timeZone: TimeZone, in context: Context) throws {
+        try self.init(
+            timestamp: instant.timeIntervalSince1970,
+            utcOffset: timeZone.secondsFromGMT(for: instant),
+            in: context,
+        )
     }
 
     /// Converts to a Foundation instant using Python's timestamp semantics.
     func foundationDate() throws -> Foundation::Date {
-        try .init(timeIntervalSince1970: timestamp())
+        try Foundation::Date(self)
+    }
+}
+
+// MARK: - Foundation.Date
+
+public extension Foundation::Date {
+    /// Converts a Python datetime using its timestamp semantics.
+    init(_ datetime: Python::DateTime) throws {
+        self.init(timeIntervalSince1970: try datetime.timestamp())
+    }
+}
+
+// MARK: - Foundation.TimeZone
+
+public extension Foundation::TimeZone {
+    /// Reads an IANA time zone or UTC offset. Returns nil for a naive datetime.
+    init?(_ datetime: Python::DateTime) throws {
+        let zone: TimeZone? = try datetime { object in
+            let offset = try object.attribute("utcoffset").call()
+            guard try offset.decode(as: Python::Reference?.self) != nil else {
+                return nil
+            }
+            let identifier = try? object.attribute("tzinfo")
+                .attribute("key")
+                .decode(as: String.self)
+            if let identifier, let zone = TimeZone(identifier: identifier) {
+                return zone
+            }
+            let seconds = try offset.attribute("total_seconds").call().decode(as: Double.self)
+            guard
+                let seconds = Int(exactly: seconds),
+                let zone = TimeZone(secondsFromGMT: seconds)
+            else {
+                throw Exception(name: "ValueError", message: "Cannot represent this UTC offset.")
+            }
+            return zone
+        }
+        guard let zone else {
+            return nil
+        }
+        self = zone
     }
 }
 #endif

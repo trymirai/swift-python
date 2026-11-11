@@ -62,6 +62,8 @@ extension CPythonBuild.Generate {
             )
     }
 
+    // MARK: Source graph
+
     private static func prepareSourceGraph(
         at source: FilePath,
         in workspace: borrowing BuildWorkspace,
@@ -148,54 +150,6 @@ extension CPythonBuild.Generate {
         return revision
     }
 
-    private struct SourceGraph {
-        var sourcePrefix: String = ""
-
-        var translationUnits: Set<String> = []
-        var links: Set<String> = []
-        var generated: Set<String> = []
-
-        init(_ plan: String) throws {
-            for line in plan.split(whereSeparator: \.isNewline) {
-                try addEntry(line)
-            }
-
-            guard
-                !sourcePrefix.isEmpty, !translationUnits.isEmpty, !generated.isEmpty,
-                links.union(generated)
-                    .allSatisfy({ CPythonBuild.Generate.isRelativeSourcePath(FilePath($0)) }),
-                links.isDisjoint(with: generated)
-            else {
-                throw BuildError("Invalid paths in the OpenSSL source graph.")
-            }
-        }
-
-        private mutating func addEntry(_ line: Substring) throws {
-            let fields = line.split(separator: "\t", maxSplits: 1)
-            guard fields.count == 2 else {
-                throw BuildError("Unexpected entry in the OpenSSL source graph.")
-            }
-
-            let name = String(fields[1])
-            switch fields[0] {
-            case "prefix":
-                sourcePrefix = name
-            case "source":
-                translationUnits.insert(name)
-                links.insert(name)
-            case "generated-source":
-                translationUnits.insert(name)
-                generated.insert(name)
-            case "generated-header":
-                generated.insert(name)
-            case "header":
-                links.insert(name)
-            default:
-                throw BuildError("Unknown entry in the OpenSSL source graph.")
-            }
-        }
-    }
-
     private static func includeFragments(
         in graph: inout SourceGraph,
         at source: FilePath,
@@ -233,6 +187,8 @@ extension CPythonBuild.Generate {
             }
         }
     }
+
+    // MARK: Package layout
 
     private static func stageLayout(
         _ graph: SourceGraph,
@@ -356,6 +312,8 @@ extension CPythonBuild.Generate {
             && path.components.allSatisfy { $0.kind == .regular }
     }
 
+    // MARK: Publication
+
     private static let generatedDirectories: [String] = ["Generated", "src"]
 
     private static func publish(
@@ -389,7 +347,7 @@ extension CPythonBuild.Generate {
             }
         }
 
-        do {
+        func saveInstalledDirectories() async throws {
             for name in Self.generatedDirectories {
                 let path = installed.appending(name)
                 if try await fileSystem.info(forFileAt: path, infoAboutSymbolicLink: true) != nil {
@@ -397,11 +355,18 @@ extension CPythonBuild.Generate {
                     saved.append(name)
                 }
             }
+        }
 
+        func installCandidateDirectories() async throws {
             for name in Self.generatedDirectories {
                 try await moveDirectory(name, from: candidate, to: installed)
                 replaced.append(name)
             }
+        }
+
+        do {
+            try await saveInstalledDirectories()
+            try await installCandidateDirectories()
 
             if let contents {
                 try await contents.write(
@@ -450,4 +415,56 @@ extension CPythonBuild.Generate {
         print "header\t", File::Spec->abs2rel($_, $root), "\n";
     }}, map { "$root/$_" } qw(include crypto ssl providers));
     """#
+}
+
+// MARK: - CPythonBuild.Generate.SourceGraph
+
+private extension CPythonBuild.Generate {
+    struct SourceGraph {
+        var sourcePrefix: String = ""
+
+        var translationUnits: Set<String> = []
+        var links: Set<String> = []
+        var generated: Set<String> = []
+
+        init(_ plan: String) throws {
+            for line in plan.split(whereSeparator: \.isNewline) {
+                try addEntry(line)
+            }
+
+            guard
+                !sourcePrefix.isEmpty, !translationUnits.isEmpty, !generated.isEmpty,
+                links.union(generated)
+                    .allSatisfy({ CPythonBuild.Generate.isRelativeSourcePath(FilePath($0)) }),
+                links.isDisjoint(with: generated)
+            else {
+                throw BuildError("Invalid paths in the OpenSSL source graph.")
+            }
+        }
+
+        private mutating func addEntry(_ line: Substring) throws {
+            let fields = line.split(separator: "\t", maxSplits: 1)
+            guard fields.count == 2 else {
+                throw BuildError("Unexpected entry in the OpenSSL source graph.")
+            }
+
+            let name = String(fields[1])
+            switch fields[0] {
+            case "prefix":
+                sourcePrefix = name
+            case "source":
+                translationUnits.insert(name)
+                links.insert(name)
+            case "generated-source":
+                translationUnits.insert(name)
+                generated.insert(name)
+            case "generated-header":
+                generated.insert(name)
+            case "header":
+                links.insert(name)
+            default:
+                throw BuildError("Unknown entry in the OpenSSL source graph.")
+            }
+        }
+    }
 }

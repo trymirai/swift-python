@@ -49,7 +49,7 @@ struct SubprocessTests {
 
     @Test
     func runsSubprocessInAStandaloneScript() async throws {
-        try await FileSystem.shared.withTemporaryDirectory { _, directory in
+        try await withTemporaryDirectory { directory in
             let script = directory.appending("run.py")
             try await """
             import subprocess
@@ -66,7 +66,7 @@ struct SubprocessTests {
 
     @Test
     func waitsForChildrenBeforePublishing() async throws {
-        try await FileSystem.shared.withTemporaryDirectory { _, directory in
+        try await withTemporaryDirectory { directory in
             let output = directory.appending("child.txt")
             let session = try await transactionalSession()
             defer { await session.close() }
@@ -120,12 +120,13 @@ struct SubprocessTests {
         let (started, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let task = Task {
             defer { signal.finish() }
+            // The child outlives the test limit; completion requires killing its process group.
             return try await session.evaluate(
                 #"""
                 import subprocess
 
                 child = subprocess.Popen(
-                    ["/bin/sh", "-c", "sleep 60 & printf 'ready\n'; wait"],
+                    ["/bin/sh", "-c", "sleep 300 & printf 'ready\n'; wait"],
                     stdout=subprocess.PIPE,
                 )
                 assert child.stdout.readline() == b"ready\n"
@@ -141,7 +142,6 @@ struct SubprocessTests {
         defer { task.cancel() }
 
         _ = try await #require(nextSignal(from: started))
-        let cancellation = ContinuousClock.now
         if cancelTask {
             task.cancel()
         } else {
@@ -149,7 +149,6 @@ struct SubprocessTests {
         }
 
         #expect(try await task.value.end == .stopped)
-        #expect(cancellation.duration(to: .now) < .seconds(15))
         #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")
     }
 

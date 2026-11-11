@@ -10,52 +10,27 @@ import Synchronization
 extension Interpreter {
     @safe
     final class Storage {
-        private struct BufferBorrow {
-            let id: UInt64
-
-            let address: UInt
-            let byteCount: UInt
-            let isMutable: Bool
-
-            func overlaps(address other: UInt, byteCount otherByteCount: UInt) -> Bool {
-                guard byteCount != 0, otherByteCount != 0 else {
-                    return false
-                }
-                // Subtract addresses to avoid overflowing the end of a range.
-                if address >= other {
-                    return address - other < otherByteCount
-                }
-                return other - address < byteCount
-            }
-        }
-
         // Entries borrow PThread storage until interpreter destruction completes.
         private static let registry: Mutex<[UInt: UInt]> = .init([:])
 
         let key: UInt
-        let references: Reference.Store
-        let fileAccess: Interpreter.FileAccess?
+        let heap: OpaquePointer?
 
-        var sessionOrigin: ObjectIdentifier?
+        let references: Reference.Store
+
+        let fileAccess: Interpreter.FileAccess?
         weak var session: Session?
 
         private var isClosed: Bool = false
         var checkpoint: CheckpointState = .inactive
 
-        // Only valid within the withUnsafeCurrentTask scope that owns the attachment.
-        @unsafe
-        var attachedTask: UnsafeCurrentTask?
-        var execution: Session.Control?
-
-        private var nextCallID: Int = 0
-
         var namespace: Reference?
-        var arrayType: Reference?
 
         var classRegistry: Interpreter.ClassRegistry?
         var defaultArgumentMarker: UInt = 0
-        private var constructedWrappers: [Reference] = []
+        private var nextCallID: Int = 0
 
+        var arrayType: Reference?
         private var borrowedBuffers: [BufferBorrow] = []
         private var nextBorrowID: UInt64 = 0
 
@@ -63,14 +38,21 @@ extension Interpreter {
         private var pendingBufferReleases: [UInt] = []
         private var pendingObjectReleases: [UInt] = []
 
+        var execution: Session.Control? {
+            PThread.Scope.current?.execution
+        }
+
         init(
             key: UInt,
+            heap: OpaquePointer?,
+            view: Interpreter.View,
             fileAccess: Interpreter.FileAccess?,
             schedule: @escaping @Sendable () -> Void,
         ) {
             self.key = key
+            unsafe self.heap = heap
             self.fileAccess = fileAccess
-            self.references = Reference.Store(schedule: schedule)
+            self.references = Reference.Store(view: view, schedule: schedule)
 
             let pointer = unsafe UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque())
             Self.registry.withLock { $0[key] = pointer }
@@ -78,6 +60,10 @@ extension Interpreter {
 
         static func current() -> Interpreter.Storage? {
             let key = CPython_InterpreterKey(nil)
+            return lookup(key)
+        }
+
+        static func lookup(_ key: UInt) -> Interpreter.Storage? {
             guard
                 key != 0, let bits = registry.withLock({ $0[key] }),
                 let pointer = unsafe UnsafeRawPointer(bitPattern: bits)
@@ -92,30 +78,38 @@ extension Interpreter {
                 throw Session.Error.closed
             }
 
+            try state.checkTaskAttachment()
+            try state.checkReentry()
+            return state
+        }
+
+        private func checkTaskAttachment() throws {
             // Task.immediate can start on the attached thread before suspending.
-            let matchesTask = unsafe withUnsafeCurrentTask { unsafe $0 == state.attachedTask }
-            guard matchesTask else {
+            guard
+                let scope = PThread.Scope.current, scope.storage === self,
+                scope.matchesTask
+            else {
                 throw Exception(
                     name: "RuntimeError",
                     message: "Python is attached to another Swift task.",
                 )
             }
+        }
 
-            guard state.checkpoint != .settling else {
+        private func checkReentry() throws {
+            guard checkpoint != .settling else {
                 throw Exception(
                     name: "RuntimeError",
                     message: "The interpreter is restoring its execution state.",
                 )
             }
 
-            guard state.borrowedBuffers.isEmpty else {
+            guard borrowedBuffers.isEmpty else {
                 throw Exception(
                     name: "RuntimeError",
                     message: "Python reentry is unavailable while a buffer is borrowed.",
                 )
             }
-
-            return state
         }
 
         func settleCheckpoint(_ body: () -> Void) {
@@ -145,16 +139,23 @@ extension Interpreter {
             _ body: () throws -> Result,
         ) rethrows -> Result {
             // A nested Swift callback releases only the wrappers it created.
-            let boundary = constructedWrappers.count
+            guard let scope = PThread.Scope.current else {
+                preconditionFailure("Missing Python attachment scope.")
+            }
+            let boundary = scope.constructedWrappers.count
             defer {
-                constructedWrappers.removeSubrange(boundary...)
+                scope.constructedWrappers.removeSubrange(boundary...)
                 releasePendingReferences()
             }
             return try body()
         }
 
         func retainConstructedWrapper(_ wrapper: borrowing Object) throws {
-            constructedWrappers.append(unsafe try references.retain(wrapper.pointer))
+            let reference = unsafe try references.retain(wrapper.pointer)
+            guard let scope = PThread.Scope.current else {
+                throw Session.Error.closed
+            }
+            scope.constructedWrappers.append(reference)
         }
 
         func releasePendingReferences() {
@@ -255,6 +256,30 @@ extension Interpreter.Storage {
         unsafe PyBuffer_Release(pointer)
         unsafe pointer.deinitialize(count: 1)
         unsafe pointer.deallocate()
+    }
+}
+
+// MARK: - Interpreter.Storage.BufferBorrow
+
+private extension Interpreter.Storage {
+    struct BufferBorrow {
+        let id: UInt64
+
+        let address: UInt
+        let byteCount: UInt
+        let isMutable: Bool
+
+        func overlaps(address other: UInt, byteCount otherByteCount: UInt) -> Bool {
+            guard byteCount != 0, otherByteCount != 0 else {
+                return false
+            }
+
+            // Subtract addresses to avoid overflowing the end of a range.
+            if address >= other {
+                return address - other < otherByteCount
+            }
+            return other - address < byteCount
+        }
     }
 }
 

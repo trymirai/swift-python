@@ -177,7 +177,7 @@ private func checkInheritedClass(in session: Python::Session) async throws {
     _ = try await session.evaluate("""
     from counter_base import Counter
     from counter_child import Labeled, echo, echoList, ExistingInstance
-    import inspect, weakref, gc
+    import inspect, weakref, gc, typing
 
     x = Labeled(40, label='x')
     assert isinstance(x, Counter)
@@ -195,6 +195,13 @@ private func checkInheritedClass(in session: Python::Session) async throws {
     assert x.readOnlyValue == 7
     assert not hasattr(x, 'secret')
     assert list(inspect.signature(Counter.increment).parameters) == ['self', 'amount']
+    assert inspect.signature(echo).return_annotation == 'counter_base.Counter'
+    assert typing.get_type_hints(echo) == {'value': Counter, 'return': Counter}
+    assert typing.get_type_hints(echoList)['return'] == list[Counter]
+    assert typing.get_type_hints(Counter.recall)['return'] == Counter | None
+    assert typing.get_type_hints(Counter.next.fget)['return'] == Counter | None
+    assert Counter.next.__doc__.startswith('counter_base.Counter | None')
+
 
     linked = Counter(12, True)
     assert linked.value == 12 and linked.next is linked

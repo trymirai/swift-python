@@ -17,25 +17,30 @@ func callbackCannotAwaitItsOwnSession() async throws {
     }
 
     let functions: [Python::Module.Function] = [
-        .init("read", start: { _, _ in
-            Python::Module.Function.makeOperation {
-                try await callbackSession().get("value", as: Int.self)
+        .init("read", start: { _, context in
+            let python = context
+            return Python::Module.Function.makeOperation {
+                try await callbackSession().get("value", as: Int.self, in: python)
             }
         }),
-        .init("reset", start: { _, _ in
-            Python::Module.Function.makeOperation {
-                try await callbackSession().reset()
+        .init("reset", start: { _, context in
+            let python = context
+            return Python::Module.Function.makeOperation {
+                try await callbackSession().reset(in: python)
             }
         }),
-        .init("imports", start: { _, _ in
-            Python::Module.Function.makeOperation {
-                try await callbackSession().replaceImportPaths([])
+        .init("imports", start: { _, context in
+            let python = context
+            return Python::Module.Function.makeOperation {
+                try await callbackSession().replaceImportPaths([], in: python)
             }
         }),
-        .init("evaluate") { _ in
-            _ = try await callbackSession().evaluate("1")
-            return .none
-        },
+        .init("evaluate", start: { _, context in
+            let python = context
+            return Python::Module.Function.makeOperation {
+                _ = try await callbackSession().evaluate("1", in: python)
+            }
+        }),
     ]
 
     let module = Python::Module("reentry", functions: functions)
@@ -64,16 +69,18 @@ func callbackCannotAwaitItsOwnSession() async throws {
 func callbackChainCannotAwaitAnAncestor() async throws {
     let targets = Mutex<(first: Python::Session, second: Python::Session)?>(nil)
     defer { targets.withLock { $0 = nil } }
-    let forward = Python::Module.Function("forward", start: { _, _ in
-        Python::Module.Function.makeOperation {
+    let forward = Python::Module.Function("forward", start: { _, context in
+        let python = context
+        return Python::Module.Function.makeOperation {
             let second = try #require(targets.withLock { $0?.second })
-            _ = try await second.evaluate("import chain; await chain.back()")
+            _ = try await second.evaluate("import chain; await chain.back()", in: python)
         }
     })
-    let back = Python::Module.Function("back", start: { _, _ in
-        Python::Module.Function.makeOperation {
+    let back = Python::Module.Function("back", start: { _, context in
+        let python = context
+        return Python::Module.Function.makeOperation {
             let first = try #require(targets.withLock { $0?.first })
-            return try await first.get("value", as: Int.self)
+            return try await first.get("value", as: Int.self, in: python)
         }
     })
     let runtime = try await Python::Runtime()
@@ -111,14 +118,17 @@ func callbackDoesNotWaitForAnotherBusySession() async throws {
     let runtime = try await Python::Runtime()
     let target = try await runtime.session(moduleDefinitions: [.init("blocked", functions: [hold])])
     try await target.set(42, forKey: "value")
-    let read = Python::Module.Function("read") { _ in
-        do {
-            _ = try await target.get("value", as: Int.self)
-            return .bool(false)
-        } catch Python::Session.Error.busy {
-            return .bool(true)
+    let read = Python::Module.Function("read", start: { _, context in
+        let python = context
+        return Python::Module.Function.makeOperation {
+            do {
+                _ = try await target.get("value", as: Int.self, in: python)
+                return false
+            } catch Python::Session.Error.busy {
+                return true
+            }
         }
-    }
+    })
     let caller = try await runtime.session(moduleDefinitions: [.init("probe", functions: [read])])
     defer {
         await caller.close()
@@ -126,13 +136,7 @@ func callbackDoesNotWaitForAnotherBusySession() async throws {
     }
 
     let active = Task { try await target.evaluate("import blocked; await blocked.hold()") }
-    // Release the target even if the caller incorrectly waits for its queue.
-    let watchdog = Task {
-        try? await Task.sleep(for: .seconds(5))
-        release.finish()
-    }
     defer {
-        watchdog.cancel()
         release.finish()
         active.cancel()
     }

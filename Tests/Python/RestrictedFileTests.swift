@@ -9,7 +9,7 @@ import Testing
 
 @Test
 func defaultFileAccessUsesHostImportRootsForReadsOnly() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let readable = root.appending("readable")
         let outside = root.appending("readable-other")
         try await FileSystem.shared.createDirectory(
@@ -59,7 +59,7 @@ func defaultFileAccessUsesHostImportRootsForReadsOnly() async throws {
 
 @Test(.timeLimit(.minutes(1)), arguments: [false, true])
 func openRemainsBoundDuringAuthorization(swapParent: Bool) async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let approved = root.appending("approved")
         let protected = root.appending("protected")
         let moved = root.appending("moved")
@@ -119,7 +119,7 @@ func openRemainsBoundDuringAuthorization(swapParent: Bool) async throws {
 
 @Test(.timeLimit(.minutes(1)))
 func restrictedFileOperationsCheckDescriptorsAndNativeModules() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let allowed = root.appending("allowed")
         let denied = root.appending("denied")
         let original = allowed.appending("source")
@@ -205,7 +205,7 @@ func restrictedFileOperationsCheckDescriptorsAndNativeModules() async throws {
 
 @Test(.timeLimit(.minutes(1)))
 func rollbackPreservesFileIOAndItsPosition() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let path = root.appending("data")
         try await "abcd".write(toFileAt: path)
 

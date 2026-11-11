@@ -34,8 +34,8 @@ public macro PythonExportedClass(
 
 /// Binds a Swift struct to a class in an importable Python module.
 ///
-/// The struct retains the Python instance. Call it with a closure in the attached
-/// interpreter, or use `withClass` to access the Python class. Declare typed
+/// The struct retains the Python instance. Its properties and methods, including
+/// class methods, work inside `Session.enqueue` or a Swift export. Declare typed
 /// members with `PythonProperty` and `PythonFunction`.
 @attached(memberAttribute)
 @attached(

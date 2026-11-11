@@ -23,20 +23,26 @@ extension Session.Control {
             case "interrupted":
                 return try Object(encoding: execution.interruption != nil, in: attachment)
             case "write":
-                if streamsOutput {
-                    let name = try arguments.item(at: 1).string()
-                    guard let stream = Output.Stream(rawValue: name) else {
-                        throw Exception(
-                            name: "ValueError",
-                            message: "Unknown Python output stream: \(name).",
-                        )
-                    }
-                    try execution.write(stream, arguments.item(at: 2).string())
-                }
+                try write(arguments)
                 return try Object(encoding: Value.none, in: attachment)
             default:
                 throw Exception(name: "ValueError", message: "Unknown Swift execution command.")
             }
+        }
+
+        private func write(_ arguments: borrowing Object) throws {
+            guard streamsOutput else {
+                return
+            }
+
+            let name = try arguments.item(at: 1).string()
+            guard let stream = Output.Stream(rawValue: name) else {
+                throw Exception(
+                    name: "ValueError",
+                    message: "Unknown Python output stream: \(name).",
+                )
+            }
+            try execution.write(stream, arguments.item(at: 2).string())
         }
     }
 }

@@ -3,6 +3,33 @@
 #include "checkpoint.h"
 #include "host_value.h"
 
+static _Thread_local void *current_scope;
+
+void *
+CPython_SetScope(void *scope)
+{
+    void *previous = current_scope;
+    current_scope = scope;
+    return previous;
+}
+
+void *
+CPython_CurrentScope(void)
+{
+    return current_scope;
+}
+
+PyInterpreterView *
+CPython_NewInterpreterView(PyThreadState *state)
+{
+    CPython_Heap *previous = CPython_BindHeap(NULL);
+    PyEval_RestoreThread(state);
+    PyInterpreterView *view = PyInterpreterView_FromCurrent();
+    PyEval_SaveThread();
+    CPython_BindHeap(previous);
+    return view;
+}
+
 PyStatus
 CPython_InitializeRuntime(void)
 {

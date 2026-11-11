@@ -125,9 +125,13 @@ extension StandardLibraryBuilder {
             )
         }
 
+        logConfigureDiagnostics(result.standardError)
+    }
+
+    private func logConfigureDiagnostics(_ diagnostics: String) {
         // configure probes optional Python modules even when bootstrapping _freeze_module.
         // This step skips pkg-config because SwiftPM selects libraries for the final runtime.
-        for line in result.standardError.split(whereSeparator: \.isNewline) {
+        for line in diagnostics.split(whereSeparator: \.isNewline) {
             switch line {
             case "configure: WARNING: no system libmpdec found; falling back to pure-Python version for the decimal module",
                  "configure: WARNING: pkg-config is missing. Some dependencies may not be detected correctly.":

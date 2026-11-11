@@ -14,7 +14,10 @@ extension Reference {
         private let state: Mutex<State> = .init(State())
         private let schedule: @Sendable () -> Void
 
-        init(schedule: @escaping @Sendable () -> Void) {
+        let view: Interpreter.View
+
+        init(view: Interpreter.View, schedule: @escaping @Sendable () -> Void) {
+            self.view = view
             self.schedule = schedule
         }
 
@@ -81,11 +84,6 @@ extension Reference {
 // MARK: - Reference.Store.State
 
 private extension Reference.Store {
-    struct Checkpoint {
-        var pointersByToken: [UInt64: UInt] = [:]
-        var releases: [UInt]
-    }
-
     struct State {
         var isActive: Bool = true
 
@@ -184,7 +182,18 @@ private extension Reference.Store {
             isActive = false
 
             let active = exchange(&pointersByToken, with: [:])
-            return Array(active.values) + takePendingReleases()
+            var releases = takePendingReleases()
+            releases.insert(contentsOf: active.values, at: 0)
+            return releases
         }
+    }
+}
+
+// MARK: - Reference.Store.Checkpoint
+
+private extension Reference.Store {
+    struct Checkpoint {
+        var pointersByToken: [UInt64: UInt] = [:]
+        var releases: [UInt]
     }
 }

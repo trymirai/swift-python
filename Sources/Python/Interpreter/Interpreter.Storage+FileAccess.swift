@@ -13,6 +13,8 @@ extension Interpreter.Storage {
             return try operation()
         }
 
+        let previous = unsafe CPython_CurrentFileAccess()
+        let subprocesses = unsafe CPython_CurrentSubprocesses()
         // The thread state owns storage until the hook is cleared.
         let context = unsafe Unmanaged.passUnretained(self).toOpaque()
         unsafe CPython_SetSubprocesses(execution?.subprocesses?.handle)
@@ -27,9 +29,11 @@ extension Interpreter.Storage {
             )
             return storage.authorizeFileAccess(request)
         }, context, fileAccess.descriptors)
+        Session.Stream.Descriptors.bind(PThread.Scope.current?.streams)
         defer {
-            CPython_SetFileAccessCheck(nil, nil, nil)
-            CPython_SetSubprocesses(nil)
+            unsafe CPython_SetFileAccessCheck(previous.check, previous.context, previous.files)
+            unsafe CPython_SetStreamDescriptors(previous.input, previous.output, previous.error)
+            unsafe CPython_SetSubprocesses(subprocesses)
         }
         return try operation()
     }
@@ -49,7 +53,7 @@ extension Interpreter.Storage {
         do {
             let call = try Session.Control.Call({
                 try await delegate.shouldAllowFileAccess(request)
-            }, sessionID: sessionOrigin)
+            })
             let allowed = try execution.waitForFileAccess(call, id: allocateCallID())
             return allowed ? 1 : 0
         } catch {

@@ -10,7 +10,7 @@ import Testing
 
 @Test
 func lazyStartupKeepsItsStreamsSeparateFromEvaluation() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+    try await withTemporaryDirectory { directory in
         let input = directory.appending("input")
         let output = directory.appending("output")
         try await "block input\n".write(toFileAt: input)
@@ -46,7 +46,7 @@ func lazyStartupKeepsItsStreamsSeparateFromEvaluation() async throws {
 
 @Test
 func fileBackedStreamsAppendAndReadFromOffsets() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let input = root.appending("stdin")
         let stdout = root.appending("stdout.log")
         let stderr = root.appending("stderr.log")
@@ -102,7 +102,7 @@ func fileBackedStreamsAppendAndReadFromOffsets() async throws {
 
 @Test
 func fileBackedStreamsUseHostFileAccess() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let stdout = root.appending("stdout.log")
         let runtime = try await Python::Runtime()
         let session = try await runtime.session()
@@ -133,7 +133,7 @@ func fileBackedStreamsUseHostFileAccess() async throws {
 
 @Test
 func redirectedOutputAndTracebackReachHostOnFailure() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let stdout = root.appending("stdout.log")
         let stderr = root.appending("stderr.log")
         let streamed = Mutex("")
@@ -188,7 +188,7 @@ func capturedStreamsRecoverAfterCloseAndReadEOFWithoutInput() async throws {
 
 @Test(.timeLimit(.minutes(1)))
 func readStreamsDuringExecution() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let gate = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         defer {

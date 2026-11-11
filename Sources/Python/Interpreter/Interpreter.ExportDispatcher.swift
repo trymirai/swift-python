@@ -54,11 +54,14 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         case .registerType:
             let key = try request.item(at: 1).string()
             let type = try request.item(at: 2)
-            try classes(in: storage).register(type, forKey: key, in: storage)
+            try storage.requireClassRegistry().register(type, forKey: key, in: storage)
         case .registerWrapper:
-            try classes(in: storage).registerWrapperFactory(request.item(at: 1), in: storage)
+            try storage.requireClassRegistry().registerWrapperFactory(
+                request.item(at: 1),
+                in: storage,
+            )
         case .bind:
-            try classes(in: storage).bind(request.item(at: 1))
+            try storage.requireClassRegistry().bind(request.item(at: 1))
         case .call, .start:
             return try invokeExport(command, request: request, in: attachment)
         case .poll:
@@ -87,7 +90,7 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         switch (command, try body(for: id)) {
         case let (.call, .synchronous(invoke)):
             var encoder = Encoder(in: attachment)
-            try invoke(arguments, &encoder)
+            try CurrentContext.withAttached { try invoke(arguments, &encoder) }
             return unsafe try Object(owned: encoder.take(), in: attachment)
         case let (.start, .asynchronous(prepare)):
             return try start(prepare(arguments), in: attachment)
@@ -129,13 +132,6 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         return list
     }
 
-    private func classes(in storage: Interpreter.Storage) throws -> Interpreter.ClassRegistry {
-        guard let registry = storage.classRegistry else {
-            throw Interpreter.ClassRegistry.unregistered()
-        }
-        return registry
-    }
-
     private func execution(in storage: Interpreter.Storage) throws -> Session.Control {
         guard let execution = storage.execution else {
             throw Runtime.Failure("Swift callbacks require an active Python execution.")
@@ -150,7 +146,10 @@ extension Interpreter.ExportDispatcher: Object.Callable {
     ) throws -> Object {
         let storage = attachment.storage
         let execution = try execution(in: storage)
-        let call = try Session.Control.ExportCall(operation, sessionID: storage.sessionOrigin)
+        let call = try Session.Control.ExportCall(
+            operation,
+            context: Context(storage: storage),
+        )
         let id = storage.allocateCallID()
 
         try execution.submit(.export(call), id: id)

@@ -6,7 +6,19 @@ import SystemPackage
 
 extension StandardLibraryBuilder {
     func collectLibrary() async throws -> Library {
-        let root = workspace.packageDirectory
+        var resources = try await standardLibraryResources()
+        try await appendRuntimeResources(to: &resources)
+        try await appendConfigurationResources(to: &resources)
+
+        // Sort by UTF-8 bytes to match strcmp in the C catalog lookup.
+        resources.sort { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
+        let modules = resources.compactMap(Module.init(resource:))
+            .sorted { $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) }
+
+        return Library(modules: modules, resources: resources)
+    }
+
+    private func standardLibraryResources() async throws -> [Resource] {
         let source = workspace.sourceDirectory
         let output = workspace.outputDirectory
 
@@ -25,11 +37,14 @@ extension StandardLibraryBuilder {
             ![".pyc", ".pyo", ".so", ".dll", ".exe", ".pyd", ".DS_Store"]
                 .contains { path.hasSuffix($0) }
         }
-        var resources = paths.map { path in
+        return paths.map { path in
             let directory = path == "subprocess.py" ? output : library
             return Resource(path: path, source: directory.appending(path))
         }
+    }
 
+    private func appendRuntimeResources(to resources: inout [Resource]) async throws {
+        let root = workspace.packageDirectory
         let adapters = root.appending("Sources/libcpython/Compatibility/Python")
         for path in try await workspace.paths(adapters, omitting: ["__pycache__"])
             where path.hasSuffix(".py")
@@ -44,19 +59,14 @@ extension StandardLibraryBuilder {
                 source: packages.appending(path),
             ))
         }
+    }
 
+    private func appendConfigurationResources(to resources: inout [Resource]) async throws {
         for (name, body) in try await makeConfigurationModules() {
             let filename = name + ".py"
-            let path = output.appending(filename)
+            let path = workspace.outputDirectory.appending(filename)
             try await workspace.write(body, to: path)
             resources.append(Resource(path: filename, source: path))
         }
-
-        // Sort by UTF-8 bytes to match strcmp in the C catalog lookup.
-        resources.sort { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
-        let modules = resources.compactMap(Module.init(resource:))
-            .sorted { $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) }
-
-        return Library(modules: modules, resources: resources)
     }
 }

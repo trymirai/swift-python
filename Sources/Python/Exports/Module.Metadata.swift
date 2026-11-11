@@ -76,6 +76,7 @@ extension Module.Metadata: Encodable {
 extension Module.Metadata {
     struct Class {
         let value: Module.Class
+
         let initializer: Function?
         let methods: [Function]
         let properties: [Property]

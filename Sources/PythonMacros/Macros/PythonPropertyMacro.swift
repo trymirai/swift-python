@@ -42,10 +42,13 @@ struct PythonPropertyMacro: PeerMacro {
         }
 
         let name = property.pythonNameSource
+        let setterBody = property.variable.modifiers.declaresStaticMember
+            ? "try Self._pSetClassProperty(newValue, forKey: \(name))"
+            : "try self { try $0.setAttribute(\(name), to: newValue) }"
         return writeMethods(
             for: property,
             type: type,
-            setterBody: "try \(property.receiver) { try $0.setAttribute(\(name), to: newValue) }",
+            setterBody: setterBody,
         )
     }
 
@@ -184,7 +187,9 @@ struct PythonPropertyGetterMacro: AccessorMacro {
         if property.owner.isImportedClass {
             _ = try property.importedTypeSource()
             let name = property.pythonNameSource
-            body = "try \(property.receiver) { try $0.attribute(\(name)).decode() }"
+            body = property.variable.modifiers.declaresStaticMember
+                ? "try Self._pGetClassProperty(\(name))"
+                : "try self { try $0.attribute(\(name)).decode() }"
         } else {
             let field = try property.storageSource().field
             body = "try self._pGetProperty(\(field))"

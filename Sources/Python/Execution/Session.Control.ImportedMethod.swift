@@ -16,35 +16,6 @@ protocol ImportedMethodRequest: Object.Callable, Sendable {
 private final class ImportedMethod<Result: Sendable> {
     private typealias Continuation = CheckedContinuation<Result, any Swift::Error>
 
-    enum Receiver: Sendable {
-        case instance(Reference)
-        case type(module: String, name: String)
-
-        @_lifetime(borrow attachment)
-        func object(in attachment: borrowing PThread.Attachment) throws -> Object {
-            switch self {
-            case let .instance(reference):
-                try reference.object(in: attachment.storage.references, scopedTo: attachment)
-            case let .type(module, name):
-                try Object.importClass(module: module, name: name, in: attachment)
-            }
-        }
-    }
-
-    private enum State {
-        case initial
-        case waiting(Continuation)
-        case finished
-
-        var isWaiting: Bool {
-            if case .waiting = self {
-                true
-            } else {
-                false
-            }
-        }
-    }
-
     private let receiver: Receiver
     private let name: String
 
@@ -52,6 +23,7 @@ private final class ImportedMethod<Result: Sendable> {
     private let keywords: [(String, any Encodable & Sendable)]
 
     private let decode: @Sendable (borrowing Object) throws -> Result
+
     private let state: Mutex<State> = .init(.initial)
 
     init(
@@ -71,9 +43,7 @@ private final class ImportedMethod<Result: Sendable> {
     }
 
     func value() async throws -> Result {
-        guard let callback = Session.Control.currentExport else {
-            throw Runtime.Failure("An async Python method requires an active Swift export.")
-        }
+        let callback = try CurrentContext.callback()
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -86,14 +56,7 @@ private final class ImportedMethod<Result: Sendable> {
     }
 
     private func submit(_ continuation: Continuation, to callback: Session.Control.ExportCall) {
-        let installed = state.withLock { state in
-            guard case .initial = state else {
-                return false
-            }
-            state = .waiting(continuation)
-            return true
-        }
-        guard installed else {
+        guard state.withLock({ $0.install(continuation) }) else {
             continuation.resume(throwing: CancellationError())
             return
         }
@@ -106,15 +69,62 @@ private final class ImportedMethod<Result: Sendable> {
     }
 
     private func finish(_ outcome: Swift::Result<Result, any Swift::Error>) {
-        let continuation = state.withLock { state -> Continuation? in
+        let continuation = state.withLock { $0.finish() }
+        continuation?.resume(with: outcome)
+    }
+}
+
+// MARK: ImportedMethod.Receiver
+
+extension ImportedMethod {
+    enum Receiver: Sendable {
+        case instance(Reference)
+        case type(module: String, name: String)
+
+        @_lifetime(borrow attachment)
+        func object(in attachment: borrowing PThread.Attachment) throws -> Object {
+            switch self {
+            case let .instance(reference):
+                try reference.object(in: attachment.storage.references, scopedTo: attachment)
+            case let .type(module, name):
+                try Object.importClass(module: module, name: name, in: attachment)
+            }
+        }
+    }
+}
+
+// MARK: ImportedMethod.State
+
+extension ImportedMethod {
+    private enum State {
+        case initial
+        case waiting(Continuation)
+        case finished
+
+        var isWaiting: Bool {
+            if case .waiting = self {
+                true
+            } else {
+                false
+            }
+        }
+
+        mutating func install(_ continuation: Continuation) -> Bool {
+            guard case .initial = self else {
+                return false
+            }
+            self = .waiting(continuation)
+            return true
+        }
+
+        mutating func finish() -> Continuation? {
             // Cancellation can finish the request before the continuation is installed.
-            let previous = exchange(&state, with: .finished)
+            let previous = exchange(&self, with: .finished)
             guard case let .waiting(continuation) = previous else {
                 return nil
             }
             return continuation
         }
-        continuation?.resume(with: outcome)
     }
 }
 

@@ -6,7 +6,8 @@
 [![Mac Catalyst 26.4+](https://img.shields.io/badge/Mac%20Catalyst-26.4%2B-315D8A?logo=apple&logoColor=white)](#requirements)
 [![Linux with glibc and musl](https://img.shields.io/badge/Linux-glibc%20%26%20musl-316A54?logo=linux&logoColor=white)](#requirements)
 
-Embed CPython 3.16.0a1 and its standard library in Swift with the static SwiftPM product `Python`.
+Run Python code from Swift, use Python libraries, and expose Swift functions and classes to Python.
+The package includes CPython 3.16.0a1 and its standard library.
 
 ## Installation
 
@@ -42,12 +43,16 @@ print(execution.output.stdout, terminator: "") // 8
 await session.close()
 ```
 
-Sessions keep globals between calls. Use `Python::Value` for dynamic values and
-`Python::Encodable` or `Python::Decodable` for custom Swift types.
+A session preserves Python globals between evaluations. Use `set(_:forKey:)` and `get(_:as:)`
+to exchange values with Swift, and call `close()` when the session is no longer needed.
+
+Use `Python::Value` for dynamic values. Custom Swift types can conform to `Python::Encodable`
+and `Python::Decodable`.
 
 ### Python objects and live output
 
-`enqueue` gives scoped access to Python objects on the interpreter thread.
+Use `enqueue` to import Python modules, access objects, and call Python functions.
+Decode results to Swift values before returning them from the closure.
 
 ```swift
 let console = try await runtime.session()
@@ -67,11 +72,22 @@ print(job.end) // timedOut
 await console.close()
 ```
 
-Call `stop()` to interrupt evaluation. Use absolute paths in `redirecting:` for file-backed streams.
-Startup runs on the first Python operation or through `initialize(redirecting:)`, with output
-captured in `startupOutput`.
+`evaluate` returns captured output and accepts a handler for live output. Set `timeout:` to
+limit execution time, or call `stop()` to interrupt it. Use `redirecting:` with absolute paths
+to write streams to files.
+
+Startup code runs on the first Python operation. Call `initialize(redirecting:)` to run it
+explicitly, and read `startupOutput` for its output.
+
+Pass `transactional: true` when creating a session to restore Python state after a failed or
+interrupted evaluation. File changes persist.
+
+Run slow, synchronous Python calls outside the main actor and limit concurrent calls.
 
 ### Call Swift from Python
+
+Declare a module with `@PythonExportedModule`, mark its functions with `@PythonFunction`, and
+register it with `session(modules:)`.
 
 ```swift
 @PythonExportedModule("buffers")
@@ -99,7 +115,8 @@ await bufferSession.close()
 
 ### Export a Swift class
 
-Select the exported module with `modules:` to make its classes importable from Python.
+Use `@PythonExportedClass` to expose a Swift class. Mark its initializer, properties, and methods
+with `@PythonInit`, `@PythonProperty`, and `@PythonFunction`. Register its module with `modules:`.
 
 ```swift
 @PythonExportedModule("counters")
@@ -132,10 +149,21 @@ print(result.output.stdout, terminator: "") // 5
 await counters.close()
 ```
 
+Use Python's `help()` to view exported types and documentation, and `inspect.signature()` to
+inspect function parameters and return types.
+
+```python
+import inspect
+import counters
+
+help(counters.Counter)
+print(inspect.signature(counters.Counter.increment))
+```
+
 ### Import a Python class
 
-Add `.enableExperimentalFeature("Lifetimes")` to `swiftSettings` for targets that declare
-imported classes. Use `enqueue` on the owning session for synchronous member access.
+Use `@PythonImportedClass` to declare Swift bindings for a Python class. Targets that declare
+these bindings require `.enableExperimentalFeature("Lifetimes")` in `swiftSettings`.
 
 ```swift
 @PythonImportedClass(module: "pathlib", name: "PurePosixPath")
@@ -160,10 +188,26 @@ print(name) // summary.md
 await paths.close()
 ```
 
+Read an existing instance with `get(_:as:)`. Access its properties and methods inside `enqueue`
+on the same session, or in a Swift callback invoked by that session. Imported types can also
+be parameters and return values of functions marked `@PythonFunction`.
+
+To create an instance from Swift, call
+`try context.construct(PosixPath.self, arguments: ["reports/summary.txt"])` inside `enqueue`.
+
+`Python::DateTime` and `Python::Path` provide bindings for Python dates and paths. Create them
+inside `enqueue` with `try Python::DateTime(instant, in: context)` or
+`try Python::Path(filePath, in: context)`. Convert them to Swift with
+`try Foundation::Date(datetime)` or `try FilePath(path)`.
+
+When calling another session from a Swift callback, pass the callback's `Context` through `in:`,
+for example `try await other.evaluate(source, in: context)` or `await other.close(in: context)`.
+
 ## Scripts and projects
 
-Scripts run in fresh sessions and receive arguments in `sys.argv`. Save this as `version_label.py`.
-[PEP 723](https://packaging.python.org/en/latest/specifications/inline-script-metadata/)
+Scripts run in new sessions and receive arguments in `sys.argv`. Declare dependencies with
+[PEP 723 inline metadata](https://packaging.python.org/en/latest/specifications/inline-script-metadata/).
+Save this example as `version_label.py`.
 
 ```python
 # /// script
@@ -176,8 +220,8 @@ from packaging.version import Version
 print(Version(sys.argv[1]).public)
 ```
 
-Use absolute paths. For the project example, add `reporting/__init__.py` under the project root.
-The session imports `reporting` and uses its globals.
+Use absolute paths for scripts, projects, and environments. For the project example, create
+`reporting/__init__.py` under the project root. The session imports `reporting` and uses its globals.
 
 ```swift
 let script = try await runtime.run(script: "/path/to/version_label.py", arguments: ["v2.1rc1+ci"])
@@ -193,30 +237,31 @@ await projectSession.close()
 
 ## Environments and dependencies
 
-`requirements.txt` takes precedence over `[project].dependencies` in `pyproject.toml`.
-The runtime resolves dependencies before user code runs and installs missing packages as
-pure-Python wheels.
-`Runtime(packageIndex:)` selects the index (PyPI by default).
+Declare project dependencies in `requirements.txt` or `[project].dependencies` in `pyproject.toml`.
+If both are present, `requirements.txt` takes precedence. Dependencies are installed before
+startup. Package installation supports pure-Python wheels.
 
-Pass an absolute `environmentDirectory:` to reuse local installs and their resolution. One
-session can hold the directory at a time. Temporary environments are removed on close.
-`Runtime(cacheDirectory:)` sets the separate wheel cache.
+Use `Runtime(packageIndex:)` to select a package index; the default is PyPI.
+Use `Runtime(cacheDirectory:)` to choose a directory for cached wheels.
 
-The first source that provides a distribution wins.
+Set `environmentDirectory:` to an absolute path to reuse installed packages between sessions.
+Only one session may use an environment directory at a time. Without this parameter, the
+environment is temporary and is removed when the session closes.
 
-1. Local installations in the managed environment.
-2. Sources passed to `session(packages:)`, in list order. With an empty list, a project checks
-   `site-packages` at its root, then the embedded Python version's `site-packages` in `.venv`.
-   The selected directory must resolve inside the project.
-3. Sources passed to `Runtime(packages:)`, in list order.
+Pass package sources as `.directory(path)`, `.archive(path)`, or `.embedded(bytes)` in `packages:`.
+Installed packages in the environment take precedence over session sources, followed by runtime
+sources. Within each list, earlier sources take precedence. A version conflict raises a
+resolution error.
 
-Pass `.directory(path)`, `.archive(path)`, or `.embedded(bytes)` to select sources explicitly.
-Resolution fails on a version conflict even when a later source has a compatible version.
+Project sessions without explicit session sources also use the project's `site-packages` or
+`.venv`. These package directories must be inside the project.
 
-`session.packages` inspects selected versions and manages local requirements and overrides.
-`resolve()` prefers compatible installed versions, while `update()` re-resolves from the index.
-A wheel change after startup returns `.requiresReset`. Call `session.reset()` to clear Python
-state and invalidate references, then retry. [Package API](Sources/Python/Environment/Session+Packages.swift)
+Use `session.packages` to inspect installed versions, install or uninstall requirements, and
+resolve dependencies. `resolve()` preserves compatible installed versions; `update()` selects
+versions from the package index.
+
+If a package operation returns `.requiresReset`, call `session.reset()` and repeat the operation.
+Reset clears Python state, so retrieve any Python objects again afterward.
 
 ### Bundle a project for offline use
 
@@ -234,27 +279,27 @@ as `.embedded(...)`.
 
 ## File access
 
-Sessions allow reads from `directory:`, `importPaths:`, project roots, and package sources.
-`Session.Delegate.shouldAllowFileAccess(_:)` decides access to other paths and writes. Denied
-Python file operations raise `PermissionError`. Embedded native modules use an allowlist.
+Sessions can read files under `directory:`, `importPaths:`, project roots, and package sources.
+Use `Session.Delegate.shouldAllowFileAccess(_:)` to approve additional reads and writes.
+Denied file operations raise Python's `PermissionError`.
 
-For scripts, the delegate checks the source before reading it. Approval covers the script file.
-Without a delegate, the script directory is a read root.
+For scripts, the delegate must approve reading the script file. This approval applies only to
+that file. Without a delegate, the script's containing directory is readable.
 
-In transactional sessions, rollback restores Python state and session-owned descriptor positions.
-Filesystem changes persist.
+Some native modules are unavailable. Importing them raises `ModuleNotFoundError`.
 
 ### Subprocesses
 
 `Runtime(options: [.subprocesses])` enables Python's `subprocess` on macOS, Mac Catalyst, and Linux.
-Children use the application's OS permissions outside the file delegate's scope.
+Child processes use the application's OS permissions. The session's file delegate does not
+control their file access.
 
-After Python returns, the execution waits for its direct children within the remaining timeout.
-Stop, cancellation, and timeout terminate their process groups. The runtime signals any
-remaining group members before reaping the leader.
-`close_fds=True` is required. Drain pipes with `communicate()` or redirect output to a file.
-Returning with a running child and an open pipe raises an execution error and stops its group.
-Collect exit status with `wait()` or `communicate()` during the launching execution.
+`evaluate` waits for child processes to exit. Its timeout applies to both Python code and child
+processes. Calling `stop()`, cancelling the task, or reaching the timeout stops child processes.
+
+Set `close_fds=True`. Use `communicate()` to read piped output, or redirect output to a file.
+Call `wait()` or `communicate()` in the same evaluation that starts the child. A child left
+running with an open pipe causes an execution error and is stopped.
 
 ## Requirements
 

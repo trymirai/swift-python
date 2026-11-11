@@ -9,35 +9,20 @@ internal import libcpython
 /// Keeps a Python object alive in its interpreter generation.
 /// Reset, close, or rollback of the creating block invalidates the reference.
 public struct Reference: Sendable {
-    final class Storage: Sendable {
-        let references: Reference.Store
-        private let token: UInt64
-
-        init(references: Reference.Store, token: UInt64) {
-            self.references = references
-            self.token = token
-        }
-
-        deinit { references.release(token) }
-
-        @unsafe
-        func pointer() throws -> UnsafeMutablePointer<PyObject> {
-            unsafe try references.pointer(token)
-        }
-    }
-
     let storage: Storage
 
     init(storage: Storage) {
         self.storage = storage
     }
 
-    /// Accesses the object synchronously in its attached interpreter.
+    /// Accesses the object synchronously inside its session or a Swift export.
+    /// Async Swift exports attach their interpreter for the duration of this call.
     public borrowing func callAsFunction<Result: ~Copyable>(
         _ body: (borrowing Object) throws -> Result,
     ) throws -> Result {
-        let context = try Context()
-        return try body(resolve(in: context))
+        try CurrentContext.run { context in
+            try body(resolve(in: context))
+        }
     }
 
     @_lifetime(borrow context)
@@ -82,5 +67,26 @@ extension Reference: Decodable {
     public init(from decoder: borrowing Decoder) throws {
         let state = try Interpreter.Storage.requireCurrent()
         self = unsafe try state.references.retain(decoder.pointer)
+    }
+}
+
+// MARK: Reference.Storage
+
+extension Reference {
+    final class Storage: Sendable {
+        let references: Reference.Store
+        private let token: UInt64
+
+        init(references: Reference.Store, token: UInt64) {
+            self.references = references
+            self.token = token
+        }
+
+        deinit { references.release(token) }
+
+        @unsafe
+        func pointer() throws -> UnsafeMutablePointer<PyObject> {
+            unsafe try references.pointer(token)
+        }
     }
 }

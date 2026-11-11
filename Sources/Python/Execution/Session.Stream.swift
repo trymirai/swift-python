@@ -2,6 +2,7 @@
 //  Created by Anton Spivak
 //
 
+internal import libcpython
 internal import SystemPackage
 
 // MARK: - Session.Stream
@@ -18,39 +19,64 @@ public extension Session {
 // MARK: - Session.Stream.Descriptors
 
 extension Session.Stream {
-    // Python borrows these descriptors for the duration of one call.
-    struct Descriptors: ~Copyable {
-        private var files: [Session.Stream: FileDescriptor] = [:]
+    // Active callbacks retain their streams until every Python access has finished.
+    final class Descriptors: Sendable {
+        let numbers: [String: Int32]
+
+        private let files: [Session.Stream: FileDescriptor]
 
         static func open(_ paths: [Session.Stream: Runtime.Path]) throws -> Descriptors {
-            var descriptors = Descriptors()
-
-            for stream in [Session.Stream.stdout, .stderr, .stdin] {
-                guard let path = paths[stream]?.file else {
-                    continue
-                }
-
-                let descriptor: FileDescriptor = if stream == .stdin {
-                    try .open(path, .readOnly, options: .closeOnExec)
-                } else {
-                    try .open(
-                        path,
-                        .writeOnly,
-                        options: [.append, .create, .closeOnExec],
-                        permissions: .init(rawValue: 0o666),
-                    )
-                }
-                descriptors.files[stream] = descriptor
-            }
-            return descriptors
+            try Descriptors(paths)
         }
 
-        var numbers: [String: Int32] {
-            Dictionary(uniqueKeysWithValues: files.lazy
+        private init(_ paths: [Session.Stream: Runtime.Path]) throws {
+            var files = [Session.Stream: FileDescriptor]()
+            do {
+                for stream in [Session.Stream.stdout, .stderr, .stdin] {
+                    guard let path = paths[stream]?.file else {
+                        continue
+                    }
+
+                    files[stream] = try Self.open(stream, at: path)
+                }
+            } catch {
+                Self.close(files)
+                throw error
+            }
+
+            self.files = files
+            self.numbers = Dictionary(uniqueKeysWithValues: files.lazy
                 .map { ($0.key.rawValue, $0.value.rawValue) })
         }
 
         deinit {
+            Self.close(files)
+        }
+
+        static func bind(_ descriptors: Descriptors?) {
+            CPython_SetStreamDescriptors(
+                descriptors?.files[.stdin]?.rawValue ?? -1,
+                descriptors?.files[.stdout]?.rawValue ?? -1,
+                descriptors?.files[.stderr]?.rawValue ?? -1,
+            )
+        }
+
+        private static func open(
+            _ stream: Session.Stream,
+            at path: FilePath,
+        ) throws -> FileDescriptor {
+            if stream == .stdin {
+                return try .open(path, .readOnly, options: .closeOnExec)
+            }
+            return try .open(
+                path,
+                .writeOnly,
+                options: [.append, .create, .closeOnExec],
+                permissions: .init(rawValue: 0o666),
+            )
+        }
+
+        private static func close(_ files: [Session.Stream: FileDescriptor]) {
             for descriptor in files.values {
                 try? descriptor.close()
             }

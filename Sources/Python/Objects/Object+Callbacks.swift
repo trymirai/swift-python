@@ -43,7 +43,7 @@ extension Object {
 
         let callback = unsafe Unmanaged<Callback>.fromOpaque(context).takeUnretainedValue()
         do {
-            return unsafe try PThread.withCurrent { attachment in
+            return unsafe try PThread.withCallbackAttachment { attachment in
                 let arguments = unsafe Object.retaining(argumentsPointer, in: attachment)
                 let result = try callback.body.call(arguments, in: attachment)
                 return unsafe result.release()

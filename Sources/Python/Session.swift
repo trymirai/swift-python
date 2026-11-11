@@ -22,6 +22,7 @@ public actor Session {
 
     private(set) var environment: Environment?
     private var delegate: (any Delegate)?
+
     private var state: State = .idle
 
     /// Output from startup. Reset clears it, and close preserves the last captured value.
@@ -52,12 +53,15 @@ public actor Session {
         delegate: (any Delegate)? = nil,
     ) {
         self.executor = executor
+
         self.directory = directory
         self.importPaths = importPaths
+
         self.modules = modules
         self.startup = startup
         self.transactional = transactional
         self.allowsSubprocesses = allowsSubprocesses
+
         self.environment = environment
         self.delegate = delegate
     }
@@ -67,6 +71,8 @@ public actor Session {
         environment = nil
         executor.finish()
     }
+
+    // MARK: Interpreter lifetime
 
     func initializeRuntime() throws {
         try PThread.initializeRuntime()
@@ -174,6 +180,8 @@ public actor Session {
         }
     }
 
+    // MARK: Session controls
+
     @discardableResult
     public nonisolated func stop() -> Bool {
         activeExecution.withLock { $0 }?.requestInterruption(.stopped) ?? false
@@ -185,8 +193,8 @@ public actor Session {
 
     /// Discards the interpreter and invalidates its references. Package changes can run before
     /// the next execution starts a new interpreter.
-    public nonisolated func reset() async throws {
-        try await withOperation { session in
+    public nonisolated func reset(in context: Context? = nil) async throws {
+        try await withOperation(in: context) { session in
             session.state = .idle
         }
     }
@@ -201,8 +209,9 @@ public actor Session {
     public nonisolated func replaceImportPaths(
         _ paths: [String],
         invalidatingModules modules: [String] = [],
+        in context: Context? = nil,
     ) async throws {
-        try await withOperation { session in
+        try await withOperation(in: context) { session in
             let execution = try Control(timeout: nil)
             try await execution.run(on: session) { session in
                 try session.changeImportPaths(
@@ -237,11 +246,11 @@ public actor Session {
     }
 
     /// Finishes prior operations and releases the interpreter and environment lease.
-    /// From a Python callback, requests closing after outstanding work finishes.
-    public nonisolated func close() async {
-        if Self.isInCallback {
+    /// Supply the callback's context to request closing after outstanding work finishes.
+    public nonisolated func close(in context: Context? = nil) async {
+        if let context {
             // The callback must return before the current operation can release its reservation.
-            if isInOwnCallback {
+            if context.belongs(to: self) {
                 _ = stop()
             }
             Task.detached { await self.close() }
@@ -257,21 +266,10 @@ public actor Session {
         environment = nil
     }
 
-    private nonisolated static var isInCallback: Bool {
-        !Control.sessionPath.isEmpty || Interpreter.Storage.current()?.sessionOrigin != nil
-    }
-
-    nonisolated var origin: ObjectIdentifier {
-        ObjectIdentifier(executor)
-    }
-
-    private nonisolated var isInOwnCallback: Bool {
-        let identity = origin
-        return Control.sessionPath.contains(identity)
-            || Interpreter.Storage.current()?.sessionOrigin == identity
-    }
+    // MARK: Serialized execution
 
     nonisolated func withExecution<Result: Sendable>(
+        in context: Context? = nil,
         timeout: Duration? = nil,
         scope: (any Sendable)? = nil,
         output: Control.OutputHandler? = nil,
@@ -279,7 +277,7 @@ public actor Session {
         settling: Control.Settlement<Result>? = nil,
         _ operation: @Sendable (isolated Session, Control) async throws -> Result,
     ) async throws -> Result {
-        try await withOperation { session in
+        try await withOperation(in: context) { session in
             let execution = try Control(
                 timeout: timeout,
                 scope: scope,
@@ -303,14 +301,12 @@ public actor Session {
     }
 
     private nonisolated func withOperation<Result: Sendable>(
+        in context: Context? = nil,
         _ operation: @Sendable (isolated Session) async throws -> Result,
     ) async throws -> Result {
-        guard !isInOwnCallback else {
-            throw Session.Error.busy
-        }
-
+        try context?.checkExecution()
         // A callback may enter another session only when it can take the reservation immediately.
-        let admission: Operations.Admission = Self.isInCallback ? .immediate : .queued
+        let admission: Operations.Admission = context == nil ? .queued : .immediate
         return try await operations.withReservation(admission) {
             try await perform(operation)
         }

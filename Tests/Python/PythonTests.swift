@@ -5,6 +5,7 @@
 import _NIOFileSystem
 internal import libpythontestsupport
 @testable import Python
+import SystemPackage
 import Testing
 
 @Test
@@ -44,7 +45,7 @@ func embeddedStandardLibrarySupportsSourceResourcesAndOverrides() async throws {
     assert sys.is_remote_debug_enabled() is \#(remoteDebugging)
     assert sysconfig.get_config_var("Py_REMOTE_DEBUG") == int(\#(remoteDebugging))
     """#
-    try await FileSystem.shared.withTemporaryDirectory { _, directory in
+    try await withTemporaryDirectory { directory in
         let override = directory.appending("this.py")
         try await "".write(toFileAt: override)
         let session = try await Python::Runtime().session(directory: directory.string)
@@ -86,16 +87,6 @@ func bundledNativeModulesAreUsable() async throws {
         let code = try Python::Object(encoding: source, in: attachment)
         let namespace = try Python::Object(encoding: [String: String](), in: attachment)
         _ = try run.call(code, namespace)
-    }
-}
-
-func evaluateInFreshSession(
-    _ source: String,
-    modules: [any Python::ModuleHost.Type] = [],
-) async throws {
-    let session = try await Python::Runtime().session(modules: modules)
-    try await withSession(session) { session in
-        _ = try await session.evaluate(source)
     }
 }
 
@@ -189,12 +180,21 @@ func sourceInitialization() async throws {
     #expect(error.output.stderr == error.traceback)
 }
 
-func withSession(
-    _ session: Python::Session,
-    _ test: (Python::Session) async throws -> Void,
-) async rethrows {
-    defer { await session.close() }
-    try await test(session)
+@Test
+func temporaryFixturePathsResolveSymbolicParents() async throws {
+    try await withTemporaryDirectory { root in
+        let directory = root.appending("directory")
+        let alias = root.appending("alias")
+        try await FileSystem.shared.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false,
+        )
+        try await FileSystem.shared.createSymbolicLink(at: alias, withDestination: directory)
+
+        try await withTemporaryDirectory(prefix: alias) { path in
+            #expect(path.starts(with: directory))
+        }
+    }
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -215,4 +215,49 @@ func timeoutRemainsActiveWhenPythonReplacesItsTrace() async throws {
         #expect(execution.end == .timedOut)
         #expect(execution.output.stdout == "trace replaced\n")
     }
+}
+
+// MARK: Test support
+
+func evaluateInFreshSession(
+    _ source: String,
+    modules: [any Python::ModuleHost.Type] = [],
+) async throws {
+    let session = try await Python::Runtime().session(modules: modules)
+    try await withSession(session) { session in
+        _ = try await session.evaluate(source)
+    }
+}
+
+func withSession(
+    _ session: Python::Session,
+    _ test: (Python::Session) async throws -> Void,
+) async rethrows {
+    defer { await session.close() }
+    try await test(session)
+}
+
+func withTemporaryDirectory(
+    prefix: FilePath? = nil,
+    _ test: @Sendable (FilePath) async throws -> Void,
+) async throws {
+    try await FileSystem.shared.withTemporaryDirectory(prefix: prefix) { _, path in
+        // Foundation can shorten /private/var back to /var. Match native requests with realpath.
+        let canonical = try Python::Environment.resolvedPath(path)
+        try await test(canonical)
+    }
+}
+
+func expectPythonException(
+    _ name: String,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ operation: () throws -> Void,
+) throws {
+    let exception = try #require(
+        throws: Python::Exception.self,
+        sourceLocation: sourceLocation,
+    ) {
+        try operation()
+    }
+    #expect(exception.name == name, sourceLocation: sourceLocation)
 }

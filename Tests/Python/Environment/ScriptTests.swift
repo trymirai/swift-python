@@ -52,7 +52,7 @@ func scriptDependenciesAndGlobalsAreIsolatedFromTheProject() async throws {
 
 @Test
 func plainSessionAndScriptDoNotCreatePackageDirectories() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let cache = root.appending("cache")
         let runtime = try await Python::Runtime(cacheDirectory: cache.string)
         let session = try await runtime.session()
@@ -84,7 +84,7 @@ func plainSessionAndScriptDoNotCreatePackageDirectories() async throws {
 
 @Test
 func scriptAuthorizationUsesTheApprovedSourceWithoutGrantingSiblingReads() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let script = root.appending("original.py")
         let replacement = root.appending("replacement.py")
         let link = root.appending("script.py")
@@ -131,7 +131,7 @@ func scriptAuthorizationUsesTheApprovedSourceWithoutGrantingSiblingReads() async
 
 @Test
 func deniedScriptSourceLeavesTheEnvironmentUntouched() async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let script = root.appending("script.py")
         let environment = root.appending("environment")
         try await FileSystem.shared.withFileHandle(forWritingAt: script) { handle in
@@ -233,7 +233,7 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
     "# /// script\n# dependencies = []\n# ///\n# /// script\n# dependencies = []\n# ///\n",
 ])
 func invalidScriptMetadataIsRejected(_ metadata: String) async throws {
-    try await FileSystem.shared.withTemporaryDirectory { _, root in
+    try await withTemporaryDirectory { root in
         let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
         let script = root.appending("invalid.py")
         try await (metadata + "print('unexpected execution')\n").write(toFileAt: script)

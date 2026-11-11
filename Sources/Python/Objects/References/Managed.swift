@@ -18,7 +18,7 @@ public struct Managed<Instance: _PClass>: Sendable {
     public func callAsFunction<Result: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Instance) throws -> Result,
     ) async throws -> Result {
-        try await session.enqueue(in: reference.storage.references) { context in
+        try await session.enqueue(generation: reference.storage.references) { context in
             let instance = try context.object(reference).decode(as: Instance.self)
             return try body(instance)
         }
@@ -30,9 +30,10 @@ public extension Managed where Instance: Sendable {
     func callAsFunction<Result: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Instance) async throws -> Result,
     ) async throws -> Result {
-        let instance = try await session.enqueue(in: reference.storage.references) { context in
-            try context.object(reference).decode(as: Instance.self)
-        }
+        let instance = try await session
+            .enqueue(generation: reference.storage.references) { context in
+                try context.object(reference).decode(as: Instance.self)
+            }
         defer { withExtendedLifetime(reference) {} }
         return try await body(instance)
     }
