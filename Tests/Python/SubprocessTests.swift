@@ -112,8 +112,8 @@ struct SubprocessTests {
         #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")
     }
 
-    @Test(arguments: [false, true])
-    func interruptionStopsTheProcessGroup(cancelTask: Bool) async throws {
+    @Test
+    func cancellingTheTaskStopsTheProcessGroup() async throws {
         let session = try await transactionalSession()
         defer { await session.close() }
 
@@ -142,11 +142,7 @@ struct SubprocessTests {
         defer { task.cancel() }
 
         _ = try await #require(nextSignal(from: started))
-        if cancelTask {
-            task.cancel()
-        } else {
-            #expect(session.stop())
-        }
+        task.cancel()
 
         #expect(try await task.value.end == .stopped)
         #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")

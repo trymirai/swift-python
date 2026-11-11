@@ -490,18 +490,12 @@ func checkpointedEvaluationWaitsForHostPublication() async throws {
         })
     }
 
-    #expect(try await stopDuringPublication(in: session) == .stopped)
+    #expect(try await cancelDuringPublication(in: session, afterSealing: false).end == .stopped)
 
     try await checkDeadlineDuringPublication(in: session)
 
-    let committed = try await session.evaluate("""
-    assert values == [1]
-    values.append(4)
-    print("ready")
-    """, committing: { seal in
-        try seal.seal()
-        #expect(!session.stop())
-    })
+    #expect(try await session.evaluate("assert values == [1]").end == .finished)
+    let committed = try await cancelDuringPublication(in: session, afterSealing: true)
     #expect(committed.end == .finished)
     #expect(committed.output.stdout == "ready\n")
     #expect(try await session.evaluate("assert values == [1, 4]").end == .finished)
@@ -509,22 +503,26 @@ func checkpointedEvaluationWaitsForHostPublication() async throws {
 
 private func checkDeadlineDuringPublication(in session: Python::Session) async throws {
     let attemptedPublication = Mutex(false)
+    let cancelledPublication = Mutex(false)
     let expired = try await session.evaluate(
         "values.append(5)",
         timeout: .milliseconds(500),
         committing: { seal in
             attemptedPublication.withLock { $0 = true }
+            defer { cancelledPublication.withLock { $0 = Task.isCancelled } }
             try await Task.sleep(for: .seconds(1))
             try seal.seal()
         },
     )
     #expect(attemptedPublication.withLock { $0 })
+    #expect(cancelledPublication.withLock { $0 })
     #expect(expired.end == .timedOut)
 }
 
-private func stopDuringPublication(in session: Python::Session) async throws -> Python::Execution
-    .End
-{
+private func cancelDuringPublication(
+    in session: Python::Session,
+    afterSealing: Bool,
+) async throws -> Python::Execution {
     let (entered, signal) = AsyncStream<Void>.makeStream()
     let (resume, gate) = AsyncStream<Void>.makeStream()
     defer {
@@ -532,14 +530,24 @@ private func stopDuringPublication(in session: Python::Session) async throws -> 
         gate.finish()
     }
 
-    async let evaluation = session.evaluate("values.append(3)", committing: { seal in
-        signal.yield(())
-        _ = await nextSignal(from: resume)
-        try seal.seal()
-    })
+    let source = afterSealing ? "values.append(4); print('ready')" : "values.append(3)"
+    let evaluation = Task {
+        try await session.evaluate(source, committing: { seal in
+            if afterSealing {
+                try seal.seal()
+            }
+            signal.yield(())
+            _ = await nextSignal(from: resume)
+            if !afterSealing {
+                try seal.seal()
+            }
+        })
+    }
+    defer { evaluation.cancel() }
+
     _ = await nextSignal(from: entered)
-    #expect(session.stop())
+    evaluation.cancel()
     gate.yield(())
 
-    return try await evaluation.end
+    return try await evaluation.value
 }

@@ -9,7 +9,7 @@ public extension Session {
     ///
     /// Blocks and package operations share a queue. The timeout starts when the block
     /// runs and includes implicit startup. Interrupted blocks wait for Swift callbacks
-    /// to finish before returning.
+    /// to finish before returning. Cancel the calling task to interrupt the execution.
     ///
     /// Output redirections append to absolute paths for this block. Implicit startup
     /// captures its own output.
@@ -63,7 +63,7 @@ public extension Session {
     struct Commit: Sendable {
         let checking: @Sendable () throws -> Void
 
-        /// Seals the execution for publication. Throws if it was stopped or timed out.
+        /// Seals the execution for publication. Throws if it was cancelled or timed out.
         public func seal() throws {
             try checking()
         }

@@ -72,9 +72,9 @@ print(job.end) // timedOut
 await console.close()
 ```
 
-`evaluate` returns captured output and accepts a handler for live output. Set `timeout:` to
-limit execution time, or call `stop()` to interrupt it. Use `redirecting:` with absolute paths
-to write streams to files.
+`evaluate` captures output and accepts a live output handler. Cancel the calling task to
+interrupt Python, or set `timeout:` to limit execution time. Use `redirecting:` with absolute
+paths to save output to files.
 
 Startup code runs on the first Python operation. Call `initialize(redirecting:)` to run it
 explicitly, and read `startupOutput` for its output.
@@ -307,7 +307,7 @@ Child processes use the application's OS permissions. The session's file delegat
 control their file access.
 
 `evaluate` waits for child processes to exit. Its timeout applies to both Python code and child
-processes. Calling `stop()`, cancelling the task, or reaching the timeout stops child processes.
+processes. Cancelling the task or reaching the timeout stops child processes.
 
 Set `close_fds=True`. Use `communicate()` to read piped output, or redirect output to a file.
 Call `wait()` or `communicate()` in the same evaluation that starts the child. A child left

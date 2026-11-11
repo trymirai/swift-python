@@ -88,8 +88,7 @@ func literalCallbackDefaults() async throws {
 // MARK: - CallbackInterruption
 
 private enum CallbackInterruption: CaseIterable {
-    case stop
-    case stopBeforeSubmission
+    case cancelBeforeSubmission
     case cancelTask
     case timeout
 }
@@ -102,11 +101,9 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
     let suspended = AsyncStream<Void>.makeStream()
 
     let lifecycle = Mutex((started: false, cancelled: false))
-    let target = Mutex<Python::Session?>(nil)
     defer {
         entered.continuation.finish()
         suspended.continuation.finish()
-        target.withLock { $0 = nil }
     }
 
     @Sendable
@@ -120,10 +117,11 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
         return .none
     }
 
-    let function: Python::Module.Function = if interruption == .stopBeforeSubmission {
+    let function: Python::Module.Function = if interruption == .cancelBeforeSubmission {
         .init("wait", start: { _, _ in
-            let session = try #require(target.withLock { $0 })
-            #expect(session.stop())
+            unsafe withUnsafeCurrentTask { task in
+                unsafe task?.cancel()
+            }
             return Python::Module.Function.makeOperation(wait)
         })
     } else {
@@ -134,8 +132,6 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(moduleDefinitions: [host])
     defer { await session.close() }
-
-    target.withLock { $0 = session }
 
     try await session.initialize()
 
@@ -153,20 +149,16 @@ private func interruptedEvaluationJoinsSwiftCallbacks(
     }
     defer { evaluation.cancel() }
 
-    if interruption == .stop || interruption == .cancelTask {
+    if interruption == .cancelTask {
         _ = try await #require(nextSignal(from: entered.stream))
-        if interruption == .stop {
-            #expect(session.stop())
-        } else {
-            evaluation.cancel()
-        }
+        evaluation.cancel()
     }
 
     let execution = try await evaluation.value
     #expect(execution.end == (interruption == .timeout ? .timedOut : .stopped))
 
     let observation = lifecycle.withLock { $0 }
-    let submitted = interruption != .stopBeforeSubmission
+    let submitted = interruption != .cancelBeforeSubmission
     #expect(observation.started == submitted)
     #expect(observation.cancelled == submitted)
 

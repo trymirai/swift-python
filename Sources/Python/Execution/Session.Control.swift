@@ -80,51 +80,62 @@ extension Session {
             }
         }
 
-        func run<Result>(
+        func run<Result: Sendable>(
             on session: isolated Session,
             onInterruption: InterruptionHandler<Result>? = nil,
             settling: Settlement<Result>? = nil,
-            _ operation: (isolated Session) async throws -> Result,
+            _ operation: @Sendable (isolated Session) async throws -> Result,
         ) async throws -> Result {
             defer { _ = state.withLock { exchange(&$0.scope, with: nil) } }
 
             let deadline = timeout.map { ContinuousClock.now + $0 }
             state.withLock { $0.start(until: deadline) }
 
-            async let callbacks: Void = runCalls()
-            async let _: Void = watchDeadline(deadline)
+            @Sendable
+            func perform(on session: isolated Session) async throws -> Result {
+                try await withCancellation {
+                    async let callbacks: Void = runCalls()
 
-            var result: Swift::Result<Result, any Swift::Error>
-            do {
-                try checkInterruption()
-                result = .success(try await operation(session))
-            } catch {
-                result = .failure(error)
+                    var result: Swift::Result<Result, any Swift::Error>
+                    do {
+                        try checkInterruption()
+                        result = .success(try await operation(session))
+                    } catch {
+                        result = .failure(error)
+                    }
+
+                    // Every native access must detach before checkpoint settlement or close.
+                    await finishAccesses()
+
+                    if settling != nil || subprocesses != nil {
+                        settleCallsAndSubprocesses(on: session, result: &result)
+                    }
+
+                    if let settling {
+                        await callbacks
+                        result = await settling(session, self, result)
+                    }
+
+                    let interruption = finish()
+                    // Python can return before interrupted Swift callbacks finish their cleanup.
+                    await callbacks
+
+                    guard let interruption else {
+                        return try result.get()
+                    }
+                    guard let onInterruption else {
+                        throw CancellationError()
+                    }
+                    return onInterruption(interruption, result)
+                }
             }
 
-            // Every native access must detach before checkpoint settlement or close.
-            await finishAccesses()
-
-            if settling != nil || subprocesses != nil {
-                settleCallsAndSubprocesses(on: session, result: &result)
+            guard let deadline else {
+                return try await perform(on: session)
             }
-
-            if let settling {
-                await callbacks
-                result = await settling(session, self, result)
+            return try await withDeadline(deadline) {
+                try await perform(on: session)
             }
-
-            let interruption = finish()
-            // Python can return before interrupted Swift callbacks finish their cleanup.
-            await callbacks
-
-            guard let interruption else {
-                return try result.get()
-            }
-            guard let onInterruption else {
-                throw CancellationError()
-            }
-            return onInterruption(interruption, result)
         }
 
         private func settleCallsAndSubprocesses<Result>(
@@ -143,7 +154,7 @@ extension Session {
 
             finishCalls(state.withLock { $0.settleCalls() })
 
-            // The executor owns the wait. The deadline task and Stop can still signal children.
+            // The executor owns the wait. Cancellation and the deadline can still signal children.
             do {
                 try subprocesses?.join()
             } catch {
@@ -154,14 +165,35 @@ extension Session {
         }
 
         @concurrent
-        private func watchDeadline(_ deadline: ContinuousClock.Instant?) async {
-            guard let deadline else {
-                return
+        private func withDeadline<Result: Sendable>(
+            _ deadline: ContinuousClock.Instant,
+            _ operation: @Sendable () async throws -> Result,
+        ) async throws -> Result {
+            // The group joins both children before the borrowed operation returns.
+            try await withoutActuallyEscaping(operation) { operation in
+                try await withThrowingTaskGroup(of: Result?.self) { group in
+                    group.addTask { .some(try await operation()) }
+                    group.addTask {
+                        do {
+                            try await ContinuousClock().sleep(until: deadline)
+                            requestInterruption(.timedOut)
+                        } catch {}
+                        return nil
+                    }
+                    defer { group.cancelAll() }
+
+                    for try await result in group {
+                        if let result {
+                            return result
+                        }
+                        // A sealed publication has already finished accepting cancellation.
+                        if interruption != nil {
+                            group.cancelAll()
+                        }
+                    }
+                    preconditionFailure("The Python execution completed without a result.")
+                }
             }
-            do {
-                try await ContinuousClock().sleep(until: deadline)
-                requestInterruption(.timedOut)
-            } catch {}
         }
 
         func withAccess<Result: ~Copyable>(_ body: () throws -> Result) throws -> Result {
@@ -254,9 +286,8 @@ extension Session {
             state.withLock { $0.endEvaluation(on: thread) }
         }
 
-        @discardableResult
-        func requestInterruption(_ reason: Interruption) -> Bool {
-            interrupt(reason).changed
+        func requestInterruption(_ reason: Interruption) {
+            _ = interrupt(reason)
         }
 
         func deliverInterruption() -> Bool {
@@ -277,10 +308,7 @@ extension Session {
             return delivered || queued
         }
 
-        private func interrupt(_ requested: Interruption? = nil) -> (
-            reason: Interruption?,
-            changed: Bool,
-        ) {
+        private func interrupt(_ requested: Interruption? = nil) -> Interruption? {
             let (reason, calls) = state.withLock { state in
                 let transition = state.interrupt(requested)
                 if requested != nil, transition.calls != nil {
@@ -294,7 +322,7 @@ extension Session {
                 pipe.signal()
                 finishCalls(calls)
             }
-            return (reason, calls != nil)
+            return reason
         }
 
         private func finishCalls(_ calls: [CallID: Invocation]) {
@@ -320,7 +348,7 @@ extension Session {
         }
 
         var interruption: Interruption? {
-            interrupt().reason
+            interrupt()
         }
 
         func checkInterruption() throws {

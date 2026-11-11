@@ -182,11 +182,6 @@ public actor Session {
 
     // MARK: Session controls
 
-    @discardableResult
-    public nonisolated func stop() -> Bool {
-        activeExecution.withLock { $0 }?.requestInterruption(.stopped) ?? false
-    }
-
     public nonisolated var isRunning: Bool {
         activeExecution.withLock { $0 != nil }
     }
@@ -251,7 +246,7 @@ public actor Session {
         if let context {
             // The callback must return before the current operation can release its reservation.
             if context.belongs(to: self) {
-                _ = stop()
+                activeExecution.withLock { $0 }?.requestInterruption(.stopped)
             }
             Task.detached { await self.close() }
             return
@@ -288,14 +283,12 @@ public actor Session {
             session.activeExecution.withLock { $0 = execution }
             defer { session.activeExecution.withLock { $0 = nil } }
 
-            return try await execution.withCancellation {
-                try await execution.run(
-                    on: session,
-                    onInterruption: onInterruption,
-                    settling: settling,
-                ) { session in
-                    try await operation(session, execution)
-                }
+            return try await execution.run(
+                on: session,
+                onInterruption: onInterruption,
+                settling: settling,
+            ) { session in
+                try await operation(session, execution)
             }
         }
     }

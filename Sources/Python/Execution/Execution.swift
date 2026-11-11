@@ -10,7 +10,7 @@ public struct Execution: Sendable {
     public enum End: Sendable, Equatable {
         case finished
 
-        /// The host stopped the execution or cancelled its Swift task.
+        /// The execution was cancelled.
         case stopped
 
         case timedOut

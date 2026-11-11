@@ -227,7 +227,6 @@ private actor SuspendedFileAccessDelegate: Python::Session.Delegate {
 
 private enum FileOpenInterruption: CaseIterable {
     case cancelParent
-    case stop
     case timeout
 }
 
@@ -266,13 +265,8 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
         if interruption != .timeout {
             _ = try await #require(nextSignal(from: entered.stream))
         }
-        switch interruption {
-        case .cancelParent:
+        if interruption == .cancelParent {
             evaluation.cancel()
-        case .stop:
-            #expect(session.stop())
-        case .timeout:
-            break
         }
 
         let execution = try await evaluation.value

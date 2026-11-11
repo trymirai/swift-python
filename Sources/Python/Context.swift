@@ -101,13 +101,6 @@ public struct Context: Sendable {
         return try Object(encoding: value, in: self)
     }
 
-    public borrowing func checkCancellation() throws {
-        try Task.checkCancellation()
-        if let storage = Interpreter.Storage.current(), storage.references === references {
-            try storage.execution?.checkInterruption()
-        }
-    }
-
     @discardableResult
     func checkAccess() throws -> Interpreter.Storage {
         let current = try Interpreter.Storage.requireCurrent()
@@ -191,7 +184,7 @@ extension Context {
     private func withAttached<Result: ~Copyable>(
         _ body: (borrowing Context) throws -> Result,
     ) throws -> Result {
-        try checkCancellation()
+        try Task.checkCancellation()
         return unsafe try references.view.withStorage { storage, guardPointer in
             guard storage.references === references else {
                 throw Reference.wrongInterpreter()
@@ -213,7 +206,7 @@ extension Context {
     ) throws -> Result {
         try scope.withEvaluation {
             _ = try Interpreter.Storage.requireCurrent()
-            try checkCancellation()
+            try Task.checkCancellation()
             return try scope.storage.withConstructionScope {
                 try body(Context(storage: scope.storage))
             }

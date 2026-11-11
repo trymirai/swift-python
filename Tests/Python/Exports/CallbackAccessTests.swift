@@ -59,6 +59,14 @@ private enum CallbackAccess {
         try value.spin()
     }
 
+    @PythonFunction("spin_swift")
+    static func spinSwift(_ python: Python::Context) throws {
+        try started(python)
+        while true {
+            try Task.checkCancellation()
+        }
+    }
+
     @PythonFunction
     static func started(_ python: Python::Context) throws {
         guard let signal = python.scope as? AsyncStream<Void>.Continuation else {
@@ -319,7 +327,7 @@ func nativeCallbackAccessUsesTheFileDelegate(allowed: Bool) async throws {
 }
 
 @Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func stoppingNativeCallbacksInterruptsEveryAttachedThread(cancelTask: Bool) async throws {
+func interruptionReachesEveryAttachedThread(timeout: Bool) async throws {
     let signal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(2))
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [CallbackAccess.self], transactional: true)
@@ -334,20 +342,45 @@ func stoppingNativeCallbacksInterruptsEveryAttachedThread(cancelTask: Bool) asyn
                 while True:
                     pass
         await asyncio.gather(spin(Runner()), spin(Runner()))
-        """, scope: signal.continuation)
+        """, scope: signal.continuation, timeout: timeout ? .seconds(2) : nil)
     }
     var readiness = signal.stream.makeAsyncIterator()
     #expect(await readiness.next() != nil)
     #expect(await readiness.next() != nil)
-    if cancelTask {
+    if !timeout {
         evaluation.cancel()
-    } else {
-        #expect(session.stop())
     }
     let interrupted = try await evaluation.value
-    #expect(interrupted.end == .stopped)
+    #expect(interrupted.end == (timeout ? .timedOut : .stopped))
     let next = try await session.evaluate("assert 'Runner' not in globals()")
     #expect(next.end == .finished)
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func synchronousSwiftExportsUseTaskCancellation(timeout: Bool) async throws {
+    let signal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    defer { signal.continuation.finish() }
+
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(modules: [CallbackAccess.self], transactional: true)
+    defer { await session.close() }
+
+    let evaluation = Task {
+        try await session.evaluate(
+            "from callback_access import spin_swift; spin_swift()",
+            scope: signal.continuation,
+            timeout: timeout ? .seconds(2) : nil,
+        )
+    }
+    defer { evaluation.cancel() }
+
+    _ = try await #require(nextSignal(from: signal.stream))
+    if !timeout {
+        evaluation.cancel()
+    }
+    let result = try await evaluation.value
+    #expect(result.end == (timeout ? .timedOut : .stopped))
+    #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")
 }
 
 @Test
