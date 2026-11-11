@@ -122,6 +122,42 @@ func projectPreparesPackagesBeforeStartupAndKeepsModuleGlobals() async throws {
 }
 
 @Test
+func sessionInitializesSiteForPackageDirectories() async throws {
+    try await FileSystem.shared.withTemporaryDirectory { _, root in
+        let files = FileSystem.shared
+        let packages = root.appending("packages")
+        let dependency = packages.appending("extra")
+        let unmanaged = root.appending("unmanaged")
+        try await files.createDirectory(at: dependency, withIntermediateDirectories: true)
+        try await files.createDirectory(at: unmanaged, withIntermediateDirectories: false)
+        try await "extra\n".write(toFileAt: packages.appending("paths.pth"))
+        try await "unmanaged\n".write(toFileAt: root.appending("paths.pth"))
+        try await "VALUE = 42\n".write(toFileAt: dependency.appending("site_dependency.py"))
+        try await "VALUE = 0\n".write(toFileAt: unmanaged.appending("unmanaged_dependency.py"))
+
+        let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
+        let session = try await runtime.session(
+            .source("""
+            import decimal
+            from importlib.util import find_spec
+            from site_dependency import VALUE
+
+            assert callable(help) and callable(quit) and callable(exit)
+            assert decimal.__spec__.origin.startswith("embedded:/stdlib/")
+            assert find_spec("unmanaged_dependency") is None
+            """),
+            packages: [.directory(packages.string)],
+            importPaths: [root.string],
+        )
+        try await withSession(session) { session in
+            #expect(try await session.get("VALUE", as: Int.self) == 42)
+            try await session.reset()
+            #expect(try await session.get("VALUE", as: Int.self) == 42)
+        }
+    }
+}
+
+@Test
 func projectEnvironmentRequiresAnExclusiveLease() async throws {
     try await ProjectFixture.withFixture { fixture in
         try await fixture.withProject { _ in

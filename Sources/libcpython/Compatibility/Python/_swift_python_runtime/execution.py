@@ -3,6 +3,8 @@
 import ast
 import importlib
 import linecache
+import os
+import site
 import sys
 import traceback
 import weakref
@@ -79,7 +81,7 @@ class _SourceCache:
         linecache.cache[filename] = entry
 
 
-def configure(paths: list[str]) -> None:
+def configure(paths: list[str], package_paths: list[str]) -> None:
     global evaluate, initialize, run_script, current_namespace
 
     from .async_support import configure_restricted_loop
@@ -87,6 +89,14 @@ def configure(paths: list[str]) -> None:
     update_imports((paths, []))
     install_streams()
     configure_restricted_loop()
+
+    # Directory package sources support site startup files. Embedded archives use a virtual path.
+    for path in package_paths:
+        if os.path.isabs(path):
+            site.addsitedir(path)
+    site.setquit()
+    site.setcopyright()
+    site.sethelper()
 
     namespace = sys.modules["__main__"].__dict__
     sources = _SourceCache()

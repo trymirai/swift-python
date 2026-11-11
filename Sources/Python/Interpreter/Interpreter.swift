@@ -45,7 +45,9 @@ struct Interpreter: ~Copyable {
 
             try Self.configureExecution(
                 importPaths: Self.searchPaths(importPaths, packages: packagePaths),
+                packagePaths: packagePaths,
                 in: attachment,
+                execution: execution,
             )
 
             try Self.cacheArrayType(in: attachment)
@@ -116,11 +118,18 @@ private extension Interpreter {
 
     static func configureExecution(
         importPaths: [String],
+        packagePaths: [String],
         in attachment: borrowing PThread.Attachment,
+        execution: Session.Control,
     ) throws {
         let module = try executionModule(in: attachment)
         let configure = try module.attribute("configure")
-        _ = try configure.call(importPaths)
+        let imports = try Object(encoding: importPaths, in: attachment)
+        let packages = try Object(encoding: packagePaths, in: attachment)
+        _ = unsafe try configure.callInterruptibly(
+            [imports.pointer, packages.pointer],
+            using: execution,
+        )
     }
 
     static func cacheArrayType(in attachment: borrowing PThread.Attachment) throws {
