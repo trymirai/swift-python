@@ -14,6 +14,10 @@ public struct Runtime: Sendable {
         try await session.initializeRuntime()
     }
 
+    static func initialize() async throws {
+        try await startup.value
+    }
+
     let packaging: Environment.Service.Lazy
     private let options: Options
 
@@ -29,7 +33,7 @@ public struct Runtime: Sendable {
             throw Failure("Python subprocesses are unavailable on this platform.")
         }
         #endif
-        try await Self.startup.value
+        try await Self.initialize()
 
         let packages = try packages.map { try $0.resolved() }
         let cache = try cacheDirectory.map(Path.init)

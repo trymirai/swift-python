@@ -160,6 +160,18 @@ help(counters.Counter)
 print(inspect.signature(counters.Counter.increment))
 ```
 
+### Generate type stubs
+
+```swift
+let stubs = Python::Stubs([Counters.self])
+try await stubs.write(to: "/path/to/project/typings")
+```
+
+`write(to:)` replaces the destination directory with `.pyi` files for the selected
+modules. The path must be absolute. Unknown types are emitted as `object`.
+
+For Pyright, set `"stubPath": "typings"` in `pyrightconfig.json`.
+
 ### Import a Python class
 
 Use `@PythonImportedClass` to declare Swift bindings for a Python class. Targets that declare
