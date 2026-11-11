@@ -24,6 +24,9 @@ extension Session {
         @TaskLocal
         static var sessionPath: [ObjectIdentifier] = []
 
+        @TaskLocal
+        static var currentExport: ExportCall?
+
         enum Interruption: Sendable {
             case stopped
             case timedOut
@@ -207,10 +210,15 @@ extension Session {
             call?.cancel()
         }
 
-        func takeExport(_ id: CallID) throws -> any Encodable & Sendable {
+        func export(_ id: CallID) throws -> ExportCall {
             guard case let .export(call)? = state.withLock({ $0.calls[id] }) else {
                 throw Runtime.Failure("Unknown Swift callback.")
             }
+            return call
+        }
+
+        func takeExport(_ id: CallID) throws -> any Encodable & Sendable {
+            let call = try export(id)
             guard let outcome = call.take() else {
                 throw Runtime.Failure("The Swift callback has not completed.")
             }

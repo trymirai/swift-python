@@ -8,35 +8,96 @@
 public struct _ExportFunction: Sendable {
     public typealias AsyncOperation = @Sendable () async throws -> any Encodable & Sendable
 
-    enum Body: Sendable {
-        case synchronous(
-            @Sendable (
-                borrowing Object,
-                inout Encoder,
-            ) throws -> Void,
-        )
-
-        case asynchronous(
-            @Sendable (
-                borrowing Object,
-            ) throws -> AsyncOperation,
-        )
-    }
-
     let name: String
     let documentation: String?
 
     let parameters: [Parameter]
-    let returnAnnotation: String?
+    let returnAnnotation: Annotation?
 
     let usesSwiftBinding: Bool
     let body: Body
+
+    public static func makeOperation<Result: Encodable & Sendable>(
+        _ body: @escaping @Sendable () async throws -> Result,
+    ) -> AsyncOperation {
+        { try await body() }
+    }
+
+    public static func makeOperation(
+        _ body: @escaping @Sendable () async throws -> Void,
+    ) -> AsyncOperation {
+        {
+            try await body()
+            return Value.none
+        }
+    }
+
+    private init(
+        _ name: String,
+        documentation: String?,
+        parameters: [Parameter],
+        returnAnnotation: Annotation?,
+        usesSwiftBinding: Bool,
+        body: Body,
+    ) {
+        self.name = name
+        self.documentation = documentation
+
+        self.parameters = parameters
+        self.returnAnnotation = returnAnnotation
+
+        self.usesSwiftBinding = usesSwiftBinding
+        self.body = body
+    }
+}
+
+// MARK: _ExportFunction + Swift argument binding
+
+extension _ExportFunction {
+    public init(
+        _ name: String,
+        documentation: String? = nil,
+        parameters: [Parameter] = [],
+        returning: Annotation,
+        call: @escaping @Sendable (
+            borrowing Arguments,
+            borrowing Context,
+            inout Encoder,
+        ) throws -> Void,
+    ) {
+        self.init(
+            name,
+            documentation: documentation,
+            parameters: parameters,
+            returnAnnotation: returning,
+            call: call,
+        )
+    }
+
+    public init(
+        _ name: String,
+        documentation: String? = nil,
+        parameters: [Parameter] = [],
+        returning: Annotation,
+        start: @escaping @Sendable (
+            borrowing Arguments,
+            borrowing Context,
+        ) throws -> AsyncOperation,
+    ) {
+        self.init(
+            name,
+            documentation: documentation,
+            parameters: parameters,
+            returnAnnotation: returning,
+            start: start,
+        )
+    }
 
     package init(
         _ name: String,
         documentation: String? = nil,
         parameters: [Parameter] = [],
-        returnAnnotation: String? = nil,
+        returnAnnotation: Annotation? = nil,
         call: @escaping @Sendable (
             borrowing Arguments,
             borrowing Context,
@@ -44,6 +105,7 @@ public struct _ExportFunction: Sendable {
         ) throws -> Void,
     ) {
         let layout = Arguments.Layout(parameters)
+
         self.init(
             name,
             documentation: documentation,
@@ -62,13 +124,14 @@ public struct _ExportFunction: Sendable {
         _ name: String,
         documentation: String? = nil,
         parameters: [Parameter] = [],
-        returnAnnotation: String? = nil,
+        returnAnnotation: Annotation? = nil,
         start: @escaping @Sendable (
             borrowing Arguments,
             borrowing Context,
         ) throws -> AsyncOperation,
     ) {
         let layout = Arguments.Layout(parameters)
+
         self.init(
             name,
             documentation: documentation,
@@ -82,8 +145,12 @@ public struct _ExportFunction: Sendable {
             },
         )
     }
+}
 
-    package init(
+// MARK: _ExportFunction + Value argument binding
+
+package extension _ExportFunction {
+    init(
         _ name: String,
         documentation: String? = nil,
         parameters: [Parameter] = [],
@@ -91,11 +158,12 @@ public struct _ExportFunction: Sendable {
         body: @escaping @Sendable ([Value]) async throws -> Value,
     ) {
         let count = parameters.count
+
         self.init(
             name,
             documentation: documentation,
             parameters: parameters,
-            returnAnnotation: returnAnnotation,
+            returnAnnotation: returnAnnotation.map { Annotation(text: $0) },
             usesSwiftBinding: false,
             body: .asynchronous { tuple in
                 let values = try Self.values(in: tuple, count: count)
@@ -104,7 +172,7 @@ public struct _ExportFunction: Sendable {
         )
     }
 
-    package init(
+    init(
         _ name: String,
         documentation: String? = nil,
         parameters: [Parameter] = [],
@@ -112,86 +180,18 @@ public struct _ExportFunction: Sendable {
         synchronous body: @escaping @Sendable ([Value]) throws -> Value,
     ) {
         let count = parameters.count
+
         self.init(
             name,
             documentation: documentation,
             parameters: parameters,
-            returnAnnotation: returnAnnotation,
+            returnAnnotation: returnAnnotation.map { Annotation(text: $0) },
             usesSwiftBinding: false,
             body: .synchronous { tuple, encoder in
-                try encoder.encode(body(Self.values(in: tuple, count: count)))
+                let values = try Self.values(in: tuple, count: count)
+                try encoder.encode(body(values))
             },
         )
-    }
-
-    public static func makeOperation<Result: Encodable & Sendable>(
-        _ body: @escaping @Sendable () async throws -> Result,
-    ) -> AsyncOperation {
-        { try await body() }
-    }
-
-    public static func makeOperation(
-        _ body: @escaping @Sendable () async throws -> Void,
-    ) -> AsyncOperation {
-        {
-            try await body()
-            return Value.none
-        }
-    }
-
-    public init<Result: ~Copyable & ~Escapable>(
-        _ name: String,
-        documentation: String? = nil,
-        parameters: [Parameter] = [],
-        returning: Result.Type,
-        call: @escaping @Sendable (
-            borrowing Arguments,
-            borrowing Context,
-            inout Encoder,
-        ) throws -> Void,
-    ) {
-        self.init(
-            name,
-            documentation: documentation,
-            parameters: parameters,
-            returnAnnotation: Self.pAnnotation(for: returning),
-            call: call,
-        )
-    }
-
-    public init<Result: ~Copyable & ~Escapable>(
-        _ name: String,
-        documentation: String? = nil,
-        parameters: [Parameter] = [],
-        returning: Result.Type,
-        start: @escaping @Sendable (
-            borrowing Arguments,
-            borrowing Context,
-        ) throws -> AsyncOperation,
-    ) {
-        self.init(
-            name,
-            documentation: documentation,
-            parameters: parameters,
-            returnAnnotation: Self.pAnnotation(for: returning),
-            start: start,
-        )
-    }
-
-    private init(
-        _ name: String,
-        documentation: String?,
-        parameters: [Parameter],
-        returnAnnotation: String?,
-        usesSwiftBinding: Bool,
-        body: Body,
-    ) {
-        self.name = name
-        self.documentation = documentation
-        self.parameters = parameters
-        self.returnAnnotation = returnAnnotation
-        self.usesSwiftBinding = usesSwiftBinding
-        self.body = body
     }
 
     private static func values(in tuple: borrowing Object, count: Int) throws -> [Value] {
@@ -199,6 +199,25 @@ public struct _ExportFunction: Sendable {
             throw Exception(name: "TypeError", message: "Invalid Swift callback arguments.")
         }
         return values
+    }
+}
+
+// MARK: _ExportFunction.Body
+
+extension _ExportFunction {
+    enum Body: Sendable {
+        case synchronous(
+            @Sendable (
+                borrowing Object,
+                inout Encoder,
+            ) throws -> Void,
+        )
+
+        case asynchronous(
+            @Sendable (
+                borrowing Object,
+            ) throws -> AsyncOperation,
+        )
     }
 }
 

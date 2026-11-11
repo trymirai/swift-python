@@ -8,12 +8,12 @@ import Testing
 
 // MARK: - CounterModule
 
-@PythonModule("counter_base")
+@PythonExportedModule("counter_base")
 private enum CounterModule {}
 
 // MARK: - LabeledCounterModule
 
-@PythonModule("counter_child")
+@PythonExportedModule("counter_child")
 private enum LabeledCounterModule {
     @PythonFunction
     static func echo(_ value: Counter) -> Counter {
@@ -34,7 +34,7 @@ private enum CounterLifetime {
 
 // MARK: - Counter
 
-@PythonClass("Counter", module: CounterModule.self)
+@PythonExportedClass("Counter", module: CounterModule.self)
 private class Counter {
     private var secret = 0
 
@@ -127,7 +127,7 @@ extension Counter {
 
 // MARK: - LabeledCounter
 
-@PythonClass("Labeled", module: LabeledCounterModule.self)
+@PythonExportedClass("Labeled", module: LabeledCounterModule.self)
 private final class LabeledCounter: Counter {
     @PythonProperty
     let label: String
@@ -145,7 +145,7 @@ private final class LabeledCounter: Counter {
 
 // MARK: - ExistingInstance
 
-@PythonClass(module: LabeledCounterModule.self)
+@PythonExportedClass(module: LabeledCounterModule.self)
 private final class ExistingInstance: Sendable {
     @PythonProperty
     var note: String?
@@ -340,12 +340,12 @@ func classIdentityAndSessionGenerations() async throws {
 
 // MARK: - CheckpointModule
 
-@PythonModule("checkpoint_fixture")
+@PythonExportedModule("checkpoint_fixture")
 private enum CheckpointModule {}
 
 // MARK: - CheckpointPeer
 
-@PythonClass("Peer", module: CheckpointModule.self)
+@PythonExportedClass("Peer", module: CheckpointModule.self)
 private final class CheckpointPeer {
     @PythonProperty
     let value: Int

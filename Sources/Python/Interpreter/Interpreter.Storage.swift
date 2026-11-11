@@ -34,6 +34,7 @@ extension Interpreter {
 
         let key: UInt
         let references: Reference.Store
+        let fileAccess: Interpreter.FileAccess?
 
         var sessionOrigin: ObjectIdentifier?
         weak var session: Session?
@@ -41,8 +42,11 @@ extension Interpreter {
         private var isClosed: Bool = false
         var checkpoint: CheckpointState = .inactive
 
-        let fileAccess: Interpreter.FileAccess?
+        // Only valid within the withUnsafeCurrentTask scope that owns the attachment.
+        @unsafe
+        var attachedTask: UnsafeCurrentTask?
         var execution: Session.Control?
+
         private var nextCallID: Int = 0
 
         var namespace: Reference?
@@ -87,6 +91,16 @@ extension Interpreter {
             guard let state = current(), !state.isClosed else {
                 throw Session.Error.closed
             }
+
+            // Task.immediate can start on the attached thread before suspending.
+            let matchesTask = unsafe withUnsafeCurrentTask { unsafe $0 == state.attachedTask }
+            guard matchesTask else {
+                throw Exception(
+                    name: "RuntimeError",
+                    message: "Python is attached to another Swift task.",
+                )
+            }
+
             guard state.checkpoint != .settling else {
                 throw Exception(
                     name: "RuntimeError",
@@ -100,6 +114,7 @@ extension Interpreter {
                     message: "Python reentry is unavailable while a buffer is borrowed.",
                 )
             }
+
             return state
         }
 

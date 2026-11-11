@@ -8,7 +8,7 @@ import Testing
 
 // MARK: - ValueModule
 
-@PythonModule("host")
+@PythonExportedModule("host")
 private enum ValueModule {
     @PythonFunction
     static func echo(_ value: Python::Value) -> Python::Value {

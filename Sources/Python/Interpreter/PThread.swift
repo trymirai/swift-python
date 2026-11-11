@@ -11,6 +11,7 @@ internal import libcpython
 struct PThread: ~Copyable {
     private let pointer: UnsafeMutablePointer<PyThreadState>
     private let heap: OpaquePointer?
+
     let storage: Interpreter.Storage
 
     init(
@@ -65,21 +66,30 @@ struct PThread: ~Copyable {
         releasingReferences: Bool = true,
         _ body: (borrowing Attachment) throws -> Result,
     ) rethrows -> Result {
-        precondition(unsafe PyThreadState_GetUnchecked() == nil)
-        unsafe CPython_AttachThreadState(pointer, heap)
+        // withUnsafeCurrentTask requires a Copyable result.
+        var result: Result?
 
-        storage.execution = execution
-        defer {
-            storage.execution = nil
-            CPython_DetachThreadState()
-        }
+        unsafe try withUnsafeCurrentTask { task in
+            precondition(unsafe PyThreadState_GetUnchecked() == nil)
+            unsafe CPython_AttachThreadState(pointer, heap)
 
-        return try storage.withFileAccess {
-            if releasingReferences {
-                storage.releasePendingReferences()
+            unsafe storage.attachedTask = task
+            storage.execution = execution
+            defer {
+                storage.execution = nil
+                unsafe storage.attachedTask = nil
+                CPython_DetachThreadState()
             }
-            return try Self.withAttachment(to: storage, body)
+
+            result = try storage.withFileAccess {
+                if releasingReferences {
+                    storage.releasePendingReferences()
+                }
+                return try Self.withAttachment(to: storage, body)
+            }
         }
+
+        return result!
     }
 
     // CPython enters Swift callbacks with the originating state already attached.

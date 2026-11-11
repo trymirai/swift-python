@@ -15,11 +15,46 @@ struct PythonPropertyMacro: PeerMacro {
         in context: some MacroExpansionContext,
     ) throws -> [DeclSyntax] {
         let property = try PropertyDeclaration(declaration, in: context)
+
+        if property.owner.isImportedClass {
+            return try importedPeers(of: property, attribute: attribute)
+        }
         if PropertyDeclaration.usesPStorage(property.variable) {
             return try storedPeers(of: property, attribute: attribute, in: context)
         }
+        return try projectedPeers(of: property, attribute: attribute, in: context)
+    }
 
-        let pName = attribute.nameSource(default: property.name)
+    private static func importedPeers(
+        of property: PropertyDeclaration,
+        attribute: AttributeSyntax,
+    ) throws -> [DeclSyntax] {
+        let type = try property.importedTypeSource()
+        switch attribute.argument(named: "isReadOnly") {
+        case "true":
+            return []
+        case "false", nil:
+            break
+        default:
+            throw MacroExpansionErrorMessage(
+                "Use a boolean literal for an imported property's isReadOnly.",
+            )
+        }
+
+        let name = property.pythonNameSource
+        return writeMethods(
+            for: property,
+            type: type,
+            setterBody: "try \(property.receiver) { try $0.setAttribute(\(name), to: newValue) }",
+        )
+    }
+
+    private static func projectedPeers(
+        of property: PropertyDeclaration,
+        attribute: AttributeSyntax,
+        in context: some MacroExpansionContext,
+    ) throws -> [DeclSyntax] {
+        let name = property.pythonNameSource
         let documentation = attribute.documentationSource
 
         let setter = try projectedSetter(
@@ -27,12 +62,20 @@ struct PythonPropertyMacro: PeerMacro {
             isReadOnly: attribute.argument(named: "isReadOnly") == "true",
         )
 
+        let annotation = property.projectedAnnotationSource
         let definition = """
-        collector.addProperty(\(property.owner.name).self, name: \(pName), documentation: \(documentation),
-            getter: { instance, _, encoder in try encoder.encode(instance.\(property.swiftSpelling)) }, setter: \(setter))
+        collector.addProperty(
+            \(property.owner.name).self, name: \(name), documentation: \(documentation),
+            annotation: \(annotation),
+            getter: { instance, _, encoder in try encoder.encode(instance.\(property.swiftSpelling)) },
+            setter: \(setter))
         """
-        return [ExportRegistration(name: property.name, definition: definition, in: context)
-            .declaration]
+        let registration = ExportRegistration(
+            name: property.name,
+            definition: definition,
+            in: context,
+        )
+        return [registration.declaration]
     }
 
     private static func projectedSetter(
@@ -42,6 +85,7 @@ struct PythonPropertyMacro: PeerMacro {
         guard case let .accessors(accessors) = property.binding.accessorBlock?.accessors else {
             return "nil"
         }
+
         if accessors.contains(where: { $0.effectSpecifiers?.asyncSpecifier != nil }) {
             throw MacroExpansionErrorMessage("Python properties must have synchronous accessors.")
         }
@@ -50,15 +94,16 @@ struct PythonPropertyMacro: PeerMacro {
             $0.detail?.detail.text == "set"
                 && ["private", "fileprivate"].contains($0.name.text)
         }
-        let canWrite = accessors.contains {
+        let hasWriteAccessor = accessors.contains {
             ["set", "willSet", "didSet", "_modify"].contains($0.accessorSpecifier.text)
         }
         guard
             property.variable.bindingSpecifier.text != "let",
-            !isReadOnly, !hasPrivateSetter, canWrite
+            !isReadOnly, !hasPrivateSetter, hasWriteAccessor
         else {
             return "nil"
         }
+
         return "{ instance, decoder, _ in instance.\(property.swiftSpelling) = try decoder.decode() }"
     }
 
@@ -72,24 +117,22 @@ struct PythonPropertyMacro: PeerMacro {
         }
 
         let (type, field) = try property.storageSource()
-        let accessLevels = ["private", "fileprivate", "internal", "package", "public", "open"]
-        let access = property.variable
-            .modifiers
-            .first { accessLevels.contains($0.name.text) }?
-            .name
-            .text
-
-        let writeMethods = writeMethods(for: property, type: type, field: field, access: access)
-        if access == "private" || access == "fileprivate" {
+        let writeMethods = writeMethods(
+            for: property,
+            type: type,
+            setterBody: "try self._pSetProperty(newValue, for: \(field))",
+        )
+        if property.access == "private" || property.access == "fileprivate" {
             return writeMethods
         }
 
-        let name = attribute.nameSource(default: property.name)
+        let name = property.pythonNameSource
         let documentation = attribute.documentationSource
         let readOnly = attribute.argument(named: "isReadOnly") ?? "false"
+
         let definition = """
         collector.addStoredProperty(\(property.owner.name).self, name: \(name), property: \(field),
-            documentation: \(documentation), isReadOnly: \(readOnly))
+            documentation: \(documentation), annotation: .init((\(type)).self), isReadOnly: \(readOnly))
         """
         let registration = ExportRegistration(
             name: property.name,
@@ -102,20 +145,21 @@ struct PythonPropertyMacro: PeerMacro {
     private static func writeMethods(
         for property: PropertyDeclaration,
         type: String,
-        field: String,
-        access: String?,
+        setterBody: String,
     ) -> [DeclSyntax] {
-        let accessPrefix = access.map { $0 + " " } ?? ""
+        let accessPrefix = property.access.map { $0 + " " } ?? ""
+        let prefix = accessPrefix +
+            (property.variable.modifiers.declaresStaticMember ? "static " : "")
         let setterName = property.swiftSetterName
 
         let setter = DeclSyntax(stringLiteral: """
-        \(accessPrefix)func \(setterName)(_ newValue: borrowing \(type)) throws {
-            try self._pSetProperty(newValue, for: \(field))
+        \(prefix)func \(setterName)(_ newValue: borrowing \(type)) throws {
+            \(setterBody)
         }
         """)
 
         let updater = DeclSyntax(stringLiteral: """
-        \(accessPrefix)func \(setterName)(_ transform: (\(type)) throws -> \(type)) throws {
+        \(prefix)func \(setterName)(_ transform: (\(type)) throws -> \(type)) throws {
             let current = try self.\(property.swiftSpelling)
             let newValue = try transform(current)
             try self.\(setterName)(newValue)
@@ -126,22 +170,30 @@ struct PythonPropertyMacro: PeerMacro {
     }
 }
 
-// MARK: - PythonStoredPropertyMacro
+// MARK: - PythonPropertyGetterMacro
 
-struct PythonStoredPropertyMacro: AccessorMacro {
+struct PythonPropertyGetterMacro: AccessorMacro {
     static func expansion(
         of attribute: AttributeSyntax,
         providingAccessorsOf declaration: some DeclSyntaxProtocol,
         in context: some MacroExpansionContext,
     ) throws -> [AccessorDeclSyntax] {
         let property = try PropertyDeclaration(declaration, in: context)
-        let field = try property.storageSource().field
-        return [
-            AccessorDeclSyntax(stringLiteral: """
-            get throws {
-                try self._pGetProperty(\(field))
-            }
-            """),
-        ]
+
+        let body: String
+        if property.owner.isImportedClass {
+            _ = try property.importedTypeSource()
+            let name = property.pythonNameSource
+            body = "try \(property.receiver) { try $0.attribute(\(name)).decode() }"
+        } else {
+            let field = try property.storageSource().field
+            body = "try self._pGetProperty(\(field))"
+        }
+
+        return [AccessorDeclSyntax(stringLiteral: """
+        get throws {
+            \(body)
+        }
+        """)]
     }
 }

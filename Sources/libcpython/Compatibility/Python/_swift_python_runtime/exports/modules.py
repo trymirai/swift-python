@@ -1,11 +1,18 @@
 """Declare the selected module graph, install exports and execute module sources."""
 
+import ast
 import sys
 from importlib.machinery import ModuleSpec
 from types import ModuleType
 
 from .classes import NativeClasses
-from .functions import FunctionFactory, cache_source, identifier, require_free_name
+from .functions import (
+    FunctionFactory,
+    execute_source,
+    import_source,
+    module_parts,
+    require_free_name,
+)
 
 
 def install(modules, invoke) -> None:
@@ -34,7 +41,7 @@ def install(modules, invoke) -> None:
 
     # Bases can come from other Swift modules. Resolve them before any module source runs.
     classes.install(pending)
-    _execute_sources(modules, installed)
+    _execute_sources(modules, installed, functions.imports)
 
 
 def _link_submodule(parent: ModuleType, name: str, child: ModuleType) -> None:
@@ -61,7 +68,7 @@ def _install_module(path: str, installed: dict[str, ModuleType]) -> ModuleType:
 
 
 def _declare(name: str, doc: str | None, installed: dict[str, ModuleType]) -> ModuleType:
-    parts = [identifier(part) for part in name.split(".")]
+    parts = module_parts(name)
     parent = None
     path = ""
 
@@ -77,16 +84,71 @@ def _declare(name: str, doc: str | None, installed: dict[str, ModuleType]) -> Mo
 
     module = installed[name]
     module.__doc__, module.__file__ = doc, f"<swift:{name}>"
+
     return module
 
 
-def _execute_sources(modules, installed: dict[str, ModuleType]) -> None:
+def _execute_sources(
+    modules, installed: dict[str, ModuleType], imports: dict[str, set[str]]
+) -> None:
     for name, _, source, _, _ in modules:
+        dependencies = imports.pop(name, ())
         if source is None:
             continue
 
         module = installed[name]
         filename = f"<swift:{name}:source>"
         module.__file__ = filename
-        cache_source(filename, source)
-        exec(compile(source, filename, "exec"), module.__dict__)
+
+        header = import_source(
+            {
+                dependency: None
+                for dependency in dependencies
+                if dependency.partition(".")[0] not in module.__dict__
+            }
+        )
+        if header:
+            source = _insert_imports(source, header, filename)
+
+        execute_source(source, filename, module.__dict__)
+
+
+def _prologue_length(tree: ast.Module) -> int:
+    # The docstring and future imports must stay ahead of regular imports.
+    index = int(ast.get_docstring(tree, clean=False) is not None)
+    while index < len(tree.body):
+        statement = tree.body[index]
+        if not isinstance(statement, ast.ImportFrom) or statement.module != "__future__":
+            break
+        index += 1
+    return index
+
+
+def _insert_imports(source: str, header: str, filename: str) -> str:
+    tree = ast.parse(source, filename)
+    index = _prologue_length(tree)
+    if index == 0:
+        return f"{header}\n\n{source}"
+
+    prologue = tree.body[index - 1]
+    next_statement = tree.body[index] if index < len(tree.body) else None
+
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    line = prologue.end_lineno
+    if next_statement is not None and next_statement.lineno == line:
+        before, after = _split_inline_prologue(lines[line - 1], prologue, next_statement)
+        lines[line - 1 : line] = [before, header, "", after]
+    else:
+        lines[line:line] = [header, ""]
+
+    return "\n".join(lines)
+
+
+def _split_inline_prologue(
+    line: str, prologue: ast.stmt, next_statement: ast.stmt
+) -> tuple[str, str]:
+    # AST column offsets count UTF-8 bytes.
+    text = line.encode()
+    before = text[: prologue.end_col_offset].decode()
+    after = text[next_statement.col_offset :].decode()
+    return before, after

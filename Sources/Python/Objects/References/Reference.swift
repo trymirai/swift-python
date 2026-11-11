@@ -32,20 +32,29 @@ public struct Reference: Sendable {
         self.storage = storage
     }
 
+    /// Accesses the object synchronously in its attached interpreter.
+    public borrowing func callAsFunction<Result: ~Copyable>(
+        _ body: (borrowing Object) throws -> Result,
+    ) throws -> Result {
+        let context = try Context()
+        return try body(resolve(in: context))
+    }
+
     @_lifetime(borrow context)
     func resolve(in context: borrowing Context) throws -> Object {
-        let current = try context.checkAccess()
-        return try object(in: current.references, scopedTo: context)
+        let state = try context.checkAccess()
+        return try object(in: state.references, scopedTo: context)
     }
 
     @_lifetime(borrow owner)
-    private func object<Owner: ~Copyable & ~Escapable>(
+    func object<Owner: ~Copyable & ~Escapable>(
         in references: Reference.Store,
         scopedTo owner: borrowing Owner,
     ) throws -> Object {
         guard references === storage.references else {
             throw Self.wrongInterpreter()
         }
+
         let pointer = unsafe try storage.pointer()
         return unsafe Object.retaining(pointer, in: owner)
     }

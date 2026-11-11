@@ -44,7 +44,6 @@ await session.close()
 
 Sessions keep globals between calls. Use `Python::Value` for dynamic values and
 `Python::Encodable` or `Python::Decodable` for custom Swift types.
-[Coding examples](Tests/Python/Objects/CodingTests.swift)
 
 ### Python objects and live output
 
@@ -71,12 +70,11 @@ await console.close()
 Call `stop()` to interrupt evaluation. Use absolute paths in `redirecting:` for file-backed streams.
 Startup runs on the first Python operation or through `initialize(redirecting:)`, with output
 captured in `startupOutput`.
-[Stream examples](Tests/Python/StreamRedirectionTests.swift)
 
 ### Call Swift from Python
 
 ```swift
-@PythonModule("buffers")
+@PythonExportedModule("buffers")
 enum Buffers {
     @PythonFunction
     static func invert(_ pixels: inout MutableSpan<UInt8>) {
@@ -98,8 +96,69 @@ await bufferSession.close()
 ```
 
 `MutableSpan` edits the Python buffer in place.
-[Class exports](Tests/Python/Exports/ClassTests.swift) ·
-[Async callbacks](Tests/Python/Exports/CallbackTests.swift)
+
+### Export a Swift class
+
+Select the exported module with `modules:` to make its classes importable from Python.
+
+```swift
+@PythonExportedModule("counters")
+enum Counters {}
+
+@PythonExportedClass(module: Counters.self)
+final class Counter {
+    @PythonProperty
+    var value: Int
+
+    @PythonInit
+    init(_ value: Int) throws {
+        try $value(value)
+    }
+
+    @PythonFunction
+    func increment() throws {
+        try $value { $0 + 1 }
+    }
+}
+
+let counters = try await runtime.session(modules: [Counters.self])
+let result = try await counters.evaluate("""
+from counters import Counter
+counter = Counter(4)
+counter.increment()
+print(counter.value)
+""")
+print(result.output.stdout, terminator: "") // 5
+await counters.close()
+```
+
+### Import a Python class
+
+Add `.enableExperimentalFeature("Lifetimes")` to `swiftSettings` for targets that declare
+imported classes. Use `enqueue` on the owning session for synchronous member access.
+
+```swift
+@PythonImportedClass(module: "pathlib", name: "PurePosixPath")
+struct PosixPath {
+    @PythonProperty(isReadOnly: true)
+    var name: String
+
+    @PythonFunction("with_suffix")
+    func withSuffix(_ suffix: String) throws -> PosixPath
+}
+
+let paths = try await runtime.session()
+_ = try await paths.evaluate("""
+from pathlib import PurePosixPath
+report = PurePosixPath("reports/summary.txt")
+""")
+let report = try await paths.get("report", as: PosixPath.self)
+let name = try await paths.enqueue { _ in
+    try report.withSuffix(".md").name
+}
+print(name) // summary.md
+await paths.close()
+```
 
 ## Scripts and projects
 
@@ -171,7 +230,7 @@ await bundled.close()
 ```
 
 To embed the ZIP in the executable, add it as a SwiftPM `.embedInCode` resource and pass its bytes
-as `.embedded(...)`. [Bundle tests](Tests/Python/Environment/ProjectTests.swift)
+as `.embedded(...)`.
 
 ## File access
 
@@ -181,7 +240,6 @@ Python file operations raise `PermissionError`. Embedded native modules use an a
 
 For scripts, the delegate checks the source before reading it. Approval covers the script file.
 Without a delegate, the script directory is a read root.
-[Delegate examples](Tests/Python/SessionDelegateTests.swift)
 
 In transactional sessions, rollback restores Python state and session-owned descriptor positions.
 Filesystem changes persist.

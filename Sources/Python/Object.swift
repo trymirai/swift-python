@@ -164,9 +164,9 @@ public extension Object {
 
 // MARK: Object + Coding
 
-extension Object {
+public extension Object {
     @_lifetime(borrow owner)
-    init<T: Encodable & ~Copyable, Owner: ~Copyable & ~Escapable>(
+    internal init<T: Encodable & ~Copyable, Owner: ~Copyable & ~Escapable>(
         encoding value: borrowing T,
         in owner: borrowing Owner,
     ) throws {
@@ -175,7 +175,13 @@ extension Object {
         self = unsafe try Object(owned: encoder.take(), in: owner)
     }
 
-    public borrowing func decode<T: Decodable & ~Copyable>(
+    /// Discards the result of a void-returning Swift binding.
+    @_documentation(visibility: internal)
+    borrowing func decode(as type: Void.Type) throws {
+        _ = try Interpreter.Storage.requireCurrent()
+    }
+
+    borrowing func decode<T: Decodable & ~Copyable>(
         as type: T.Type = T.self,
     ) throws -> T {
         let decoder = unsafe Decoder(pointer, in: self)

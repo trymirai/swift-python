@@ -30,6 +30,7 @@ public protocol _ExportSink {
         _ type: Instance.Type,
         name: String,
         documentation: String?,
+        annotation: _ExportFunction.Annotation?,
         getter: @escaping @Sendable (Instance, borrowing Context, inout Encoder) throws -> Void,
         setter: (@Sendable (Instance, borrowing Decoder, borrowing Context) throws -> Void)?,
     )
@@ -42,6 +43,7 @@ public protocol _ExportSink {
         name: String,
         property: Object.Property<Value>,
         documentation: String?,
+        annotation: _ExportFunction.Annotation,
         isReadOnly: Bool,
     )
 }

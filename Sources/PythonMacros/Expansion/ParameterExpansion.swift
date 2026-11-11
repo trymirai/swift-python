@@ -31,6 +31,7 @@ struct ParameterExpansion {
         }
 
         self.index = index
+
         let type = "(\(parameter.type.concreteSpelling(owner: owner))).self"
         let defaultValueSource = parameter
             .defaultValue
@@ -42,8 +43,9 @@ struct ParameterExpansion {
         let pName = name == "_" ? "arg\(index)" : name
         let isUnlabeled = parameter.firstName.text == "_"
 
+        // Select the annotation overload while the declared parameter type is still concrete.
         metadataSource = """
-        .init(\(String(reflecting: pName)), as: \(type),
+        .init(\(String(reflecting: pName)), as: .init(\(type)),
               hasDefaultValue: \(parameter.defaultValue != nil), isUnlabeled: \(isUnlabeled))
         """
 

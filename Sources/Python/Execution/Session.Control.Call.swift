@@ -9,29 +9,17 @@ internal import SystemPackage
 // MARK: - Session.Control.Call
 
 extension Session.Control {
+    typealias ExportCall = Call<any Encodable & Sendable>
+
     final class Call<Reply: Sendable>: Sendable {
         typealias Outcome = Swift::Result<Reply, any Swift::Error>
-
-        private enum State {
-            case pending
-            case ready(Outcome)
-            case taken
-
-            var isPending: Bool {
-                if case .pending = self {
-                    true
-                } else {
-                    false
-                }
-            }
-        }
 
         private let operation: @Sendable () async throws -> Reply
         private let origin: [ObjectIdentifier]
 
-        private let state: Mutex<State> = .init(.pending)
-
+        private let state: Mutex<State> = .init(State())
         let pipe: Pipe
+
         private let completion: AsyncStream<Void>
         private let completionSignal: AsyncStream<Void>.Continuation
 
@@ -65,9 +53,10 @@ extension Session.Control {
         }
 
         private func invoke() async {
-            guard state.withLock({ $0.isPending }) else {
+            guard state.withLock({ $0.phase.isPending }) else {
                 return
             }
+
             await Session.Control.$sessionPath.withValue(origin) {
                 do {
                     try Task.checkCancellation()
@@ -79,13 +68,7 @@ extension Session.Control {
         }
 
         func take() -> Outcome? {
-            state.withLock { state in
-                guard case let .ready(outcome) = state else {
-                    return nil
-                }
-                state = .taken
-                return outcome
-            }
+            state.withLock { $0.take() }
         }
 
         func cancel() {
@@ -93,18 +76,102 @@ extension Session.Control {
         }
 
         private func finish(_ outcome: Outcome) {
-            let didFinish = state.withLock { state in
-                guard state.isPending else {
-                    return false
-                }
-                state = .ready(outcome)
-                return true
+            let pendingMethods = state.withLock { $0.finish(outcome) }
+            guard let pendingMethods else {
+                return
             }
 
-            if didFinish {
-                pipe.signal()
-                completionSignal.finish()
+            pipe.signal()
+            completionSignal.finish()
+            pendingMethods.forEach { $0.cancel() }
+        }
+
+        func submit(_ method: any ImportedMethodRequest) throws {
+            try state.withLock { state in
+                guard state.phase.isPending else {
+                    throw CancellationError()
+                }
+
+                // Polling takes the same lock, so a failed write can leave the queue intact.
+                try notify(&state)
+                state.methods.append(method)
             }
+        }
+
+        func wake() {
+            try? state.withLock { state in
+                if state.phase.isPending {
+                    try notify(&state)
+                }
+            }
+        }
+
+        func poll() throws -> [any ImportedMethodRequest]? {
+            try state.withLock { state in
+                guard state.phase.isPending else {
+                    return nil
+                }
+
+                if state.notified {
+                    try pipe.consumeNotification()
+                    state.notified = false
+                }
+
+                return exchange(&state.methods, with: [])
+            }
+        }
+
+        private func notify(_ state: inout State) throws {
+            // One unread byte is enough for the loop to drain all pending work.
+            if !state.notified {
+                try pipe.notify()
+                state.notified = true
+            }
+        }
+    }
+}
+
+// MARK: - Session.Control.Call.Phase
+
+extension Session.Control.Call {
+    private enum Phase {
+        case pending
+        case ready(Outcome)
+        case taken
+
+        var isPending: Bool {
+            if case .pending = self {
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+// MARK: - Session.Control.Call.State
+
+extension Session.Control.Call {
+    private struct State {
+        var phase: Phase = .pending
+
+        var methods: [any ImportedMethodRequest] = []
+        var notified = false
+
+        mutating func take() -> Outcome? {
+            guard case let .ready(outcome) = phase else {
+                return nil
+            }
+            phase = .taken
+            return outcome
+        }
+
+        mutating func finish(_ outcome: Outcome) -> [any ImportedMethodRequest]? {
+            guard phase.isPending else {
+                return nil
+            }
+            phase = .ready(outcome)
+            return exchange(&methods, with: [])
         }
     }
 }
@@ -121,15 +188,15 @@ extension Session.Control {
 
 extension Session.Control {
     enum Invocation: Sendable {
-        case export(Call<any Encodable & Sendable>)
+        case export(ExportCall)
         case fileAccess(Call<Bool>)
 
         func run() async {
             switch self {
             case let .export(call):
-                await call.run()
+                await Session.Control.$currentExport.withValue(call) { await call.run() }
             case let .fileAccess(call):
-                await call.run()
+                await Session.Control.$currentExport.withValue(nil) { await call.run() }
             }
         }
 

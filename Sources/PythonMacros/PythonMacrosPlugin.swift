@@ -15,12 +15,14 @@ struct PythonMacrosPlugin {}
 extension PythonMacrosPlugin: CompilerPlugin {
     var providingMacros: [Macro.Type] {
         [
-            PythonModuleMacro.self,
+            PythonExportedModuleMacro.self,
+            PythonExportedClassMacro.self,
+            PythonImportedClassMacro.self,
+
             PythonFunctionMacro.self,
-            PythonClassMacro.self,
             PythonInitMacro.self,
             PythonPropertyMacro.self,
-            PythonStoredPropertyMacro.self,
+            PythonPropertyGetterMacro.self,
         ]
     }
 }

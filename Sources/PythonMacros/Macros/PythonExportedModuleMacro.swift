@@ -6,13 +6,13 @@ import SwiftSyntax
 import SwiftSyntaxBuilder
 import SwiftSyntaxMacros
 
-// MARK: - PythonModuleMacro
+// MARK: - PythonExportedModuleMacro
 
-struct PythonModuleMacro {}
+struct PythonExportedModuleMacro {}
 
 // MARK: MemberMacro
 
-extension PythonModuleMacro: MemberMacro {
+extension PythonExportedModuleMacro: MemberMacro {
     static func expansion(
         of attribute: AttributeSyntax,
         providingMembersOf declaration: some DeclGroupSyntax,
@@ -23,16 +23,18 @@ extension PythonModuleMacro: MemberMacro {
 
         guard let type = declaration.exportTypeDeclaration else {
             throw MacroExpansionErrorMessage(
-                "PythonModule requires an enum, struct, actor or class.",
+                "PythonExportedModule requires an enum, struct, actor or class.",
             )
         }
 
         guard type.genericParameterClause == nil else {
-            throw MacroExpansionErrorMessage("PythonModule requires a concrete, non-generic type.")
+            throw MacroExpansionErrorMessage(
+                "PythonExportedModule requires a concrete, non-generic type.",
+            )
         }
 
         guard let name = attribute.argument() else {
-            throw MacroExpansionErrorMessage("PythonModule requires a module name.")
+            throw MacroExpansionErrorMessage("PythonExportedModule requires a module name.")
         }
 
         func metadata(_ member: String, type: String, value: String) -> DeclSyntax {
@@ -60,7 +62,7 @@ extension PythonModuleMacro: MemberMacro {
 
 // MARK: ExtensionMacro
 
-extension PythonModuleMacro: ExtensionMacro {
+extension PythonExportedModuleMacro: ExtensionMacro {
     static func expansion(
         of attribute: AttributeSyntax,
         attachedTo declaration: some DeclGroupSyntax,

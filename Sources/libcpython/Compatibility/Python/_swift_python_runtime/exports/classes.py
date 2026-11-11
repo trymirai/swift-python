@@ -58,7 +58,7 @@ class NativeClasses:
 
             def __init_subclass__(cls, **kwargs) -> None:
                 if not registry._creating:
-                    raise TypeError("Subclass native classes in Swift using PythonClass")
+                    raise TypeError("Subclass native classes in Swift using PythonExportedClass")
 
                 super().__init_subclass__(**kwargs)
 

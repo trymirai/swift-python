@@ -15,32 +15,6 @@ struct ExportScope {
         lexicalContext = context.lexicalContext
     }
 
-    struct Owner {
-        let name: String
-
-        let isExtension: Bool
-        let isActor: Bool
-
-        let isModule: Bool
-        let hasClassMacro: Bool
-
-        let isMainActorIsolated: Bool
-
-        init?(name: String, scope: Syntax) {
-            guard let declaration = scope.asProtocol(DeclGroupSyntax.self) else {
-                return nil
-            }
-            self.name = name
-            isExtension = scope.is(ExtensionDeclSyntax.self)
-            isActor = scope.is(ActorDeclSyntax.self)
-
-            let attributes = declaration.attributes
-            isModule = !isExtension && attributes.attribute(named: "PythonModule") != nil
-            hasClassMacro = !isExtension && attributes.attribute(named: "PythonClass") != nil
-            isMainActorIsolated = !isExtension && attributes.attribute(named: "MainActor") != nil
-        }
-    }
-
     var owner: Owner? {
         var nearest: Syntax?
         var names = [String]()
@@ -97,8 +71,51 @@ struct ExportScope {
     }
 }
 
+// MARK: ExportScope.Owner
+
+extension ExportScope {
+    struct Owner {
+        let name: String
+        let isExtension: Bool
+
+        let isActor: Bool
+        let isMainActorIsolated: Bool
+
+        let isModule: Bool
+        let isExportedClass: Bool
+        let isImportedClass: Bool
+
+        init?(name: String, scope: Syntax) {
+            guard let declaration = scope.asProtocol(DeclGroupSyntax.self) else {
+                return nil
+            }
+
+            let isExtension = scope.is(ExtensionDeclSyntax.self)
+            let attributes = declaration.attributes
+
+            func hasAttribute(_ name: String) -> Bool {
+                !isExtension && attributes.attribute(named: name) != nil
+            }
+
+            self.name = name
+            self.isExtension = isExtension
+
+            isActor = scope.is(ActorDeclSyntax.self)
+            isMainActorIsolated = hasAttribute("MainActor")
+
+            isModule = hasAttribute("PythonExportedModule")
+            isExportedClass = hasAttribute("PythonExportedClass")
+            isImportedClass = hasAttribute("PythonImportedClass")
+        }
+    }
+}
+
 extension DeclModifierListSyntax {
     var declaresStaticMember: Bool {
         contains { $0.name.text == "static" || $0.name.text == "class" }
+    }
+
+    var importedReceiver: String {
+        declaresStaticMember ? "Self.withClass" : "self"
     }
 }

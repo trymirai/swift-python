@@ -48,7 +48,7 @@ struct FunctionExpansion {
         Python::_ExportFunction(
             \(name), documentation: \(documentation),
             parameters: [\(metadata.joined(separator: ", "))],
-            returning: (\(returnType)).self, \(body))
+            returning: .init((\(returnType)).self), \(body))
         """
     }
 

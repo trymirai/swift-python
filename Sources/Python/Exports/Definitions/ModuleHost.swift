@@ -4,7 +4,7 @@
 
 // MARK: - ModuleHost
 
-/// A Swift type exported by `PythonModule`.
+/// A Swift type exported by `PythonExportedModule`.
 public protocol ModuleHost: SendableMetatype {
     @_documentation(visibility: internal)
     static var _pModuleName: String { get }

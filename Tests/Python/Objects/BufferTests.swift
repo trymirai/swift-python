@@ -17,7 +17,7 @@ private struct BufferScale: Python::Decodable {
 
 // MARK: - BufferModule
 
-@PythonModule("buffers")
+@PythonExportedModule("buffers")
 private enum BufferModule {
     @PythonFunction
     static func sum(_ values: Span<UInt8>) -> Int {

@@ -21,7 +21,7 @@ private enum ExportDefaults {
 
 // MARK: - AutomaticModule
 
-@PythonModule("automatic")
+@PythonExportedModule("automatic")
 private enum AutomaticModule {
     private static let seed = 41
 
@@ -75,7 +75,7 @@ extension AutomaticModule {
 
 // MARK: - ConfiguredModule
 
-@PythonModule("configured")
+@PythonExportedModule("configured")
 private final class ConfiguredModule {
     private init(prefix: String) {}
 
@@ -93,7 +93,7 @@ private final class ConfiguredModule {
 
 // MARK: - InvalidContextModule
 
-@PythonModule("invalid_context")
+@PythonExportedModule("invalid_context")
 private enum InvalidContextModule {
     @PythonFunction
     static func injected(_ value: Int, _ context: Python::Context) {}
@@ -101,7 +101,7 @@ private enum InvalidContextModule {
 
 // MARK: - LabeledContextModule
 
-@PythonModule("labeled_context")
+@PythonExportedModule("labeled_context")
 private enum LabeledContextModule {
     @PythonFunction
     static func injected(in context: Python::Context) {}
@@ -109,7 +109,7 @@ private enum LabeledContextModule {
 
 // MARK: - InitializedModule
 
-@PythonModule("initialized", source: """
+@PythonExportedModule("initialized", source: """
 from initialized.child import increment
 
 result = increment(seed())
@@ -123,7 +123,7 @@ private enum InitializedModule {
 
 // MARK: - InitializedChildModule
 
-@PythonModule("initialized.child")
+@PythonExportedModule("initialized.child")
 private enum InitializedChildModule {
     @PythonFunction
     static func increment(_ value: Int) -> Int {
@@ -133,7 +133,7 @@ private enum InitializedChildModule {
 
 // MARK: - UnselectedModule
 
-@PythonModule("unselected")
+@PythonExportedModule("unselected")
 private enum UnselectedModule {
     @PythonFunction
     static func untouched() -> Int {

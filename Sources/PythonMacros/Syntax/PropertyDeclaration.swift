@@ -23,12 +23,12 @@ struct PropertyDeclaration {
             variable.bindings.count == 1,
             let binding = variable.bindings.first,
             let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier,
-            !variable.modifiers.declaresStaticMember,
             let owner = scope.owner,
-            owner.hasClassMacro || owner.isExtension
+            owner.isImportedClass || !variable.modifiers.declaresStaticMember,
+            owner.isExportedClass || owner.isExtension || owner.isImportedClass
         else {
             throw MacroExpansionErrorMessage(
-                "Python properties require a single instance property of a PythonClass.",
+                "PythonProperty requires a member of a PythonImportedClass or PythonExportedClass.",
             )
         }
 
@@ -61,12 +61,32 @@ struct PropertyDeclaration {
         "$" + name
     }
 
+    var pythonNameSource: String {
+        variable.attributes.attribute(named: "PythonProperty")?.nameSource(default: name)
+            ?? String(reflecting: name)
+    }
+
+    var access: String? {
+        let levels = ["private", "fileprivate", "internal", "package", "public", "open"]
+        return variable.modifiers.first { levels.contains($0.name.text) }?.name.text
+    }
+
+    var receiver: String {
+        variable.modifiers.importedReceiver
+    }
+
+    func importedTypeSource() throws -> String {
+        guard let type = uninitializedVariableType else {
+            throw MacroExpansionErrorMessage(
+                "Declare an imported property as a typed var with no initializer or accessors.",
+            )
+        }
+        return type.trimmedDescription
+    }
+
     func storageSource() throws -> (type: String, field: String) {
         guard
-            variable.bindingSpecifier.text == "var",
-            let type = binding.typeAnnotation?.type,
-            binding.initializer == nil,
-            binding.accessorBlock == nil,
+            let type = uninitializedVariableType,
             !variable.modifiers.contains(where: { $0.detail?.detail.text == "set" })
         else {
             throw MacroExpansionErrorMessage(
@@ -81,6 +101,33 @@ struct PropertyDeclaration {
         let typeSource = type.concreteSpelling(owner: owner.name)
         let key = "Swift::String(reflecting: \(owner.name).self) + \(String(reflecting: "." + swiftSpelling))"
         let field = "Python::Object.Property<(\(typeSource))>(\(key))"
+
         return (typeSource, field)
+    }
+
+    var projectedAnnotationSource: String {
+        // An opaque property type cannot be emitted as a metatype expression.
+        guard
+            let type = binding.typeAnnotation?.type,
+            !type.tokens(viewMode: .sourceAccurate).contains(where: {
+                $0.tokenKind == .keyword(.some)
+            })
+        else {
+            return "nil"
+        }
+
+        return ".init((\(type.concreteSpelling(owner: owner.name))).self)"
+    }
+
+    private var uninitializedVariableType: TypeSyntax? {
+        guard
+            variable.bindingSpecifier.text == "var",
+            binding.initializer == nil,
+            binding.accessorBlock == nil
+        else {
+            return nil
+        }
+
+        return binding.typeAnnotation?.type
     }
 }

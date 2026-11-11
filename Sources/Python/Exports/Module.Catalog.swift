@@ -304,24 +304,37 @@ extension Module.Catalog: _ExportSink {
         _ type: Instance.Type,
         name: String,
         documentation: String?,
+        annotation: _ExportFunction.Annotation?,
         getter: @escaping @Sendable (Instance, borrowing Context, inout Encoder) throws -> Void,
         setter: (@Sendable (Instance, borrowing Decoder, borrowing Context) throws -> Void)?,
     ) {
-        let getterFunction = Module.Function(
-            "get_" + name,
-            parameters: [.receiver],
-            call: { arguments, context, encoder in
-                try getter(arguments.receiver(as: type), context, &encoder)
-            },
-        )
-
-        let setterFunction = setter.map { setter in
+        func makeGetter() -> Module.Function {
             Module.Function(
+                "get_" + name,
+                parameters: [.receiver],
+                returnAnnotation: annotation,
+                call: { arguments, context, encoder in
+                    try getter(arguments.receiver(as: type), context, &encoder)
+                },
+            )
+        }
+
+        func makeSetter() -> Module.Function? {
+            guard let setter else {
+                return nil
+            }
+
+            let parameter = annotation.map { Module.Function.Parameter("value", as: $0) }
+                ?? .init("value")
+
+            return Module.Function(
                 "set_" + name,
-                parameters: [.receiver, .init("value")],
+                parameters: [.receiver, parameter],
                 call: { arguments, context, encoder in
                     let decoder = unsafe try Decoder(arguments.element(1), in: arguments)
-                    try setter(arguments.receiver(as: type), decoder, context)
+                    let receiver = try arguments.receiver(as: type)
+
+                    try setter(receiver, decoder, context)
                     try encoder.encodeNil()
                 },
             )
@@ -332,8 +345,8 @@ extension Module.Catalog: _ExportSink {
             .init(
                 name: name,
                 documentation: documentation,
-                getter: getterFunction,
-                setter: setterFunction,
+                getter: makeGetter(),
+                setter: makeSetter(),
             ),
         ))
     }
@@ -346,26 +359,30 @@ extension Module.Catalog: _ExportSink {
         name: String,
         property: Object.Property<Value>,
         documentation: String?,
+        annotation: _ExportFunction.Annotation,
         isReadOnly: Bool,
     ) {
-        let setter: (@Sendable (Instance, borrowing Decoder, borrowing Context) throws -> Void)? =
-            if isReadOnly {
-                nil
-            } else {
-                { instance, decoder, _ in
-                    _ = try decoder.decode(Value.self)
-                    let object = try decoder.object()
-                    try instance.storePProperty(object, for: property)
-                }
-            }
+        @Sendable
+        func write(
+            _ instance: Instance,
+            _ decoder: borrowing Decoder,
+            _: borrowing Context,
+        ) throws {
+            // Validate with the Swift codec while retaining the original Python object.
+            _ = try decoder.decode(Value.self)
+            let object = try decoder.object()
+            try instance.storePProperty(object, for: property)
+        }
+
         addProperty(
             type,
             name: name,
             documentation: documentation,
+            annotation: annotation,
             getter: { instance, _, encoder in
                 try encoder.encode(instance.pPropertyOrNone(property))
             },
-            setter: setter,
+            setter: isReadOnly ? nil : write,
         )
     }
 }

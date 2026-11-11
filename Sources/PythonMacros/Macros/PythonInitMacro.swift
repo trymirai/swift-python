@@ -23,10 +23,13 @@ extension PythonInitMacro: PeerMacro {
         guard
             let initializer = declaration.as(InitializerDeclSyntax.self),
             let owner = scope.owner,
-            owner.hasClassMacro || owner.isExtension
+            owner.isExportedClass || owner.isExtension
         else {
-            throw MacroExpansionErrorMessage("PythonInit requires an initializer of a PythonClass.")
+            throw MacroExpansionErrorMessage(
+                "PythonInit requires an initializer of a PythonExportedClass.",
+            )
         }
+
         guard
             initializer.optionalMark == nil, initializer.genericParameterClause == nil,
             initializer.signature.effectSpecifiers?.asyncSpecifier == nil

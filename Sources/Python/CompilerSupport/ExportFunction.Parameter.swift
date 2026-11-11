@@ -14,11 +14,6 @@ public extension _ExportFunction {
             Self(name: "self", kind: .receiver)
         }
 
-        private init(name: String, kind: Kind) {
-            self.name = name
-            self.kind = kind
-        }
-
         package init(
             _ name: String,
             annotation: String? = nil,
@@ -27,7 +22,7 @@ public extension _ExportFunction {
             self.init(
                 name: name,
                 kind: .argument(
-                    annotation: annotation,
+                    annotation: annotation.map { Annotation(text: $0) },
                     defaultValue.map(Default.literal) ?? .required,
                 ),
             )
@@ -39,15 +34,35 @@ public extension _ExportFunction {
             hasDefaultValue: Bool = false,
             isUnlabeled: Bool = false,
         ) {
-            let kind: Kind = if ObjectIdentifier(type) == ObjectIdentifier(Context.self) {
+            self.init(
+                name,
+                as: Annotation(type),
+                hasDefaultValue: hasDefaultValue,
+                isUnlabeled: isUnlabeled,
+            )
+        }
+
+        public init(
+            _ name: String,
+            as annotation: Annotation,
+            hasDefaultValue: Bool = false,
+            isUnlabeled: Bool = false,
+        ) {
+            let kind: Kind = if annotation.isContext {
                 .context(isUnlabeled: isUnlabeled)
             } else {
                 .argument(
-                    annotation: _ExportFunction.pAnnotation(for: type),
+                    annotation: annotation,
                     hasDefaultValue ? .swift : .required,
                 )
             }
+
             self.init(name: name, kind: kind)
+        }
+
+        private init(name: String, kind: Kind) {
+            self.name = name
+            self.kind = kind
         }
 
         var isInjected: Bool {
@@ -58,7 +73,7 @@ public extension _ExportFunction {
             }
         }
 
-        var annotation: String? {
+        var annotation: Annotation? {
             if case let .argument(annotation, _) = kind {
                 annotation
             } else {
@@ -82,7 +97,7 @@ extension _ExportFunction.Parameter {
     enum Kind: Sendable {
         case receiver
         case context(isUnlabeled: Bool)
-        case argument(annotation: String?, Default)
+        case argument(annotation: _ExportFunction.Annotation?, Default)
     }
 }
 

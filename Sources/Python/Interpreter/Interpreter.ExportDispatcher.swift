@@ -61,6 +61,9 @@ extension Interpreter.ExportDispatcher: Object.Callable {
             try classes(in: storage).bind(request.item(at: 1))
         case .call, .start:
             return try invokeExport(command, request: request, in: attachment)
+        case .poll:
+            let callback = try execution(in: storage).export(callID())
+            return try poll(callback, in: attachment)
         case .take:
             let id = try callID()
             let result = try execution(in: storage).takeExport(id)
@@ -69,6 +72,7 @@ extension Interpreter.ExportDispatcher: Object.Callable {
             let id = try callID()
             storage.execution?.cancelExport(id)
         }
+
         return try Object(encoding: Value.none, in: attachment)
     }
 
@@ -92,6 +96,39 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         }
     }
 
+    @_lifetime(borrow attachment)
+    private func poll(
+        _ callback: Session.Control.ExportCall,
+        in attachment: borrowing PThread.Attachment,
+    ) throws -> Object {
+        guard let methods = try callback.poll() else {
+            return try Object(encoding: Value.none, in: attachment)
+        }
+
+        do {
+            return try makeRequests(for: methods, in: attachment)
+        } catch {
+            methods.forEach { $0.cancel() }
+            throw error
+        }
+    }
+
+    @_lifetime(borrow attachment)
+    private func makeRequests(
+        for methods: [any ImportedMethodRequest],
+        in attachment: borrowing PThread.Attachment,
+    ) throws -> Object {
+        let list = unsafe try Object.take(PyList_New(methods.count), in: attachment)
+        for (index, method) in methods.enumerated() {
+            let function = try Object.makeFunction(method, in: attachment)
+            try Object.check(
+                unsafe PyList_SetItem(list.pointer, index, function.release()),
+                "Unable to deliver an imported Python method.",
+            )
+        }
+        return list
+    }
+
     private func classes(in storage: Interpreter.Storage) throws -> Interpreter.ClassRegistry {
         guard let registry = storage.classRegistry else {
             throw Interpreter.ClassRegistry.unregistered()
@@ -113,7 +150,7 @@ extension Interpreter.ExportDispatcher: Object.Callable {
     ) throws -> Object {
         let storage = attachment.storage
         let execution = try execution(in: storage)
-        let call = try Session.Control.Call(operation, sessionID: storage.sessionOrigin)
+        let call = try Session.Control.ExportCall(operation, sessionID: storage.sessionOrigin)
         let id = storage.allocateCallID()
 
         try execution.submit(.export(call), id: id)
@@ -140,6 +177,8 @@ private extension Interpreter.ExportDispatcher {
 
         case call
         case start
+
+        case poll
         case take
         case cancel
     }

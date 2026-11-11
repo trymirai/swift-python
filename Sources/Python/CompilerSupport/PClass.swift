@@ -4,7 +4,7 @@
 
 // MARK: - _PClass
 
-/// Compiler support synthesized by PythonClass. A Python wrapper owns one Swift instance.
+/// Compiler support synthesized by PythonExportedClass. A Python wrapper owns one Swift instance.
 @_documentation(visibility: internal)
 public protocol _PClass: AnyObject, SendableMetatype, Encodable, Decodable {
     var _pIdentity: Object.Identity { get }

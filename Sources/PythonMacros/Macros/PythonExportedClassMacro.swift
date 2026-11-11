@@ -6,13 +6,13 @@ import SwiftSyntax
 import SwiftSyntaxBuilder
 import SwiftSyntaxMacros
 
-// MARK: - PythonClassMacro
+// MARK: - PythonExportedClassMacro
 
-struct PythonClassMacro {}
+struct PythonExportedClassMacro {}
 
 // MARK: MemberMacro
 
-extension PythonClassMacro: MemberMacro {
+extension PythonExportedClassMacro: MemberMacro {
     static func expansion(
         of attribute: AttributeSyntax,
         providingMembersOf declaration: some DeclGroupSyntax,
@@ -25,7 +25,7 @@ extension PythonClassMacro: MemberMacro {
             let declaration = declaration.as(ClassDeclSyntax.self),
             declaration.genericParameterClause == nil
         else {
-            throw MacroExpansionErrorMessage("PythonClass requires a concrete Swift class.")
+            throw MacroExpansionErrorMessage("PythonExportedClass requires a concrete Swift class.")
         }
 
         guard declaration.attributes.attribute(named: "MainActor") == nil else {
@@ -42,7 +42,7 @@ extension PythonClassMacro: MemberMacro {
 
         guard let module else {
             throw MacroExpansionErrorMessage(
-                "PythonClass requires module: Module.self or a surrounding PythonModule.",
+                "PythonExportedClass requires module: Module.self or a surrounding PythonExportedModule.",
             )
         }
 
@@ -71,7 +71,7 @@ extension PythonClassMacro: MemberMacro {
 
 // MARK: MemberAttributeMacro
 
-extension PythonClassMacro: MemberAttributeMacro {
+extension PythonExportedClassMacro: MemberAttributeMacro {
     static func expansion(
         of attribute: AttributeSyntax,
         attachedTo declaration: some DeclGroupSyntax,
@@ -85,13 +85,13 @@ extension PythonClassMacro: MemberAttributeMacro {
         else {
             return []
         }
-        return [AttributeSyntax(stringLiteral: "@Python::_PythonStoredProperty")]
+        return [AttributeSyntax(stringLiteral: "@Python::_PythonPropertyGetter")]
     }
 }
 
 // MARK: ExtensionMacro
 
-extension PythonClassMacro: ExtensionMacro {
+extension PythonExportedClassMacro: ExtensionMacro {
     static func expansion(
         of attribute: AttributeSyntax,
         attachedTo declaration: some DeclGroupSyntax,
