@@ -176,7 +176,7 @@ extension Session {
                     group.addTask {
                         do {
                             try await ContinuousClock().sleep(until: deadline)
-                            requestInterruption(.timedOut)
+                            self.requestInterruption(.timedOut)
                         } catch {}
                         return nil
                     }

@@ -332,8 +332,10 @@ func interruptionReachesEveryAttachedThread(timeout: Bool) async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [CallbackAccess.self], transactional: true)
     defer { await session.close() }
+    try await session.initialize()
     let evaluation = Task {
-        try await session.evaluate("""
+        defer { signal.continuation.finish() }
+        return try await session.evaluate("""
         import asyncio
         from callback_access import spin, started
         class Runner:
@@ -359,14 +361,15 @@ func interruptionReachesEveryAttachedThread(timeout: Bool) async throws {
 @Test(.timeLimit(.minutes(1)), arguments: [false, true])
 func synchronousSwiftExportsUseTaskCancellation(timeout: Bool) async throws {
     let signal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-    defer { signal.continuation.finish() }
 
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [CallbackAccess.self], transactional: true)
     defer { await session.close() }
+    try await session.initialize()
 
     let evaluation = Task {
-        try await session.evaluate(
+        defer { signal.continuation.finish() }
+        return try await session.evaluate(
             "from callback_access import spin_swift; spin_swift()",
             scope: signal.continuation,
             timeout: timeout ? .seconds(2) : nil,
