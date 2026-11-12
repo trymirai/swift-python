@@ -84,14 +84,19 @@ class _ModuleFinder:
                 continue
             spec = finder.find_spec(fullname, path, target)
             if spec is not None:
-                source = getattr(spec.loader, "get_source", None)
-                filename = getattr(spec.loader, "get_filename", None)
-                if source is not None and filename is not None:
-                    text = source(fullname)
-                    if text is not None:
-                        spec.loader = _ModuleLoader(spec.loader, text, filename(fullname), self.execute)
+                self._wrap_source_loader(spec, fullname)
                 return spec
         return None
+
+    def _wrap_source_loader(self, spec: ModuleSpec, fullname: str) -> None:
+        source = getattr(spec.loader, "get_source", None)
+        filename = getattr(spec.loader, "get_filename", None)
+        if source is None or filename is None:
+            return
+
+        text = source(fullname)
+        if text is not None:
+            spec.loader = _ModuleLoader(spec.loader, text, filename(fullname), self.execute)
 
 
 def import_module(name: str, execute) -> ModuleType:
@@ -154,23 +159,30 @@ class _ProjectFinder:
         return spec
 
 
-def import_project(directory: str, name: str | None, import_paths: list[str], execute) -> ModuleType:
-    if name is None:
-        with os.scandir(directory) as entries:
-            packages = (
-                entry.name
-                for entry in entries
-                if entry.name.isidentifier()
-                and entry.is_dir(follow_symlinks=False)
-                and os.path.isfile(os.path.join(entry.path, "__init__.py"))
-            )
-            name = min(packages, default=None)
+def _default_project_module(directory: str) -> str:
+    with os.scandir(directory) as entries:
+        packages = (
+            entry.name
+            for entry in entries
+            if entry.name.isidentifier()
+            and entry.is_dir(follow_symlinks=False)
+            and os.path.isfile(os.path.join(entry.path, "__init__.py"))
+        )
+        name = min(packages, default=None)
 
-        if name is None:
-            raise ModuleNotFoundError(
-                f"No startup package in project {directory!r}. "
-                "Add a package with __init__.py or specify a module."
-            )
+    if name is None:
+        raise ModuleNotFoundError(
+            f"No startup package in project {directory!r}. "
+            "Add a package with __init__.py or specify a module."
+        )
+    return name
+
+
+def import_project(
+    directory: str, name: str | None, import_paths: list[str], execute
+) -> ModuleType:
+    if name is None:
+        name = _default_project_module(directory)
     elif not all(part.isidentifier() for part in name.split(".")):
         raise ValueError(f"Invalid startup module name {name!r}.")
 

@@ -222,11 +222,6 @@ func cancellingOnePythonAwaitCancelsOnlyItsSwiftCallback() async throws {
     """)
 }
 
-func nextSignal(from stream: AsyncStream<Void>) async -> Void? {
-    var iterator = stream.makeAsyncIterator()
-    return await iterator.next()
-}
-
 @Test(.timeLimit(.minutes(1)))
 func swiftCallbacksRunDuringInstallationEnqueueAndImportUpdates() async throws {
     let host = Python::Module(

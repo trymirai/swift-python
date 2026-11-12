@@ -38,6 +38,8 @@ public struct Decoder: ~Copyable, ~Escapable {
         return try T(from: self)
     }
 
+    // MARK: Scalar values
+
     public var isNone: Bool {
         unsafe CPython_ValueTypeOf(pointer) == CPython_ValueNone
     }
@@ -88,6 +90,8 @@ public struct Decoder: ~Copyable, ~Escapable {
         let value = unsafe Object.retaining(pointer, in: self)
         return try value.string()
     }
+
+    // MARK: Containers and fields
 
     public var count: Int {
         get throws {

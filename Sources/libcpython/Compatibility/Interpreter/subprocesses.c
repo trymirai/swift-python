@@ -244,6 +244,18 @@ CPython_SubprocessesHaveOpenPipes(CPython_Subprocesses *scope, const CPython_Fil
     return false;
 }
 
+static void
+reap_stopped_child(CPython_Subprocesses *scope, pid_t pid)
+{
+    // Stop is idempotent now, so it cannot signal the PID released by this fallback reap.
+    int status;
+    pid_t result;
+    do {
+        result = waitpid(pid, &status, 0);
+    } while (result < 0 && errno == EINTR);
+    forget_child(scope, pid);
+}
+
 int
 CPython_JoinSubprocesses(CPython_Subprocesses *scope)
 {
@@ -265,12 +277,7 @@ CPython_JoinSubprocesses(CPython_Subprocesses *scope)
         }
         CPython_StopSubprocesses(scope);
         if (failure != ECHILD) {
-            // Fall back to the ordinary reap after terminating the group.
-            // Stop is now idempotent, so it cannot signal a PID released here.
-            do {
-                result = waitpid(pid, &status, 0);
-            } while (result < 0 && errno == EINTR);
-            forget_child(scope, pid);
+            reap_stopped_child(scope, pid);
         }
     }
     return error;

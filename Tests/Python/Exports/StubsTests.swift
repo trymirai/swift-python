@@ -17,7 +17,7 @@ struct StubsTests {
             let stubs = Python::Stubs([StubRoot.self, StubChildModule.self])
             try await stubs.write(to: destination.string)
 
-            let source = try await Self.read(destination.appending("stub_fixture/records.pyi"))
+            let source = try await readText(at: destination.appending("stub_fixture/records.pyi"))
             #expect(source.contains("def list(limit: int = ...) -> _builtins.list[Record | None]"))
             #expect(source.contains("@_builtins.property"))
             #expect(source.contains("@value.setter"))
@@ -30,9 +30,9 @@ struct StubsTests {
             #expect(!source.contains("def _discarded"))
             try await Self.checkDeclarations(in: source)
 
-            let parent = try await Self.read(destination.appending("stub_fixture/__init__.pyi"))
+            let parent = try await readText(at: destination.appending("stub_fixture/__init__.pyi"))
             #expect(parent.contains("from . import records as records"))
-            let child = try await Self.read(destination.appending("stub_child.pyi"))
+            let child = try await readText(at: destination.appending("stub_child.pyi"))
             #expect(child.contains("class Child(stub_fixture.records.Record):"))
         }
     }
@@ -41,11 +41,12 @@ struct StubsTests {
     func `writing stubs replaces stale files and preserves deterministic output`() async throws {
         try await withTemporaryDirectory { root in
             let destination = root.appending("typings")
+            let records = destination.appending("stub_fixture/records.pyi")
             let sibling = root.appending("keep.txt")
             try await "keep".write(toFileAt: sibling, options: .newFile(replaceExisting: false))
             let stubs = Python::Stubs([StubRoot.self, StubRecords.self])
             try await stubs.write(to: destination.string)
-            let first = try await Self.read(destination.appending("stub_fixture/records.pyi"))
+            let first = try await readText(at: records)
             try await "obsolete".write(
                 toFileAt: destination.appending("obsolete.pyi"),
                 options: .newFile(replaceExisting: false),
@@ -54,8 +55,8 @@ struct StubsTests {
             try await stubs.write(to: destination.string)
             #expect(try await FileSystem.shared
                 .info(forFileAt: destination.appending("obsolete.pyi")) == nil)
-            #expect(try await Self.read(destination.appending("stub_fixture/records.pyi")) == first)
-            #expect(try await Self.read(sibling) == "keep")
+            #expect(try await readText(at: records) == first)
+            #expect(try await readText(at: sibling) == "keep")
 
             try await Python::Stubs([]).write(to: destination.string)
             try await FileSystem.shared.withDirectoryHandle(atPath: destination) { handle in
@@ -83,12 +84,8 @@ struct StubsTests {
             await #expect(throws: (any Swift::Error).self) {
                 try await Python::Stubs([]).write(to: "/")
             }
-            #expect(try await Self.read(sentinel) == "keep")
+            #expect(try await readText(at: sentinel) == "keep")
         }
-    }
-
-    private static func read(_ path: FilePath) async throws -> String {
-        try await String(contentsOf: path, maximumSizeAllowed: .unlimited)
     }
 
     private static func checkDeclarations(in source: String) async throws {

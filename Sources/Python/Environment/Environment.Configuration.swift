@@ -17,7 +17,11 @@ extension Environment {
             cacheDirectory.file.appending("tmp")
         }
     }
+}
 
+// MARK: - Environment.BasePackage
+
+extension Environment {
     struct BasePackage: Sendable {
         let version: String
         let requires: [String]
@@ -36,15 +40,19 @@ extension Environment.Configuration: Decodable {
     }
 }
 
-// MARK: - Environment.BasePackage + Encodable, Decodable
+// MARK: - Environment.BasePackage + Decodable
 
-extension Environment.BasePackage: Encodable, Decodable {
+extension Environment.BasePackage: Decodable {
     init(from decoder: borrowing Decoder) throws {
         version = try decoder.decode(String.self, forKey: "version")
         requires = try decoder.decode([String].self, forKey: "requires")
         files = try decoder.decode([String].self, forKey: "files")
     }
+}
 
+// MARK: - Environment.BasePackage + Encodable
+
+extension Environment.BasePackage: Encodable {
     func encode(to encoder: inout Encoder) throws {
         try encoder.encode(version, forKey: "version")
         try encoder.encode(requires, forKey: "requires")

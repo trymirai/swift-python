@@ -98,15 +98,13 @@ func integersRoundTripAtTheirWidthAndRejectOverflow() async throws {
     #expect(try await session.get("maximum", as: UInt64.self) == .max)
     #expect(try await session.get("wide_maximum", as: UInt128.self) == .max)
 
-    let overflow = try await #require(throws: Python::Exception.self) {
-        try await session.get("maximum", as: Int8.self)
+    try await expectPythonException("OverflowError") {
+        _ = try await session.get("maximum", as: Int8.self)
     }
-    #expect(overflow.name == "OverflowError")
 
-    let subclass = try await #require(throws: Python::Exception.self) {
-        try await session.get("wide_subclass", as: UInt128.self)
+    try await expectPythonException("TypeError") {
+        _ = try await session.get("wide_subclass", as: UInt128.self)
     }
-    #expect(subclass.name == "TypeError")
 }
 
 @Test
@@ -275,10 +273,9 @@ func asynchronousContextOperationsUseSeparateQueueTurns() async throws {
     #expect(old == 1)
     try await session.reset()
     gate.finish()
-    let expired = try await #require(throws: Python::Exception.self) {
-        try await pending.value
+    try await expectPythonException("ReferenceError") {
+        _ = try await pending.value
     }
-    #expect(expired.name == "ReferenceError")
     #expect(starts.withLock { $0 } == 1)
     try await session.set(3, forKey: "fresh")
     #expect(starts.withLock { $0 } == 2)
@@ -291,15 +288,13 @@ func dictionaryKeyCollisionsThrow() async throws {
     let session = try await runtime.session(.source(#"data = {'\u00e9': None, 'e\u0301': 2}"#))
     defer { await session.close() }
 
-    let typed = try await #require(throws: Python::Exception.self) {
-        try await session.get("data", as: [String: Int?].self)
+    try await expectPythonException("ValueError") {
+        _ = try await session.get("data", as: [String: Int?].self)
     }
-    #expect(typed.name == "ValueError")
 
-    let dynamic = try await #require(throws: Python::Exception.self) {
-        try await session.get("data", as: Python::Value.self)
+    try await expectPythonException("ValueError") {
+        _ = try await session.get("data", as: Python::Value.self)
     }
-    #expect(dynamic.name == "ValueError")
 }
 
 // MARK: - RecoveringEncoding

@@ -2,6 +2,7 @@
 //  Created by Anton Spivak
 //
 
+import Synchronization
 public import SystemPackage
 
 public extension Session {
@@ -11,8 +12,10 @@ public extension Session {
     /// runs and includes implicit startup. Interrupted blocks wait for Swift callbacks
     /// to finish before returning. Cancel the calling task to interrupt the execution.
     ///
-    /// Output redirections append to absolute paths for this block. Implicit startup
-    /// captures its own output.
+    /// Standard output and error redirections append to absolute paths for this block.
+    /// A source redirection saves recorded input to a new file. Implicit startup captures
+    /// its own output.
+    /// Set recordingHistory to false to exclude an internal block from In/Out and numbering.
     ///
     /// The scope is available to Swift exports and the file access delegate during the block.
     nonisolated func evaluate(
@@ -20,6 +23,7 @@ public extension Session {
         scope: (any Sendable)? = nil,
         filename: String? = nil,
         timeout: Duration? = nil,
+        recordingHistory: Bool = true,
         redirecting redirects: [Stream: FilePath] = [:],
         in context: Context? = nil,
         _ output: (@Sendable (Output.Stream, String) -> Void)? = nil,
@@ -30,6 +34,7 @@ public extension Session {
             scope: scope,
             filename: filename,
             timeout: timeout,
+            recordingHistory: recordingHistory,
             redirecting: redirects,
             output: output,
         )
@@ -43,6 +48,7 @@ public extension Session {
         scope: (any Sendable)? = nil,
         filename: String? = nil,
         timeout: Duration? = nil,
+        recordingHistory: Bool = true,
         redirecting redirects: [Stream: FilePath] = [:],
         in context: Context? = nil,
         committing: @escaping @Sendable (Commit) async throws -> Void,
@@ -54,6 +60,7 @@ public extension Session {
             scope: scope,
             filename: filename,
             timeout: timeout,
+            recordingHistory: recordingHistory,
             redirecting: redirects,
             output: output,
             committing: committing,
@@ -124,6 +131,7 @@ extension Session {
         scope: (any Sendable)?,
         filename: String?,
         timeout: Duration?,
+        recordingHistory: Bool = true,
         redirecting redirects: [Stream: FilePath],
         output: Control.OutputHandler?,
         committing: (@Sendable (Commit) async throws -> Void)? = nil,
@@ -133,29 +141,76 @@ extension Session {
         }
 
         let settlement = transactional ? Self.checkpointSettlement(committing: committing) : nil
+        let number = Mutex<Int?>(nil)
         return try await withExecution(
             in: context,
             timeout: timeout,
             scope: scope,
             output: output,
-            onInterruption: Self.interruptedExecution,
+            onInterruption: { interruption, result in
+                Self.interruptedExecution(interruption, result, number: number.withLock { $0 })
+            },
             settling: settlement,
         ) { session, execution in
             let redirects = try redirects.mapValues(Runtime.Path.init)
-            return try session.withInterpreter(execution: execution) { interpreter in
-                if session.transactional {
-                    try interpreter.beginCheckpoint()
-                }
+            try await session.recordInput(
+                source,
+                enabled: recordingHistory,
+                redirecting: redirects,
+                number: number,
+            )
+            let number = number.withLock { $0 }
+            do {
+                return try session.withInterpreter(execution: execution) { interpreter in
+                    if session.transactional {
+                        try interpreter.beginCheckpoint()
+                    }
 
-                let captured = try interpreter.evaluate(
-                    source,
-                    filename: filename,
-                    redirecting: redirects,
-                    execution: execution,
+                    let captured = try interpreter.evaluate(
+                        source,
+                        filename: filename,
+                        number: number,
+                        redirecting: redirects,
+                        execution: execution,
+                    )
+                    return Execution(output: captured, end: .finished, number: number)
+                }
+            } catch let error as ExecutionError {
+                throw ExecutionError(
+                    traceback: error.traceback,
+                    output: error.output,
+                    number: number,
                 )
-                return Execution(output: captured, end: .finished)
             }
         }
+    }
+
+    private func recordInput(
+        _ source: Interpreter.Source,
+        enabled: Bool,
+        redirecting redirects: [Stream: Runtime.Path],
+        number: borrowing Mutex<Int?>,
+    ) async throws {
+        guard enabled, case let .interactive(source) = source, let history else {
+            return
+        }
+
+        let destination = redirects[.source]
+        if let destination {
+            let sourcePath = destination.file.lexicallyNormalized()
+            let hasConflictingRedirect = redirects.contains { stream, path in
+                stream != .source && path.file.lexicallyNormalized() == sourcePath
+            }
+            if hasConflictingRedirect {
+                throw Runtime.Failure(
+                    "A source history file must be separate from standard streams.",
+                )
+            }
+        }
+        let next = try history.reserveNumber()
+        // Interruption must report the reserved number even if saving the source fails.
+        number.withLock { $0 = next }
+        try await history.save(source, number: next, destination: destination)
     }
 }
 
@@ -166,6 +221,7 @@ private extension Session {
     static func interruptedExecution(
         _ interruption: Control.Interruption,
         _ result: Swift::Result<Execution, any Swift::Error>,
+        number: Int?,
     ) -> Execution {
         let captured: Output = switch result {
         case let .success(execution):
@@ -182,7 +238,7 @@ private extension Session {
         case .timedOut:
             .timedOut
         }
-        return Execution(output: captured, end: end)
+        return Execution(output: captured, end: end, number: number)
     }
 
     static func checkpointSettlement(

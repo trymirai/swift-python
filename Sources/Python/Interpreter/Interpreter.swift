@@ -21,6 +21,7 @@ struct Interpreter: ~Copyable {
         modules: [Module],
         packages: [Runtime.PackageSource.Resolved],
         transactional: Bool,
+        history: Session.History.Store?,
         scheduleRelease: @escaping @Sendable () -> Void,
         session: Session,
         delegate: (any Session.Delegate)?,
@@ -45,6 +46,7 @@ struct Interpreter: ~Copyable {
             try Self.configureExecution(
                 importPaths: Self.searchPaths(importPaths, packages: packagePaths),
                 packagePaths: packagePaths,
+                history: history,
                 in: attachment,
                 execution: execution,
             )
@@ -120,6 +122,7 @@ private extension Interpreter {
     static func configureExecution(
         importPaths: [String],
         packagePaths: [String],
+        history: Session.History.Store?,
         in attachment: borrowing PThread.Attachment,
         execution: Session.Control,
     ) throws {
@@ -127,8 +130,14 @@ private extension Interpreter {
         let configure = try module.attribute("configure")
         let imports = try Object(encoding: importPaths, in: attachment)
         let packages = try Object(encoding: packagePaths, in: attachment)
+        let limit = try Object(encoding: history?.configuration.outputs.limit, in: attachment)
+        let reader: Object = if let history {
+            try Object.makeFunction(history, in: attachment)
+        } else {
+            try Object(encoding: Value.none, in: attachment)
+        }
         _ = unsafe try configure.callInterruptibly(
-            [imports.pointer, packages.pointer],
+            [imports.pointer, packages.pointer, limit.pointer, reader.pointer],
             using: execution,
         )
     }

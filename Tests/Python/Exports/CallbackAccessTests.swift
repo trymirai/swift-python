@@ -69,48 +69,37 @@ private enum CallbackAccess {
 
     @PythonFunction
     static func started(_ python: Python::Context) throws {
-        guard let signal = python.scope as? AsyncStream<Void>.Continuation else {
-            throw Python::Exception(name: "ValueError", message: "Missing test signal.")
-        }
+        let signal: AsyncStream<Void>.Continuation = try requireScope(
+            python,
+            message: "Missing test signal.",
+        )
         signal.yield()
     }
 
     @PythonFunction("saved_year")
     static func savedYear(_ python: Python::Context) async throws -> Int {
-        guard let date = python.scope as? Python::DateTime else {
-            throw Python::Exception(name: "ValueError", message: "Missing date.")
-        }
+        let date: Python::DateTime = try requireScope(python, message: "Missing date.")
         await Task.yield()
         return try date.year
     }
 
     @PythonFunction
     static func hold(_ python: Python::Context, _ descriptor: Int) async throws {
-        guard let capture = python.scope as? RetainedCallback else {
-            throw Python::Exception(name: "ValueError", message: "Missing test capture.")
-        }
+        let capture: RetainedCallback = try requireScope(python)
         await Task.yield()
         capture.state.withLock { $0 = (python, descriptor) }
     }
 
     @PythonFunction
     static func escape(_ python: Python::Context, _ date: Python::DateTime) async throws {
-        guard let capture = python.scope as? EscapedCallback else {
-            throw Python::Exception(name: "ValueError", message: "Missing test capture.")
-        }
-        let task = Task {
-            for await _ in capture.gate.stream {}
-            return try date.year
-        }
-        capture.task.withLock { $0 = task }
+        let capture: EscapedCallback = try requireScope(python)
+        capture.start { try date.year }
     }
 
     @PythonFunction
     static func expired(_ python: Python::Context) async throws -> Bool {
-        guard
-            let capture = python.scope as? EscapedCallback,
-            let task = capture.task.withLock({ $0 })
-        else {
+        let capture: EscapedCallback = try requireScope(python, message: "Missing escaped task.")
+        guard let task = capture.task.withLock({ $0 }) else {
             throw Python::Exception(name: "ValueError", message: "Missing escaped task.")
         }
         capture.gate.continuation.finish()
@@ -124,19 +113,14 @@ private enum CallbackAccess {
 
     @PythonFunction("escape_sync")
     static func escapeSynchronously(_ python: Python::Context) throws {
-        guard let capture = python.scope as? EscapedCallback else {
-            throw Python::Exception(name: "ValueError", message: "Missing test capture.")
-        }
-        let task = Task {
-            for await _ in capture.gate.stream {}
-            return try Python::Date.today().year
-        }
-        capture.task.withLock { $0 = task }
+        let capture: EscapedCallback = try requireScope(python)
+        capture.start { try Python::Date.today().year }
     }
 
     @PythonFunction
     static func nested(_ python: Python::Context) async throws -> Bool {
-        guard let capture = python.scope as? EscapedCallback, let other = capture.session else {
+        let capture: EscapedCallback = try requireScope(python, message: "Missing nested session.")
+        guard let other = capture.session else {
             throw Python::Exception(name: "ValueError", message: "Missing nested session.")
         }
         _ = try await other.evaluate(
@@ -145,6 +129,16 @@ private enum CallbackAccess {
             in: python,
         )
         return try await expired(python)
+    }
+
+    private static func requireScope<Value>(
+        _ context: Python::Context,
+        message: String = "Missing test capture.",
+    ) throws -> Value {
+        guard let value = context.scope as? Value else {
+            throw Python::Exception(name: "ValueError", message: message)
+        }
+        return value
     }
 }
 
@@ -197,6 +191,14 @@ private final class EscapedCallback: Sendable {
 
     init(session: Python::Session? = nil) {
         self.session = session
+    }
+
+    func start(_ operation: @escaping @Sendable () throws -> Int) {
+        let task = Task {
+            for await _ in self.gate.stream {}
+            return try operation()
+        }
+        self.task.withLock { $0 = task }
     }
 }
 

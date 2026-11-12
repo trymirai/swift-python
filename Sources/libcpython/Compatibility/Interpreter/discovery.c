@@ -90,8 +90,7 @@ discover_image(const struct mach_header *header, intptr_t slide)
 static void
 initialize_discovery(void)
 {
-    // dyld visits already-loaded images too. Keep export-bearing images loaded while sessions use
-    // them.
+    // dyld also visits loaded images; they must stay loaded while sessions use their exports.
     _dyld_register_func_for_add_image(discover_image);
 }
 #endif

@@ -103,7 +103,8 @@ reserve_slot(void)
     if (ledger.count < ledger.capacity / 4) {
         return rebuild_ledger(ledger.capacity);
     }
-    return ledger.capacity <= SIZE_MAX / sizeof(Allocation) / 2 && rebuild_ledger(ledger.capacity * 2);
+    return ledger.capacity <= SIZE_MAX / sizeof(Allocation) / 2 &&
+           rebuild_ledger(ledger.capacity * 2);
 }
 
 static Allocation *
@@ -379,7 +380,21 @@ copy_allocation_ranges(const Allocation *slot, unsigned char *snapshot, bool res
     }
 }
 
-#define FIELD(object, member) {(uintptr_t)&(object)->member, (uintptr_t)(&(object)->member + 1)}
+static void
+copy_snapshot_allocations(PyInterpreterState *interpreter, CPython_Heap *heap, bool restoring,
+                          const Range *excluded, size_t excluded_count)
+{
+    for (size_t index = 0; index < ledger.capacity; index++) {
+        Allocation *slot = &ledger.slots[index];
+        if (!is_snapshot_allocation(slot, heap, interpreter) || (restoring && !slot->baseline)) {
+            continue;
+        }
+        copy_allocation_ranges(slot, heap->snapshot, restoring, excluded, excluded_count);
+    }
+}
+
+#define FIELD(object, member)                                                                      \
+    ((Range){(uintptr_t)(&(object)->member), (uintptr_t)(&(object)->member + 1)})
 
 static void
 copy_private_bytes(PyThreadState *state, CPython_Heap *heap, bool restoring)
@@ -414,14 +429,7 @@ copy_private_bytes(PyThreadState *state, CPython_Heap *heap, bool restoring)
     };
     qsort(excluded, Py_ARRAY_LENGTH(excluded), sizeof(*excluded), compare_ranges);
 
-    for (size_t index = 0; index < ledger.capacity; index++) {
-        Allocation *slot = &ledger.slots[index];
-        if (!is_snapshot_allocation(slot, heap, interpreter) || (restoring && !slot->baseline)) {
-            continue;
-        }
-        copy_allocation_ranges(slot, heap->snapshot, restoring, excluded,
-                               Py_ARRAY_LENGTH(excluded));
-    }
+    copy_snapshot_allocations(interpreter, heap, restoring, excluded, Py_ARRAY_LENGTH(excluded));
 }
 
 #undef FIELD

@@ -93,41 +93,12 @@ extension Session {
 
             @Sendable
             func perform(on session: isolated Session) async throws -> Result {
-                try await withCancellation {
-                    async let callbacks: Void = runCalls()
-
-                    var result: Swift::Result<Result, any Swift::Error>
-                    do {
-                        try checkInterruption()
-                        result = .success(try await operation(session))
-                    } catch {
-                        result = .failure(error)
-                    }
-
-                    // Every native access must detach before checkpoint settlement or close.
-                    await finishAccesses()
-
-                    if settling != nil || subprocesses != nil {
-                        settleCallsAndSubprocesses(on: session, result: &result)
-                    }
-
-                    if let settling {
-                        await callbacks
-                        result = await settling(session, self, result)
-                    }
-
-                    let interruption = finish()
-                    // Python can return before interrupted Swift callbacks finish their cleanup.
-                    await callbacks
-
-                    guard let interruption else {
-                        return try result.get()
-                    }
-                    guard let onInterruption else {
-                        throw CancellationError()
-                    }
-                    return onInterruption(interruption, result)
-                }
+                try await runOperation(
+                    on: session,
+                    onInterruption: onInterruption,
+                    settling: settling,
+                    operation,
+                )
             }
 
             guard let deadline else {
@@ -135,6 +106,47 @@ extension Session {
             }
             return try await withDeadline(deadline) {
                 try await perform(on: session)
+            }
+        }
+
+        private func runOperation<Result: Sendable>(
+            on session: isolated Session,
+            onInterruption: InterruptionHandler<Result>?,
+            settling: Settlement<Result>?,
+            _ operation: @Sendable (isolated Session) async throws -> Result,
+        ) async throws -> Result {
+            try await withCancellation {
+                async let callbacks: Void = runCalls()
+
+                var result: Swift::Result<Result, any Swift::Error>
+                do {
+                    try checkInterruption()
+                    result = .success(try await operation(session))
+                } catch {
+                    result = .failure(error)
+                }
+
+                // Every native access must detach before checkpoint settlement or close.
+                await finishAccesses()
+                if settling != nil || subprocesses != nil {
+                    settleCallsAndSubprocesses(on: session, result: &result)
+                }
+                if let settling {
+                    await callbacks
+                    result = await settling(session, self, result)
+                }
+
+                let interruption = finish()
+                // Python can return before interrupted Swift callbacks finish their cleanup.
+                await callbacks
+
+                guard let interruption else {
+                    return try result.get()
+                }
+                guard let onInterruption else {
+                    throw CancellationError()
+                }
+                return onInterruption(interruption, result)
             }
         }
 

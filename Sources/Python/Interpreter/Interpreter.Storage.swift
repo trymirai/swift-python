@@ -15,7 +15,6 @@ extension Interpreter {
 
         let key: UInt
         let heap: OpaquePointer?
-
         let references: Reference.Store
 
         let fileAccess: Interpreter.FileAccess?
@@ -25,9 +24,9 @@ extension Interpreter {
         var checkpoint: CheckpointState = .inactive
 
         var namespace: Reference?
-
         var classRegistry: Interpreter.ClassRegistry?
         var defaultArgumentMarker: UInt = 0
+
         private var nextCallID: Int = 0
 
         var arrayType: Reference?
@@ -125,16 +124,6 @@ extension Interpreter {
             return .init(rawValue: id)
         }
 
-        @unsafe
-        static func release(_ pointer: UnsafeMutablePointer<PyObject>) {
-            guard let state = current(), !state.borrowedBuffers.isEmpty else {
-                unsafe Py_DecRef(pointer)
-                return
-            }
-
-            state.pendingObjectReleases.append(UInt(bitPattern: pointer))
-        }
-
         func withConstructionScope<Result: ~Copyable>(
             _ body: () throws -> Result,
         ) rethrows -> Result {
@@ -158,35 +147,6 @@ extension Interpreter {
             scope.constructedWrappers.append(reference)
         }
 
-        func releasePendingReferences() {
-            guard borrowedBuffers.isEmpty else {
-                return
-            }
-
-            references.releasePendingReferences()
-            releasePendingBuffers()
-            releasePendingObjects()
-        }
-
-        private func releasePendingBuffers() {
-            // Releasing a buffer or object can reenter Python. Drain a detached batch.
-            while !pendingBufferReleases.isEmpty {
-                let buffers = exchange(&pendingBufferReleases, with: [])
-                for bits in buffers {
-                    if let pointer = unsafe UnsafeMutablePointer<Py_buffer>(bitPattern: bits) {
-                        unsafe Self.destroyBuffer(pointer)
-                    }
-                }
-            }
-        }
-
-        private func releasePendingObjects() {
-            while !pendingObjectReleases.isEmpty {
-                let values = exchange(&pendingObjectReleases, with: [])
-                unsafe Object.decrementReferences(values)
-            }
-        }
-
         func close() {
             isClosed = true
 
@@ -205,6 +165,45 @@ extension Interpreter {
 }
 
 extension Interpreter.Storage {
+    @unsafe
+    static func release(_ pointer: UnsafeMutablePointer<PyObject>) {
+        guard let state = current(), !state.borrowedBuffers.isEmpty else {
+            unsafe Py_DecRef(pointer)
+            return
+        }
+
+        state.pendingObjectReleases.append(UInt(bitPattern: pointer))
+    }
+
+    func releasePendingReferences() {
+        guard borrowedBuffers.isEmpty else {
+            return
+        }
+
+        references.releasePendingReferences()
+        releasePendingBuffers()
+        releasePendingObjects()
+    }
+
+    private func releasePendingBuffers() {
+        // Releasing a buffer or object can reenter Python. Drain a detached batch.
+        while !pendingBufferReleases.isEmpty {
+            let buffers = exchange(&pendingBufferReleases, with: [])
+            for bits in buffers {
+                if let pointer = unsafe UnsafeMutablePointer<Py_buffer>(bitPattern: bits) {
+                    unsafe Self.destroyBuffer(pointer)
+                }
+            }
+        }
+    }
+
+    private func releasePendingObjects() {
+        while !pendingObjectReleases.isEmpty {
+            let values = exchange(&pendingObjectReleases, with: [])
+            unsafe Object.decrementReferences(values)
+        }
+    }
+
     @unsafe
     func beginBufferBorrow(_ buffer: UnsafePointer<Py_buffer>, isMutable: Bool) throws -> UInt64 {
         guard Self.current() === self, !isClosed else {

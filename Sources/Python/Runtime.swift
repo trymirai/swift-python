@@ -76,6 +76,7 @@ public struct Runtime: Sendable {
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
         transactional: Bool = false,
+        history: Session.History? = nil,
         delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
         try await session(
@@ -87,6 +88,7 @@ public struct Runtime: Sendable {
             modules: modules,
             moduleDefinitions: [],
             transactional: transactional,
+            history: history,
             delegate: delegate,
         )
     }
@@ -100,6 +102,7 @@ public struct Runtime: Sendable {
         modules: [any ModuleHost.Type] = [],
         moduleDefinitions: [Module],
         transactional: Bool = false,
+        history: Session.History? = nil,
         delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
         let definitions = try Module.Catalog.resolve(modules, definitions: moduleDefinitions)
@@ -111,6 +114,7 @@ public struct Runtime: Sendable {
             importPaths: importPaths.map(Path.init),
             modules: definitions,
             transactional: transactional,
+            history: history,
             delegate: delegate,
         )
     }
@@ -123,9 +127,11 @@ public struct Runtime: Sendable {
         importPaths: [Path],
         modules: [Module],
         transactional: Bool = false,
+        history: Session.History? = nil,
         requirements: [String] = [],
         delegate: (any Session.Delegate)?,
     ) async throws -> Session {
+        let history = try history.map(Session.History.Store.init)
         let environment = Environment(
             directory: environmentDirectory,
             projectDirectory: try startup.projectDirectory.map(Path.init),
@@ -150,6 +156,7 @@ public struct Runtime: Sendable {
             modules: modules,
             startup: startup,
             transactional: transactional,
+            history: history,
             allowsSubprocesses: options.contains(.subprocesses),
             environment: environment,
             delegate: delegate,

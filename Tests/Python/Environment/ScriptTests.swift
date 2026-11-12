@@ -8,6 +8,23 @@ import Synchronization
 import SystemPackage
 import Testing
 
+// MARK: - ScriptCancellation
+
+@PythonExportedModule("script_cancellation")
+private enum ScriptCancellation {
+    @PythonFunction
+    static func wait(_ context: Python::Context) async throws {
+        guard let entered = context.scope as? AsyncStream<Void>.Continuation else {
+            throw Python::Exception(name: "ValueError", message: "Missing script test signal.")
+        }
+        let suspended = AsyncStream<Void>.makeStream()
+        defer { suspended.continuation.finish() }
+        entered.yield(())
+        for await _ in suspended.stream {}
+        try Task.checkCancellation()
+    }
+}
+
 @Test
 func scriptDependenciesAndGlobalsAreIsolatedFromTheProject() async throws {
     try await ProjectFixture.withFixture { fixture in
@@ -78,8 +95,7 @@ func plainSessionAndScriptDoNotCreatePackageDirectories() async throws {
         #expect(execution.end == .finished)
         #expect(execution.output.stdout.isEmpty)
         #expect(streamed.withLock { $0 } == "completed\n")
-        #expect(try await String(contentsOf: stdout, maximumSizeAllowed: .unlimited) ==
-            "completed\n")
+        #expect(try await readText(at: stdout) == "completed\n")
         #expect(try await FileSystem.shared.info(forFileAt: cache) == nil)
     }
 }
@@ -168,45 +184,49 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments(asynchronous: Bool) a
             #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
         }
 
-        let script = try await writeScript("""
-        from pathlib import Path
-        import sampledep, sys
-        assert Path(sampledep.__file__).samefile(sys.argv[1])
-        assert not Path(sampledep.__file__).parents[1].joinpath("environment.json").exists()
-        print("completed")
-        """, named: "reuse.py")
+        func checkWheelReuse() async throws {
+            let script = try await writeScript("""
+            from pathlib import Path
+            import sampledep, sys
+            assert Path(sampledep.__file__).samefile(sys.argv[1])
+            assert not Path(sampledep.__file__).parents[1].joinpath("environment.json").exists()
+            print("completed")
+            """, named: "reuse.py")
 
-        try await fixture.withProject { session in
-            _ = try await session.evaluate("package_file = sampledep.__file__")
-            let path: String = try await session.get("package_file")
+            try await fixture.withProject { session in
+                _ = try await session.evaluate("package_file = sampledep.__file__")
+                let path: String = try await session.get("package_file")
 
-            for wheel in ["sampledep", "sampleleaf"] {
-                try await FileSystem.shared.removeItem(
-                    at: fixture.root.appending("\(wheel)-1.0-py3-none-any.whl"),
-                )
+                for wheel in ["sampledep", "sampleleaf"] {
+                    try await FileSystem.shared.removeItem(
+                        at: fixture.root.appending("\(wheel)-1.0-py3-none-any.whl"),
+                    )
+                }
+
+                try await fixture.withProject(
+                    environmentDirectory: fixture.root.appending("second-environment").string,
+                    delegate: FileAccessDelegate {
+                        $0.path == FilePath(path) && $0.operation == .metadata
+                    },
+                ) { second in
+                    try await second.set(path, forKey: "first_package")
+                    _ = try await second.evaluate("""
+                    from pathlib import Path
+                    assert Path(sampledep.__file__).samefile(first_package)
+                    """)
+                }
+
+                let execution = try await fixture.runtime.run(script: script, arguments: [path])
+                #expect(execution.output.stdout == "completed\n")
+                try await expectScratchIsEmpty()
+                #expect(try await ProjectFixture.directoryNames(at: cache.appending("wheels"))
+                    .count == 2)
+                #expect(try await ProjectFixture.directoryNames(at: cache.appending("installed"))
+                    .count == 2)
             }
-
-            try await fixture.withProject(
-                environmentDirectory: fixture.root.appending("second-environment").string,
-                delegate: FileAccessDelegate {
-                    $0.path == FilePath(path) && $0.operation == .metadata
-                },
-            ) { second in
-                try await second.set(path, forKey: "first_package")
-                _ = try await second.evaluate("""
-                from pathlib import Path
-                assert Path(sampledep.__file__).samefile(first_package)
-                """)
-            }
-
-            let execution = try await fixture.runtime.run(script: script, arguments: [path])
-            #expect(execution.output.stdout == "completed\n")
-            try await expectScratchIsEmpty()
-            #expect(try await ProjectFixture.directoryNames(at: cache.appending("wheels"))
-                .count == 2)
-            #expect(try await ProjectFixture.directoryNames(at: cache.appending("installed"))
-                .count == 2)
         }
+
+        try await checkWheelReuse()
 
         let failed = try await writeScript(
             "raise ValueError('test failure')",
@@ -262,9 +282,9 @@ func scriptAwaitHonorsTaskCancellation() async throws {
     try await withTemporaryDirectory { root in
         let script = root.appending("wait.py")
         try await """
-        import asyncio
+        from script_cancellation import wait
         print("ready", flush=True)
-        await asyncio.sleep(3600)
+        await wait()
         print("unexpected completion")
         """.write(toFileAt: script)
 
@@ -273,11 +293,11 @@ func scriptAwaitHonorsTaskCancellation() async throws {
         let runtime = try await Python::Runtime()
         let execution = Task {
             defer { entered.continuation.finish() }
-            return try await runtime.run(script: script.string) { stream, text in
-                if stream == .stdout, !text.isEmpty {
-                    entered.continuation.yield(())
-                }
-            }
+            return try await runtime.run(
+                script: script.string,
+                scope: entered.continuation,
+                modules: [ScriptCancellation.self],
+            )
         }
         defer { execution.cancel() }
 

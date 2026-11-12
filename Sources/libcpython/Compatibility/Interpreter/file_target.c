@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 struct CPython_FileTarget {
+    // The descriptor pins the directory; identity detects replacement of the final entry.
     int parent;
 
     struct stat identity;
@@ -289,6 +290,7 @@ finish_open(const CPython_FileTarget *target, int fd, int flags)
         return -1;
     }
 
+    // Restore the requested blocking mode only after checking the opened entry.
     if (!(flags & O_NONBLOCK) && fcntl(fd, F_SETFL, flags & ~O_TRUNC) < 0) {
         return -1;
     }

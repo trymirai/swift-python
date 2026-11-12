@@ -17,8 +17,10 @@ public actor Session {
 
     private let startup: Startup
     private let modules: [Module]
+
     nonisolated let transactional: Bool
     private let allowsSubprocesses: Bool
+    nonisolated let history: History.Store?
 
     private(set) var environment: Environment?
     private var delegate: (any Delegate)?
@@ -48,6 +50,7 @@ public actor Session {
         modules: [Module],
         startup: Startup = .source(""),
         transactional: Bool = false,
+        history: History.Store? = nil,
         allowsSubprocesses: Bool = false,
         environment: sending Environment? = nil,
         delegate: (any Delegate)? = nil,
@@ -60,6 +63,7 @@ public actor Session {
         self.modules = modules
         self.startup = startup
         self.transactional = transactional
+        self.history = history
         self.allowsSubprocesses = allowsSubprocesses
 
         self.environment = environment
@@ -106,6 +110,7 @@ public actor Session {
             modules: modules,
             packages: packages,
             transactional: transactional,
+            history: history,
             scheduleRelease: { [weak self] in Task { await self?.releasePendingReferences() } },
             session: self,
             delegate: delegate,
@@ -256,6 +261,7 @@ public actor Session {
 
     private func finishClose() async {
         state = .closed(startupOutput)
+        history?.close()
         delegate = nil
         await environment?.close()
         environment = nil

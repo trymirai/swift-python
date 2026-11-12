@@ -164,18 +164,22 @@ class Provider(AbstractProvider):
         extras = frozenset(extra for requirement in requirements for extra in requirement.extras)
         excluded = set(incompatibilities[identifier])
 
-        def matches():
-            for candidate in self._candidates(identifier, extras, requirements):
-                if candidate in excluded:
-                    continue
+        return self._matching_candidates(identifier, extras, requirements, excluded)
 
-                excluded.add(candidate)
-                if all(
-                    self.is_satisfied_by(requirement, candidate) for requirement in requirements
-                ):
-                    yield candidate
+    def _matching_candidates(
+        self,
+        name: str,
+        extras: frozenset[str],
+        requirements: list[Requirement],
+        excluded: set[Candidate],
+    ) -> Iterator[Candidate]:
+        for candidate in self._candidates(name, extras, requirements):
+            if candidate in excluded:
+                continue
 
-        return matches()
+            excluded.add(candidate)
+            if all(self.is_satisfied_by(requirement, candidate) for requirement in requirements):
+                yield candidate
 
     def _metadata(self, wheel: Wheel):
         metadata = self._wheel_metadata.get(wheel.digest)

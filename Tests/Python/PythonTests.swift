@@ -248,6 +248,15 @@ func withTemporaryDirectory(
     }
 }
 
+func readText(at path: FilePath) async throws -> String {
+    try await String(contentsOf: path, maximumSizeAllowed: .unlimited)
+}
+
+func nextSignal(from stream: AsyncStream<Void>) async -> Void? {
+    var iterator = stream.makeAsyncIterator()
+    return await iterator.next()
+}
+
 func expectPythonException(
     _ name: String,
     sourceLocation: SourceLocation = #_sourceLocation,
@@ -258,6 +267,20 @@ func expectPythonException(
         sourceLocation: sourceLocation,
     ) {
         try operation()
+    }
+    #expect(exception.name == name, sourceLocation: sourceLocation)
+}
+
+func expectPythonException(
+    _ name: String,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ operation: () async throws -> Void,
+) async throws {
+    let exception = try await #require(
+        throws: Python::Exception.self,
+        sourceLocation: sourceLocation,
+    ) {
+        try await operation()
     }
     #expect(exception.name == name, sourceLocation: sourceLocation)
 }

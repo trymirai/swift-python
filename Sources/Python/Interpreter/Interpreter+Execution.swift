@@ -30,6 +30,7 @@ extension Interpreter {
     borrowing func evaluate(
         _ source: Source,
         filename: String?,
+        number: Int?,
         redirecting redirects: [Session.Stream: Runtime.Path],
         execution: Session.Control,
     ) throws -> Output {
@@ -43,13 +44,14 @@ extension Interpreter {
                 filename: filename,
                 redirecting: redirects,
                 streamsOutput: execution.hasOutputHandler,
+                number: number,
                 execution: execution,
             )
         }
 
         switch source {
         case let .interactive(source):
-            return try runRequest("evaluate", source)
+            return try runRequest("evaluate", InteractiveRequest(source: source, number: number))
         case let .script(source, arguments):
             return try runRequest("run_script", ScriptRequest(source: source, arguments: arguments))
         }
@@ -68,6 +70,7 @@ extension Interpreter {
         filename: String?,
         redirecting redirects: [Session.Stream: Runtime.Path],
         streamsOutput: Bool = false,
+        number: Int? = nil,
         execution: Session.Control,
     ) throws -> Output {
         try pThread.withAttached(execution: execution) { attachment in
@@ -87,7 +90,7 @@ extension Interpreter {
                     using: execution,
                 )
 
-                return try result.decode(as: Reply.self).outputOrThrow()
+                return try result.decode(as: Reply.self).outputOrThrow(number: number)
             }
         }
     }
@@ -145,6 +148,20 @@ private extension Interpreter {
     }
 }
 
+// MARK: - Interpreter.InteractiveRequest
+
+private extension Interpreter {
+    struct InteractiveRequest: Encodable {
+        let source: String
+        let number: Int?
+
+        func encode(to encoder: inout Encoder) throws {
+            try encoder.encode(source, forKey: "source")
+            try encoder.encode(number, forKey: "number")
+        }
+    }
+}
+
 // MARK: - Interpreter.ScriptRequest
 
 private extension Interpreter {
@@ -174,9 +191,9 @@ private extension Interpreter {
             traceback = try decoder.decode(String.self, at: 2)
         }
 
-        func outputOrThrow() throws -> Output {
+        func outputOrThrow(number: Int?) throws -> Output {
             guard traceback.isEmpty else {
-                throw ExecutionError(traceback: traceback, output: output)
+                throw ExecutionError(traceback: traceback, output: output, number: number)
             }
             return output
         }

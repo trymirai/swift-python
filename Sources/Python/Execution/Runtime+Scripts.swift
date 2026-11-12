@@ -103,17 +103,7 @@ extension Runtime {
 
     private static func readScript(from descriptor: FileDescriptor) throws -> String {
         defer { try? descriptor.close() }
-        var bytes = [UInt8]()
-        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
-
-        while true {
-            let count = try buffer.withUnsafeMutableBytes { try unsafe descriptor.read(into: $0) }
-            if count == 0 {
-                break
-            }
-            bytes.append(contentsOf: buffer.prefix(count))
-        }
-        return try decodeScript(bytes)
+        return try decodeScript(descriptor.readAllBytes())
     }
 
     private static func decodeScript(_ bytes: some Collection<UInt8>) throws -> String {
@@ -134,6 +124,24 @@ extension Runtime {
                 .script(source: source),
                 execution: execution,
             )
+        }
+    }
+}
+
+// MARK: - FileDescriptor + Reading
+
+extension FileDescriptor {
+    // The caller retains ownership and chooses the source's text-decoding policy.
+    func readAllBytes() throws -> [UInt8] {
+        var bytes = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+
+        while true {
+            let count = try buffer.withUnsafeMutableBytes { try unsafe read(into: $0) }
+            if count == 0 {
+                return bytes
+            }
+            bytes.append(contentsOf: buffer.prefix(count))
         }
     }
 }

@@ -21,6 +21,7 @@ struct CPython_Files {
 
     uint64_t next_pipe;
 
+    // Entries before this boundary existed when the checkpoint began.
     size_t checkpoint_count;
     bool checkpoint;
 };
@@ -60,8 +61,15 @@ CPython_SetFileAccessCheck(CPython_FileAccessCheck check, void *context, CPython
 CPython_FileAccessState
 CPython_CurrentFileAccess(void)
 {
-    return (CPython_FileAccessState){check_file, check_context, files,
-                                    streams[0], streams[1], streams[2]};
+    return (CPython_FileAccessState){
+        .check = check_file,
+        .context = check_context,
+        .files = files,
+
+        .input = streams[0],
+        .output = streams[1],
+        .error = streams[2],
+    };
 }
 
 bool
@@ -163,6 +171,23 @@ CPython_BeginFileCheckpoint(void)
     return 0;
 }
 
+static bool
+finish_descriptor_checkpoint(Descriptor *entry, size_t index, bool restoring)
+{
+    // Rollback drops newly opened descriptors. Commit releases descriptors closed by Python.
+    if (restoring ? index >= files->checkpoint_count : entry->closed) {
+        close(entry->fd);
+        return false;
+    }
+    if (restoring) {
+        if (entry->pipe == 0) {
+            (void)lseek(entry->fd, entry->offset, SEEK_SET);
+        }
+        entry->closed = false;
+    }
+    return true;
+}
+
 void
 CPython_FinishFileCheckpoint(bool restoring)
 {
@@ -174,18 +199,9 @@ CPython_FinishFileCheckpoint(bool restoring)
     for (size_t i = 0; i < files->count; ++i) {
         Descriptor entry = files->descriptors[i];
 
-        // Rollback drops newly opened descriptors. Commit releases descriptors closed by Python.
-        if (restoring ? i >= files->checkpoint_count : entry.closed) {
-            close(entry.fd);
-            continue;
+        if (finish_descriptor_checkpoint(&entry, i, restoring)) {
+            files->descriptors[remaining++] = entry;
         }
-        if (restoring) {
-            if (entry.pipe == 0) {
-                (void)lseek(entry.fd, entry.offset, SEEK_SET);
-            }
-            entry.closed = false;
-        }
-        files->descriptors[remaining++] = entry;
     }
     files->count = remaining;
     files->checkpoint = false;

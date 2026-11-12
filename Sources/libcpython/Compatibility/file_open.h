@@ -54,9 +54,10 @@ typedef struct {
     int error;
 } CPython_FileAccessState;
 
-CPython_FileAccessState CPython_CurrentFileAccess(void);
 CPython_Files *_Nullable CPython_NewFiles(void);
 void CPython_FreeFiles(CPython_Files *_Nullable files);
+
+CPython_FileAccessState CPython_CurrentFileAccess(void);
 void CPython_SetFileAccessCheck(CPython_FileAccessCheck _Nullable check, void *_Nullable context,
                                 CPython_Files *_Nullable files);
 
@@ -99,7 +100,7 @@ bool CPython_AllowsSubprocesses(void);
 void CPython_StopSubprocesses(CPython_Subprocesses *_Nonnull scope);
 int CPython_JoinSubprocesses(CPython_Subprocesses *_Nonnull scope);
 bool CPython_SubprocessesHaveOpenPipes(CPython_Subprocesses *_Nonnull scope,
-                                      const CPython_Files *_Nonnull files);
+                                       const CPython_Files *_Nonnull files);
 
 CPython_Subprocess *_Nullable CPython_PrepareSubprocess(int input, int output, int error);
 void CPython_RegisterSubprocess(CPython_Subprocess *_Nonnull process, pid_t pid);

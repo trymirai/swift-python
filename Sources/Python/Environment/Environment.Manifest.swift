@@ -2,6 +2,8 @@
 //  Created by Anton Spivak
 //
 
+// MARK: - Environment.Manifest
+
 extension Environment {
     struct Manifest: Sendable, Equatable {
         let abi: [String]
@@ -27,7 +29,11 @@ extension Environment {
             }
         }
     }
+}
 
+// MARK: - Environment.Slot
+
+extension Environment {
     enum Slot: String, CaseIterable, Sendable {
         case a
         case b
@@ -36,16 +42,20 @@ extension Environment {
             self == .a ? .b : .a
         }
     }
+}
 
+// MARK: - Environment.Publication
+
+extension Environment {
     struct Publication: Sendable {
         let active: Slot?
         let manifest: Manifest
     }
 }
 
-// MARK: - Environment.Publication + Encodable, Decodable
+// MARK: - Environment.Publication + Encodable
 
-extension Environment.Publication: Encodable, Decodable {
+extension Environment.Publication: Encodable {
     func encode(to encoder: inout Encoder) throws {
         try encoder.encode(manifest.abi, forKey: "abi")
         try encoder.encode(manifest.fingerprint, forKey: "fingerprint")
@@ -53,7 +63,11 @@ extension Environment.Publication: Encodable, Decodable {
         try encoder.encode(manifest.packages, forKey: "packages")
         try encoder.encode(active?.rawValue, forKey: "active")
     }
+}
 
+// MARK: - Environment.Publication + Decodable
+
+extension Environment.Publication: Decodable {
     init(from decoder: borrowing Decoder) throws {
         let manifest = try Environment.Manifest(
             abi: decoder.decode([String].self, forKey: "abi"),

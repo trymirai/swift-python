@@ -7,6 +7,9 @@ public struct Execution: Sendable {
     public let output: Output
     public let end: End
 
+    /// The session history number, or nil when this execution was not recorded.
+    public let number: Int?
+
     public enum End: Sendable, Equatable {
         case finished
 

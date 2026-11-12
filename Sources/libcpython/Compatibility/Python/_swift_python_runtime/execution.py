@@ -11,6 +11,7 @@ from contextlib import suppress
 from types import CodeType
 
 from .async_support import await_block
+from .history import History
 from .imports import import_module, import_project, update_imports
 from .streams import capture
 from .streams import install as install_streams
@@ -56,6 +57,7 @@ def _configure_site(package_paths: list[str]) -> None:
 class _SourceCache:
     def __init__(self) -> None:
         self._sources = {}
+
         self._block = 0
 
     def block_filename(self, requested: str | None) -> str:
@@ -91,7 +93,9 @@ class _SourceCache:
         linecache.cache[filename] = entry
 
 
-def configure(paths: list[str], package_paths: list[str]) -> None:
+def configure(
+    paths: list[str], package_paths: list[str], output_limit: int | None, read_inputs
+) -> None:
     global evaluate, initialize, run_script, current_namespace
 
     from .async_support import configure_restricted_loop
@@ -103,6 +107,15 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
 
     namespace = sys.modules["__main__"].__dict__
     sources = _SourceCache()
+    history = History(output_limit, read_inputs) if output_limit is not None else None
+
+    def bind_namespace(replacement: dict) -> None:
+        nonlocal namespace
+        namespace = replacement
+        if history is not None:
+            history.bind(namespace)
+
+    bind_namespace(namespace)
 
     def run_code(code: CodeType, source: str, filename: str, namespace: dict, control) -> None:
         sources.remember(code, source, filename)
@@ -116,11 +129,8 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
         return namespace
 
     def initialize(request: dict, unused, control, streams: dict[str, int]) -> tuple[str, str, str]:
-        nonlocal namespace
-
         def run_source(source: str, filename: str, module_namespace: dict) -> None:
-            nonlocal namespace
-            namespace = module_namespace
+            bind_namespace(module_namespace)
             code = compile(
                 source,
                 filename,
@@ -139,13 +149,16 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
                 else:
                     if "project" in request:
                         module = import_project(
-                            request["project"], request["module"], request["import_paths"], run_source
+                            request["project"],
+                            request["module"],
+                            request["import_paths"],
+                            run_source,
                         )
                     else:
                         module = import_module(request["module"], run_source)
 
                     # Functions and later assignments share the startup module's globals.
-                    namespace = module.__dict__
+                    bind_namespace(module.__dict__)
             except BaseException as exception:
                 failure = _report_exception(exception, stderr, control)
 
@@ -157,6 +170,7 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
         control,
         streams: dict[str, int],
         arguments: list[str] | None = None,
+        number: int | None = None,
     ) -> tuple[str, str, str]:
         filename = sources.block_filename(filename)
 
@@ -164,10 +178,28 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
             # Restore argv even if interactive code rebinds it.
             previous_argv = sys.argv
             failure = ""
+            captured_result = None
+            previous_displayhook = None
+            display_hook = None
 
             try:
                 if arguments is None:
                     tree = ast.parse(source, filename, "exec")
+                    if (
+                        history is not None
+                        and number is not None
+                        and tree.body
+                        and isinstance(tree.body[-1], ast.Expr)
+                    ):
+                        previous_displayhook = sys.displayhook
+
+                        def display_hook(value):
+                            nonlocal captured_result
+                            previous_displayhook(value)
+                            captured_result = value
+
+                        sys.displayhook = display_hook
+
                     code = compile(
                         ast.Interactive(body=tree.body),
                         filename,
@@ -189,18 +221,22 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
                     )
 
                 run_code(code, source, filename, namespace, control)
+                if display_hook is not None and getattr(sys, "displayhook", None) is display_hook:
+                    history.remember(number, captured_result)
             except BaseException as exception:
                 if arguments is None or not _successful_script_exit(exception):
                     failure = _report_exception(exception, stderr, control)
             finally:
+                if display_hook is not None and getattr(sys, "displayhook", None) is display_hook:
+                    sys.displayhook = previous_displayhook
                 sys.argv = previous_argv
 
             return stdout.result(), stderr.result(), failure
 
     def evaluate(
-        source: str, filename: str | None, control, streams: dict[str, int]
+        request: dict, filename: str | None, control, streams: dict[str, int]
     ) -> tuple[str, str, str]:
-        return execute(source, filename, control, streams)
+        return execute(request["source"], filename, control, streams, number=request["number"])
 
     def run_script(
         request: dict, filename: str | None, control, streams: dict[str, int]

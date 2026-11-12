@@ -194,8 +194,7 @@ func environmentClaimsItsSlotsBeforeReapingStaging() async throws {
             await #expect(throws: Python::Exception.self) {
                 try await runtime.session(environmentDirectory: environment.string)
             }
-            #expect(try await String(contentsOf: marker, maximumSizeAllowed: .unlimited) ==
-                "user data")
+            #expect(try await readText(at: marker) == "user data")
         }
 
         try await files.removeItem(at: slot)

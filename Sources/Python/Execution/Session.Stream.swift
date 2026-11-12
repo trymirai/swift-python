@@ -8,8 +8,11 @@ internal import SystemPackage
 // MARK: - Session.Stream
 
 public extension Session {
-    /// A standard stream that can be redirected to a file for one execution.
+    /// A source or standard stream file target for one execution.
     enum Stream: String, Hashable, Sendable {
+        /// Saves recorded input to a new file instead of memory. The parent directory must exist.
+        /// Input retention removes evicted files; closing the session leaves retained files.
+        case source
         case stdin
         case stdout
         case stderr

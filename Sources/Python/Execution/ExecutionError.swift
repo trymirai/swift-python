@@ -14,6 +14,9 @@ import Foundation
 public struct ExecutionError: Swift::Error {
     public let traceback: String
     public let output: Output
+
+    /// The session history number, or nil outside a recorded interactive execution.
+    public let number: Int?
 }
 
 // MARK: CustomStringConvertible

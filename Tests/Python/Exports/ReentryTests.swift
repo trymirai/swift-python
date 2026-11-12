@@ -17,29 +17,20 @@ func callbackCannotAwaitItsOwnSession() async throws {
     }
 
     let functions: [Python::Module.Function] = [
-        .init("read", start: { _, context in
-            let python = context
-            return Python::Module.Function.makeOperation {
-                try await callbackSession().get("value", as: Int.self, in: python)
-            }
+        contextFunction("read", operation: { context in
+            try await callbackSession().get("value", as: Int.self, in: context)
         }),
-        .init("reset", start: { _, context in
-            let python = context
-            return Python::Module.Function.makeOperation {
-                try await callbackSession().reset(in: python)
-            }
+        contextFunction("reset", operation: { context in
+            try await callbackSession().reset(in: context)
+            return Python::Value.none
         }),
-        .init("imports", start: { _, context in
-            let python = context
-            return Python::Module.Function.makeOperation {
-                try await callbackSession().replaceImportPaths([], in: python)
-            }
+        contextFunction("imports", operation: { context in
+            try await callbackSession().replaceImportPaths([], in: context)
+            return Python::Value.none
         }),
-        .init("evaluate", start: { _, context in
-            let python = context
-            return Python::Module.Function.makeOperation {
-                _ = try await callbackSession().evaluate("1", in: python)
-            }
+        contextFunction("evaluate", operation: { context in
+            _ = try await callbackSession().evaluate("1", in: context)
+            return Python::Value.none
         }),
     ]
 
@@ -69,20 +60,15 @@ func callbackCannotAwaitItsOwnSession() async throws {
 func callbackChainCannotAwaitAnAncestor() async throws {
     let targets = Mutex<(first: Python::Session, second: Python::Session)?>(nil)
     defer { targets.withLock { $0 = nil } }
-    let forward = Python::Module.Function("forward", start: { _, context in
-        let python = context
-        return Python::Module.Function.makeOperation {
-            let second = try #require(targets.withLock { $0?.second })
-            _ = try await second.evaluate("import chain; await chain.back()", in: python)
-        }
-    })
-    let back = Python::Module.Function("back", start: { _, context in
-        let python = context
-        return Python::Module.Function.makeOperation {
-            let first = try #require(targets.withLock { $0?.first })
-            return try await first.get("value", as: Int.self, in: python)
-        }
-    })
+    let forward = contextFunction("forward") { context in
+        let second = try #require(targets.withLock { $0?.second })
+        _ = try await second.evaluate("import chain; await chain.back()", in: context)
+        return Python::Value.none
+    }
+    let back = contextFunction("back") { context in
+        let first = try #require(targets.withLock { $0?.first })
+        return try await first.get("value", as: Int.self, in: context)
+    }
     let runtime = try await Python::Runtime()
     let first = try await runtime.session(moduleDefinitions: [.init("chain", functions: [forward])])
     let second = try await runtime.session(moduleDefinitions: [.init("chain", functions: [back])])
@@ -118,17 +104,14 @@ func callbackDoesNotWaitForAnotherBusySession() async throws {
     let runtime = try await Python::Runtime()
     let target = try await runtime.session(moduleDefinitions: [.init("blocked", functions: [hold])])
     try await target.set(42, forKey: "value")
-    let read = Python::Module.Function("read", start: { _, context in
-        let python = context
-        return Python::Module.Function.makeOperation {
-            do {
-                _ = try await target.get("value", as: Int.self, in: python)
-                return false
-            } catch Python::Session.Error.busy {
-                return true
-            }
+    let read = contextFunction("read") { context in
+        do {
+            _ = try await target.get("value", as: Int.self, in: context)
+            return false
+        } catch Python::Session.Error.busy {
+            return true
         }
-    })
+    }
     let caller = try await runtime.session(moduleDefinitions: [.init("probe", functions: [read])])
     defer {
         await caller.close()
@@ -152,4 +135,16 @@ func callbackDoesNotWaitForAnotherBusySession() async throws {
     release.finish()
     _ = try await active.value
     #expect(try await target.get("value", as: Int.self) == 42)
+}
+
+private func contextFunction(
+    _ name: String,
+    operation: @escaping @Sendable (
+        Python::Context,
+    ) async throws -> any Python::Encodable & Sendable,
+) -> Python::Module.Function {
+    .init(name, start: { _, context in
+        let context = context
+        return { try await operation(context) }
+    })
 }

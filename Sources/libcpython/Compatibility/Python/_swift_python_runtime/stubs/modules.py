@@ -14,9 +14,11 @@ class Module:
     def __init__(self, record, bindings: dict, fields: dict) -> None:
         self.name, self.documentation, text, functions, classes = record
         module_parts(self.name)
+
         self.bindings, self.fields = bindings, fields
         self.functions = {record[0]: record for record in functions}
         self.classes = {record[2]: record for record in classes}
+
         self.source = ast.parse(text or "", filename=f"<swift:{self.name}:source>")
         source_documentation = ast.get_docstring(self.source, clean=False)
         if source_documentation is not None:
@@ -25,8 +27,14 @@ class Module:
         self.declarations = {}
         self.aliases = {}
         self.variables = {}
+
         self.children = set()
         self.is_package = False
+
+        self.annotations = Annotations(self.name, self._declared_names())
+        self._read_source()
+
+    def _declared_names(self) -> set[str]:
         names = set(self.functions) | set(self.classes)
         names.update(
             name.id
@@ -39,8 +47,7 @@ class Module:
             for statement in self.source.body
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         )
-        self.annotations = Annotations(self.name, names)
-        self._read_source()
+        return names
 
     def render(self) -> str:
         body = self._body()

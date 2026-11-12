@@ -53,7 +53,7 @@ func defaultFileAccessUsesHostImportRootsForReadsOnly() async throws {
             try await session.replaceImportPaths([outside.string])
             _ = try await session.evaluate("assert Path(outside, 'data').read_text() == 'outside'")
         }
-        #expect(try await contents(readable.appending("data")) == "allowed")
+        #expect(try await readText(at: readable.appending("data")) == "allowed")
     }
 }
 
@@ -112,8 +112,11 @@ func openRemainsBoundDuringAuthorization(swapParent: Bool) async throws {
             _ = file.write('written')
         """)
         #expect(result.end == .finished)
-        #expect(try await contents(swapParent ? moved.appending("data") : original) == "written")
-        #expect(try await contents(swapParent ? original : victim) == "untouched")
+
+        let written = swapParent ? moved.appending("data") : original
+        let untouched = swapParent ? original : victim
+        #expect(try await readText(at: written) == "written")
+        #expect(try await readText(at: untouched) == "untouched")
     }
 }
 
@@ -198,8 +201,8 @@ func restrictedFileOperationsCheckDescriptorsAndNativeModules() async throws {
         """)
         #expect(execution.end == .finished)
         #expect(try await FileSystem.shared.info(forFileAt: original) == nil)
-        #expect(try await contents(allowed.appending("moved")) == "allowed")
-        #expect(try await contents(protected) == "protected")
+        #expect(try await readText(at: allowed.appending("moved")) == "allowed")
+        #expect(try await readText(at: protected) == "protected")
     }
 }
 
@@ -241,7 +244,7 @@ func rollbackPreservesFileIOAndItsPosition() async throws {
         file.close()
         """)
         #expect(result.end == .finished)
-        #expect(try await contents(path) == "abcd")
+        #expect(try await readText(at: path) == "abcd")
     }
 }
 
@@ -253,8 +256,4 @@ struct FileAccessDelegate: Python::Session.Delegate {
     func shouldAllowFileAccess(_ request: Python::Session.FileAccessRequest) async throws -> Bool {
         try await authorize(request)
     }
-}
-
-private func contents(_ path: FilePath) async throws -> String {
-    try await String(contentsOf: path, maximumSizeAllowed: .unlimited)
 }

@@ -38,29 +38,30 @@ class NativeClasses:
         constructor = create(constructor, module) if constructor is not None else None
         members = {method[0]: create(method, module, member=True) for method in methods}
 
-        def prepare_property(record):
-            property_name, property_doc, getter, setter = record
-            identifier(property_name)
-            if is_reserved_member(property_name):
-                raise ValueError("Reserved native property name")
-
-            getter = create(getter, module)
-            annotation = getter.__signature__.return_annotation
-            if annotation is not Signature.empty:
-                property_doc = f"{annotation}\n\n{property_doc or ''}".rstrip()
-
-            descriptor = property(
-                getter,
-                create(setter, module) if setter is not None else None,
-                doc=property_doc,
-            )
-            return property_name, descriptor
-
         for record in properties:
-            property_name, descriptor = prepare_property(record)
+            property_name, descriptor = self._prepare_property(record, module)
             members[property_name] = descriptor
 
         return _PreparedClass(module, key, base, name, documentation, constructor, members)
+
+    def _prepare_property(self, record, module: ModuleType) -> tuple[str, property]:
+        name, documentation, getter, setter = record
+        identifier(name)
+        if is_reserved_member(name):
+            raise ValueError("Reserved native property name")
+
+        create = self._functions.create
+        getter = create(getter, module)
+        annotation = getter.__signature__.return_annotation
+        if annotation is not Signature.empty:
+            documentation = f"{annotation}\n\n{documentation or ''}".rstrip()
+
+        descriptor = property(
+            getter,
+            create(setter, module) if setter is not None else None,
+            doc=documentation,
+        )
+        return name, descriptor
 
     def install(self, pending: list[_PreparedClass]) -> None:
         registry = self

@@ -126,8 +126,7 @@ func hostStreamsBypassPathOpenDelegate() async throws {
 
         #expect(execution.end == .finished)
         #expect(execution.output.stdout.isEmpty && execution.output.stderr.isEmpty)
-        #expect(try await String(contentsOf: log, maximumSizeAllowed: .unlimited) ==
-            "previous\nstartup\nstdout\nstderr\n")
+        #expect(try await readText(at: log) == "previous\nstartup\nstdout\nstderr\n")
 
         let requests = await delegate.requests
         #expect(requests.count == 1)
@@ -159,7 +158,7 @@ func standaloneScriptUsesOneDelegateForSourceAndPythonFileAccess() async throws 
             )
         }
         #expect(error.traceback.contains("PermissionError"))
-        #expect(try await String(contentsOf: protected, maximumSizeAllowed: .unlimited) == "keep")
+        #expect(try await readText(at: protected) == "keep")
 
         let requests = await delegate.requests
         #expect(requests.map(\.path.lastComponent) == [
@@ -306,7 +305,7 @@ func closingASessionPreservesItsFileAccessPolicy(hasDelegate: Bool) async throws
 
         // The exit handler attempts its write during close, outside any execution block.
         await session.close()
-        let actual = try await String(contentsOf: protected, maximumSizeAllowed: .unlimited)
+        let actual = try await readText(at: protected)
         #expect(actual == "keep")
         #expect(await delegate.requests.isEmpty)
     }

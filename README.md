@@ -79,6 +79,10 @@ Use `redirecting:` with absolute paths to save output to files.
 Startup code runs on the first Python operation. Call `initialize(redirecting:)` to run it
 explicitly, and read `startupOutput` for its output.
 
+`history: .init()` enables `In[n]` (source) and `Out[n]` (last expression result).
+The `inputs` and `outputs` limits accept `.last(n)` or `.unlimited`; `history: nil` disables both.
+Sources use memory or `redirecting: [.source: path]`. Eviction deletes source files.
+
 Pass `transactional: true` when creating a session to restore Python state after a failed or
 interrupted evaluation. File changes persist.
 
