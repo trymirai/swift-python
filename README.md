@@ -72,9 +72,9 @@ print(job.end) // timedOut
 await console.close()
 ```
 
-`evaluate` captures output and accepts a live output handler. Cancel the calling task to
-interrupt Python, or set `timeout:` to limit execution time. Use `redirecting:` with absolute
-paths to save output to files.
+`evaluate` supports top-level `await`, captures output, and accepts a live output handler.
+Cancel the calling task to interrupt Python, or set `timeout:` to limit execution time.
+Use `redirecting:` with absolute paths to save output to files.
 
 Startup code runs on the first Python operation. Call `initialize(redirecting:)` to run it
 explicitly, and read `startupOutput` for its output.
@@ -246,6 +246,10 @@ let projectSession = try await runtime.session(
 print(try await projectSession.get("__name__", as: String.self)) // reporting
 await projectSession.close()
 ```
+
+Top-level `await` is supported in scripts, `.source(...)`, and source modules selected with
+`.project(...)` or `.module(...)`. Startup completes before the first evaluation.
+Regular imports retain standard Python semantics.
 
 ## Environments and dependencies
 

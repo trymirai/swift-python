@@ -6,6 +6,8 @@
 
 public extension Session {
     /// Chooses how the session initializes its namespace on first use and after reset.
+    /// Source and the selected source module support top-level await. Their imports
+    /// use the ordinary Python import rules.
     enum Startup: Sendable {
         case source(String)
 
@@ -16,7 +18,7 @@ public extension Session {
         /// Startup fails if the selected module is unavailable in the project.
         case project(directory: String, module: String? = nil)
 
-        /// Uses the imported module's globals as the interactive namespace.
+        /// Waits for the selected module to finish and uses its globals as the interactive namespace.
         case module(String)
 
         var projectDirectory: String? {

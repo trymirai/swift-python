@@ -569,10 +569,20 @@ func conversationInstallationOverridesAndRevealsTheProjectSource() async throws 
 
 // MARK: Project bundles
 
-@Test
-func projectBundleLoadsFromEmbeddedBytesAndDisk() async throws {
+@Test(arguments: [false, true])
+func projectBundleLoadsFromEmbeddedBytesAndDisk(asynchronous: Bool) async throws {
     try await ProjectFixture.withFixture { fixture in
         try await fixture.addDependencyUpdate()
+        if asynchronous {
+            let source = FilePath(fixture.project).appending("assistant/__init__.py")
+            let bytes = try await [UInt8](
+                contentsOf: source,
+                maximumSizeAllowed: .unlimited,
+            )
+            let prefix = "import asyncio\nawait asyncio.sleep(0)\n"
+            let text = prefix + String(decoding: bytes, as: UTF8.self)
+            try await text.write(toFileAt: source, options: .newFile(replaceExisting: true))
+        }
         let archive = fixture.root.appending("packages.zip")
 
         func buildArchive() async throws {

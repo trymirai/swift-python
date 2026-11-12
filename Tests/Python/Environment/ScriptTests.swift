@@ -18,11 +18,13 @@ func scriptDependenciesAndGlobalsAreIsolatedFromTheProject() async throws {
         # dependencies = ["sampledep==1.0"]
         # ///
         \"\"\"A standalone fixture.\"\"\"
-        import sampledep, sys
+        import asyncio, sampledep, sys
 
         assert __name__ == "__main__"
         assert __file__ == sys.argv[0]
         counter = globals().get("counter", 0) + 1
+        await asyncio.sleep(0)
+        42
         print(sampledep.VALUE, counter, sys.argv[1])
         """
         let script = try await fixture.write("\u{FEFF}" + source, to: "script.py")
@@ -150,15 +152,16 @@ func deniedScriptSourceLeavesTheEnvironmentUntouched() async throws {
     }
 }
 
-@Test
-func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
+@Test(arguments: [false, true])
+func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments(asynchronous: Bool) async throws {
     try await ProjectFixture.withFixture { fixture in
         let cache = fixture.root.appending("cache")
         let scratch = cache.appending("tmp")
         let header = "# /// script\n# dependencies = [\"sampledep==1.0\"]\n# ///\n"
+        let prelude = asynchronous ? "import asyncio\nawait asyncio.sleep(0)\n" : ""
 
         func writeScript(_ source: String, named name: String) async throws -> String {
-            try await fixture.write(header + source, to: name)
+            try await fixture.write(header + prelude + source, to: name)
         }
 
         func expectScratchIsEmpty() async throws {
@@ -215,14 +218,74 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments() async throws {
         #expect(error.output.stderr == error.traceback)
         try await expectScratchIsEmpty()
 
-        let slow = try await writeScript(
-            "print('before timeout')\nwhile True:\n    pass\n",
-            named: "slow.py",
-        )
+        let waiting = asynchronous ? "await asyncio.sleep(3600)" : "while True:\n    pass"
+        let slow = try await writeScript("print('before timeout')\n" + waiting, named: "slow.py")
         let interrupted = try await fixture.runtime.run(script: slow, timeout: .seconds(2))
         #expect(interrupted.end == .timedOut)
         #expect(interrupted.output.stdout == "before timeout\n")
         try await expectScratchIsEmpty()
+    }
+}
+
+@Test(arguments: [0, 7])
+func scriptAwaitPreservesExitStatus(_ status: Int) async throws {
+    try await withTemporaryDirectory { root in
+        let script = root.appending("exit.py")
+        try await """
+        import asyncio
+        await asyncio.sleep(0)
+        print("before exit")
+        raise SystemExit(\(status))
+        """.write(toFileAt: script)
+
+        let runtime = try await Python::Runtime()
+        if status == 0 {
+            let execution = try await runtime.run(script: script.string)
+            #expect(execution.end == .finished)
+            #expect(execution.output.stdout == "before exit\n")
+            #expect(execution.output.stderr.isEmpty)
+        } else {
+            let error = try await #require(throws: Python::ExecutionError.self) {
+                try await runtime.run(script: script.string)
+            }
+            #expect(error.output.stdout == "before exit\n")
+            #expect(error.output.stderr == error.traceback)
+            #expect(error.traceback.contains(script.string))
+            #expect(error.traceback.contains("raise SystemExit(\(status))"))
+            #expect(error.traceback.contains("SystemExit: \(status)"))
+        }
+    }
+}
+
+@Test(.timeLimit(.minutes(1)))
+func scriptAwaitHonorsTaskCancellation() async throws {
+    try await withTemporaryDirectory { root in
+        let script = root.appending("wait.py")
+        try await """
+        import asyncio
+        print("ready", flush=True)
+        await asyncio.sleep(3600)
+        print("unexpected completion")
+        """.write(toFileAt: script)
+
+        let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        defer { entered.continuation.finish() }
+        let runtime = try await Python::Runtime()
+        let execution = Task {
+            defer { entered.continuation.finish() }
+            return try await runtime.run(script: script.string) { stream, text in
+                if stream == .stdout, !text.isEmpty {
+                    entered.continuation.yield(())
+                }
+            }
+        }
+        defer { execution.cancel() }
+
+        _ = try await #require(nextSignal(from: entered.stream))
+        execution.cancel()
+        let result = try await execution.value
+        #expect(result.end == .stopped)
+        #expect(result.output.stdout == "ready\n")
     }
 }
 

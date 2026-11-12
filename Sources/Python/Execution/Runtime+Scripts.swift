@@ -9,7 +9,7 @@ public import SystemPackage
 // MARK: Runtime + Scripts
 
 public extension Runtime {
-    /// Runs a UTF-8 script in a fresh session with its PEP 723 dependencies.
+    /// Runs a UTF-8 script with top-level await in a fresh session with its PEP 723 dependencies.
     ///
     /// The delegate checks the resolved source before reading it. Approval covers that file.
     /// Pass `importPaths` to grant additional reads. Without a delegate, the caller authorizes

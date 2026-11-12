@@ -54,6 +54,56 @@ def update_imports(change: tuple[list[str], list[str]], unused=None, control=Non
             del parent.__dict__[binding]
 
 
+class _ModuleLoader:
+    def __init__(self, loader, source: str, filename: str, execute) -> None:
+        self.loader = loader
+        self.source = source
+        self.filename = filename
+        self.execute = execute
+
+    def create_module(self, spec):
+        return self.loader.create_module(spec)
+
+    def exec_module(self, module) -> None:
+        # Keep the original loader visible to resources, inspection and invalidation.
+        module.__loader__ = module.__spec__.loader = self.loader
+        self.execute(self.source, self.filename, module.__dict__)
+
+
+class _ModuleFinder:
+    def __init__(self, name: str, execute) -> None:
+        self.name = name
+        self.execute = execute
+
+    def find_spec(self, fullname: str, path=None, target=None) -> ModuleSpec | None:
+        if fullname != self.name:
+            return None
+
+        for finder in sys.meta_path:
+            if finder is self:
+                continue
+            spec = finder.find_spec(fullname, path, target)
+            if spec is not None:
+                source = getattr(spec.loader, "get_source", None)
+                filename = getattr(spec.loader, "get_filename", None)
+                if source is not None and filename is not None:
+                    text = source(fullname)
+                    if text is not None:
+                        spec.loader = _ModuleLoader(spec.loader, text, filename(fullname), self.execute)
+                return spec
+        return None
+
+
+def import_module(name: str, execute) -> ModuleType:
+    finder = _ModuleFinder(name, execute)
+    sys.meta_path.insert(0, finder)
+    try:
+        return importlib.import_module(name)
+    finally:
+        if finder in sys.meta_path:
+            sys.meta_path.remove(finder)
+
+
 class _ProjectFinder:
     def __init__(self, directory: str, name: str, import_paths: list[str]) -> None:
         self.directory = directory
@@ -104,7 +154,7 @@ class _ProjectFinder:
         return spec
 
 
-def import_project(directory: str, name: str | None, import_paths: list[str]) -> ModuleType:
+def import_project(directory: str, name: str | None, import_paths: list[str], execute) -> ModuleType:
     if name is None:
         with os.scandir(directory) as entries:
             packages = (
@@ -129,7 +179,7 @@ def import_project(directory: str, name: str | None, import_paths: list[str]) ->
     finder.check_loaded()
     sys.meta_path.insert(0, finder)
     try:
-        return importlib.import_module(name)
+        return import_module(name, execute)
     finally:
         if finder in sys.meta_path:
             sys.meta_path.remove(finder)

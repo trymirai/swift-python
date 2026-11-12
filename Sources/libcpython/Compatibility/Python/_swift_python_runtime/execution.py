@@ -1,7 +1,6 @@
 """Evaluate interactive blocks in an embedded interpreter."""
 
 import ast
-import importlib
 import linecache
 import os
 import site
@@ -12,7 +11,7 @@ from contextlib import suppress
 from types import CodeType
 
 from .async_support import await_block
-from .imports import import_project, update_imports
+from .imports import import_module, import_project, update_imports
 from .streams import capture
 from .streams import install as install_streams
 
@@ -105,7 +104,7 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
     namespace = sys.modules["__main__"].__dict__
     sources = _SourceCache()
 
-    def run_code(code: CodeType, source: str, filename: str, control) -> None:
+    def run_code(code: CodeType, source: str, filename: str, namespace: dict, control) -> None:
         sources.remember(code, source, filename)
         result = eval(code, namespace)
         if result is not None:
@@ -119,28 +118,31 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
     def initialize(request: dict, unused, control, streams: dict[str, int]) -> tuple[str, str, str]:
         nonlocal namespace
 
+        def run_source(source: str, filename: str, module_namespace: dict) -> None:
+            nonlocal namespace
+            namespace = module_namespace
+            code = compile(
+                source,
+                filename,
+                "exec",
+                flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+                dont_inherit=True,
+            )
+            run_code(code, source, filename, namespace, control)
+
         with capture(control, streams) as (stdout, stderr):
             failure = ""
 
             try:
                 if "source" in request:
-                    source = request["source"]
-                    filename = "<startup>"
-                    code = compile(
-                        source,
-                        filename,
-                        "exec",
-                        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
-                        dont_inherit=True,
-                    )
-                    run_code(code, source, filename, control)
+                    run_source(request["source"], "<startup>", namespace)
                 else:
                     if "project" in request:
                         module = import_project(
-                            request["project"], request["module"], request["import_paths"]
+                            request["project"], request["module"], request["import_paths"], run_source
                         )
                     else:
-                        module = importlib.import_module(request["module"])
+                        module = import_module(request["module"], run_source)
 
                     # Functions and later assignments share the startup module's globals.
                     namespace = module.__dict__
@@ -178,9 +180,15 @@ def configure(paths: list[str], package_paths: list[str]) -> None:
                     namespace["__file__"] = filename
                     sys.argv = [filename, *arguments]
 
-                    code = compile(source, filename, "exec", dont_inherit=True)
+                    code = compile(
+                        source,
+                        filename,
+                        "exec",
+                        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+                        dont_inherit=True,
+                    )
 
-                run_code(code, source, filename, control)
+                run_code(code, source, filename, namespace, control)
             except BaseException as exception:
                 if arguments is None or not _successful_script_exit(exception):
                     failure = _report_exception(exception, stderr, control)
