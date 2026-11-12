@@ -113,6 +113,7 @@ def _bind_parameters(
 class FunctionFactory:
     def __init__(self, invoke) -> None:
         self._invoke = invoke
+
         self.imports: dict[str, set[str]] = {}
 
     def create(self, record, module: ModuleType, *, member: bool = False):

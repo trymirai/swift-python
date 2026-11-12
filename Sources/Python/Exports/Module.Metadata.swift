@@ -53,6 +53,7 @@ extension Module {
 extension Module {
     struct Metadata {
         let module: Module
+
         let functions: [Function]
         let classes: [Class]
     }
@@ -156,6 +157,7 @@ extension Module.Metadata.Parameter: Encodable {
 extension Module.Metadata {
     struct Property {
         let value: Module.Class.Property
+
         let getter: Function
         let setter: Function?
     }

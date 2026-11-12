@@ -34,6 +34,10 @@ public struct Stubs: Sendable {
         let sources = try await Renderer().render(definitions)
         try Task.checkCancellation()
 
+        try await Self.write(sources, to: destination)
+    }
+
+    private static func write(_ sources: [String: String], to destination: FilePath) async throws {
         let files = FileSystem.shared
         _ = try await files.removeItem(at: destination)
         try await files.createDirectory(at: destination, withIntermediateDirectories: true)

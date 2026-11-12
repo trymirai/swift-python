@@ -345,19 +345,19 @@ func classIdentityAndSessionGenerations() async throws {
     await #expect(throws: Python::Exception.self) { try await managed { $0.number } }
 }
 
-// MARK: - CheckpointModule
+// MARK: - ReferenceModule
 
-@PythonExportedModule("checkpoint_fixture")
-private enum CheckpointModule {}
+@PythonExportedModule("reference_fixture")
+private enum ReferenceModule {}
 
-// MARK: - CheckpointPeer
+// MARK: - ReferencePeer
 
-@PythonExportedClass("Peer", module: CheckpointModule.self)
-private final class CheckpointPeer {
+@PythonExportedClass("Peer", module: ReferenceModule.self)
+private final class ReferencePeer {
     @PythonProperty
     let value: Int
 
-    private var peer: CheckpointPeer?
+    private var peer: ReferencePeer?
     private var reference: Python::Reference?
 
     @PythonInit
@@ -366,12 +366,12 @@ private final class CheckpointPeer {
     }
 
     @PythonFunction
-    func retain(_ peer: CheckpointPeer) {
+    func retain(_ peer: ReferencePeer) {
         self.peer = peer
     }
 
     @PythonFunction
-    func recall() -> CheckpointPeer? {
+    func recall() -> ReferencePeer? {
         peer
     }
 
@@ -387,14 +387,14 @@ private final class CheckpointPeer {
 }
 
 @Test(.timeLimit(.minutes(3)))
-func checkpointedEvaluationRestoresOriginalPythonAndSwiftObjects() async throws {
+func failedEvaluationKeepsPythonAndSwiftObjects() async throws {
     let python = try await Python::Runtime()
-    let session = try await python.session(modules: [CheckpointModule.self], transactional: true)
+    let session = try await python.session(modules: [ReferenceModule.self])
     defer { await session.close() }
 
     let prepared = try await session.evaluate("""
     import sys
-    from checkpoint_fixture import Peer
+    from reference_fixture import Peer
 
     holder = Peer()
     child = Peer(17)
@@ -404,8 +404,6 @@ func checkpointedEvaluationRestoresOriginalPythonAndSwiftObjects() async throws 
     alias = values
     nested = values[0]["nested"]
 
-    root_count = sys.getrefcount(values)
-    original_ids = id(child), id(values), id(nested)
     """)
     #expect(prepared.end == .finished)
 
@@ -413,34 +411,26 @@ func checkpointedEvaluationRestoresOriginalPythonAndSwiftObjects() async throws 
         try await session.evaluate("""
         del child
         replacement = holder.recall()
-        assert id(replacement) != original_ids[0]
         assert replacement.value == 17
         nested.extend([2, 3])
         values.append(4)
         holder.remember(values)
         print("diagnostic")
-        raise ValueError("checkpoint fixture")
+        raise ValueError("reference fixture")
         """, filename: "r2")
     }
-    #expect(error.traceback.contains("checkpoint fixture"))
+    #expect(error.traceback.contains("reference fixture"))
     #expect(error.traceback.contains("r2"))
     #expect(error.output.stdout == "diagnostic\n")
 
-    let restored = try await session.evaluate("""
-    assert (id(child), id(values), id(nested)) == original_ids
-    assert holder.recall() is child and child.value == 17
+    let retained = try await session.evaluate("""
+    assert 'child' not in globals()
+    assert holder.recall() is replacement and replacement.value == 17
     assert alias is values and nested is values[0]["nested"]
-    assert values == [{"nested": [1]}]
-    assert "replacement" not in globals()
-    assert sys.getrefcount(values) == root_count - 1
-    try:
-        holder.remembered()
-    except ReferenceError:
-        pass
-    else:
-        raise AssertionError("A speculative Swift reference escaped rollback")
+    assert values == [{"nested": [1, 2, 3]}, 4]
+    assert holder.remembered() is values
     """)
-    #expect(restored.end == .finished)
+    #expect(retained.end == .finished)
 }
 
 // MARK: - PublicationError
@@ -450,9 +440,9 @@ private enum PublicationError: Swift::Error, Equatable {
 }
 
 @Test(.timeLimit(.minutes(3)))
-func rollbackKeepsAnotherInterpreterAlive() async throws {
+func failedPublicationKeepsAnotherInterpreterAlive() async throws {
     let runtime = try await Python::Runtime()
-    let session = try await runtime.session(transactional: true)
+    let session = try await runtime.session()
     let other = try await runtime.session()
     defer {
         await session.close()
@@ -465,22 +455,22 @@ func rollbackKeepsAnotherInterpreterAlive() async throws {
         import threading
         speculative_thread = threading.Thread()
         """, committing: { _ in
-            // Start a peer after the snapshot to exercise registry links owned by the peer.
+            // Publication can initialize another interpreter without changing this session.
             try await other.initialize()
             throw PublicationError.failed
         })
     }
     #expect(try await session.evaluate("'speculative_thread' in globals()")
         .output
-        .stdout == "False\n")
+        .stdout == "True\n")
     await session.close()
     #expect(try await other.evaluate("6 * 7").output.stdout == "42\n")
 }
 
 @Test(.timeLimit(.minutes(3)))
-func checkpointedEvaluationWaitsForHostPublication() async throws {
+func evaluationWaitsForHostPublication() async throws {
     let python = try await Python::Runtime()
-    let session = try await python.session(.source("values = [1]"), transactional: true)
+    let session = try await python.session(.source("values = [1]"))
     defer { await session.close() }
 
     await #expect(throws: PublicationError.failed) {
@@ -494,11 +484,11 @@ func checkpointedEvaluationWaitsForHostPublication() async throws {
 
     try await checkDeadlineDuringPublication(in: session)
 
-    #expect(try await session.evaluate("assert values == [1]").end == .finished)
+    #expect(try await session.evaluate("assert values == [1, 2, 3, 5]").end == .finished)
     let committed = try await cancelDuringPublication(in: session, afterSealing: true)
     #expect(committed.end == .finished)
     #expect(committed.output.stdout == "ready\n")
-    #expect(try await session.evaluate("assert values == [1, 4]").end == .finished)
+    #expect(try await session.evaluate("assert values == [1, 2, 3, 5, 4]").end == .finished)
 }
 
 private func checkDeadlineDuringPublication(in session: Python::Session) async throws {

@@ -18,8 +18,8 @@ public actor Session {
     private let startup: Startup
     private let modules: [Module]
 
-    nonisolated let transactional: Bool
     private let allowsSubprocesses: Bool
+
     nonisolated let history: History.Store?
 
     private(set) var environment: Environment?
@@ -49,7 +49,6 @@ public actor Session {
         importPaths: [Runtime.Path],
         modules: [Module],
         startup: Startup = .source(""),
-        transactional: Bool = false,
         history: History.Store? = nil,
         allowsSubprocesses: Bool = false,
         environment: sending Environment? = nil,
@@ -62,7 +61,6 @@ public actor Session {
 
         self.modules = modules
         self.startup = startup
-        self.transactional = transactional
         self.history = history
         self.allowsSubprocesses = allowsSubprocesses
 
@@ -109,7 +107,6 @@ public actor Session {
             importPaths: resolvedImportPaths,
             modules: modules,
             packages: packages,
-            transactional: transactional,
             history: history,
             scheduleRelease: { [weak self] in Task { await self?.releasePendingReferences() } },
             session: self,
@@ -165,10 +162,6 @@ public actor Session {
             }
             return subprocesses.hasOpenPipes(in: files)
         } ?? false
-    }
-
-    func finishCheckpoint(_ outcome: Interpreter.CheckpointOutcome) {
-        withOpenInterpreter { $0.finishCheckpoint(outcome) }
     }
 
     @discardableResult

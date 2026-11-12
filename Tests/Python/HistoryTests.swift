@@ -13,70 +13,82 @@ func historyKeepsSourcesAndActualFinalResults() async throws {
     let session = try await runtime.session(history: .init(outputs: .unlimited))
     let firstSource = "data = {'count': 42}\nprint('ready')\ndata"
     try await withSession(session) { session in
-        let first = try await session.evaluate(firstSource)
-        #expect(first.number == 1)
-        #expect(first.output.stdout == "ready\n{'count': 42}\n")
-        try await session.set(firstSource, forKey: "source")
+        func checkSourceIdentity() async throws {
+            let first = try await session.evaluate(firstSource)
+            #expect(first.number == 1)
+            #expect(first.output.stdout == "ready\n{'count': 42}\n")
+            try await session.set(firstSource, forKey: "source")
 
-        let check = try await session.evaluate("""
-        assert In[1] == source
-        assert Out[1] is data
-        Out[1]['count'] += 1
-        assert data['count'] == 43
-        assert list(In) == [1]
-        assert not any(name.startswith('__swift_python_result__') for name in globals())
-        """, recordingHistory: false)
-        #expect(check.number == nil)
-
-        let expressions = try await session.evaluate("1\n2")
-        #expect(expressions.number == 2)
-        #expect(expressions.output.stdout == "1\n2\n")
-        _ = try await session.evaluate("print('printed')")
-        _ = try await session.evaluate("assigned = 99")
-        let awaited = try await session.evaluate("""
-        import asyncio
-        await asyncio.sleep(0, result=data)
-        """)
-        #expect(awaited.number == 5)
-        _ = try await session.evaluate("""
-        assert Out[2] == 2
-        assert 3 not in Out and 4 not in Out
-        assert Out[5] is data
-        assert list(In) == [1, 2, 3, 4, 5]
-        """, recordingHistory: false)
-        let globals = try await session.evaluate("globals()")
-        #expect(globals.number == 6)
-        #expect(!globals.output.stdout.contains("__swift_python_result__"))
-        let failure = try await #require(throws: Python::ExecutionError.self) {
-            try await session.evaluate("""
-            class BadDisplay:
-                def __repr__(self):
-                    raise ValueError('display failed')
-            BadDisplay()
-            """)
+            let check = try await session.evaluate("""
+            assert In[1] == source
+            assert Out[1] is data
+            Out[1]['count'] += 1
+            assert data['count'] == 43
+            assert list(In) == [1]
+            assert not any(name.startswith('__swift_python_result__') for name in globals())
+            """, recordingHistory: false)
+            #expect(check.number == nil)
         }
-        #expect(failure.number == 7)
-        _ = try await session.evaluate("""
-        assert Out[6] is globals()
-        assert 7 not in Out
-        assert not any(name.startswith('__swift_python_result__') for name in globals())
-        """, recordingHistory: false)
-        _ = try await session.evaluate("""
-        import sys
-        rendered = []
-        def custom_displayhook(value):
-            if value is not None:
-                rendered.append(value)
-        sys.displayhook = custom_displayhook
-        """, recordingHistory: false)
-        let custom = try await session.evaluate("data")
-        #expect(custom.number == 8)
-        #expect(custom.output.stdout.isEmpty)
-        _ = try await session.evaluate("""
-        assert Out[8] is data
-        assert rendered == [data]
-        assert sys.displayhook is custom_displayhook
-        """, recordingHistory: false)
+
+        func checkFinalExpressionResults() async throws {
+            let expressions = try await session.evaluate("1\n2")
+            #expect(expressions.number == 2)
+            #expect(expressions.output.stdout == "1\n2\n")
+            _ = try await session.evaluate("print('printed')")
+            _ = try await session.evaluate("assigned = 99")
+            let awaited = try await session.evaluate("""
+            import asyncio
+            await asyncio.sleep(0, result=data)
+            """)
+            #expect(awaited.number == 5)
+            _ = try await session.evaluate("""
+            assert Out[2] == 2
+            assert 3 not in Out and 4 not in Out
+            assert Out[5] is data
+            assert list(In) == [1, 2, 3, 4, 5]
+            """, recordingHistory: false)
+            let globals = try await session.evaluate("globals()")
+            #expect(globals.number == 6)
+            #expect(!globals.output.stdout.contains("__swift_python_result__"))
+        }
+
+        func checkDisplayHooks() async throws {
+            let failure = try await #require(throws: Python::ExecutionError.self) {
+                try await session.evaluate("""
+                class BadDisplay:
+                    def __repr__(self):
+                        raise ValueError('display failed')
+                BadDisplay()
+                """)
+            }
+            #expect(failure.number == 7)
+            _ = try await session.evaluate("""
+            assert Out[6] is globals()
+            assert 7 not in Out
+            assert not any(name.startswith('__swift_python_result__') for name in globals())
+            """, recordingHistory: false)
+            _ = try await session.evaluate("""
+            import sys
+            rendered = []
+            def custom_displayhook(value):
+                if value is not None:
+                    rendered.append(value)
+            sys.displayhook = custom_displayhook
+            """, recordingHistory: false)
+            let custom = try await session.evaluate("data")
+            #expect(custom.number == 8)
+            #expect(custom.output.stdout.isEmpty)
+            _ = try await session.evaluate("""
+            assert Out[8] is data
+            assert rendered == [data]
+            assert sys.displayhook is custom_displayhook
+            """, recordingHistory: false)
+        }
+
+        // The phases share one history sequence; their execution numbers depend on this order.
+        try await checkSourceIdentity()
+        try await checkFinalExpressionResults()
+        try await checkDisplayHooks()
     }
 }
 
@@ -89,6 +101,7 @@ func historyInputRetentionOwnsAndReadsItsFiles() async throws {
         let second = root.appending("second.py")
         let stdout = root.appending("stdout.txt")
         let stderr = root.appending("stderr.txt")
+
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(history: .init(
             inputs: .last(1),
@@ -231,10 +244,9 @@ private enum HistoryPublicationError: Error {
 }
 
 @Test
-func historyInputsSurviveRollbackAndReset() async throws {
+func historyStateRemainsAfterErrorsAndResets() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(
-        transactional: true,
         history: .init(outputs: .last(1)),
     )
     try await withSession(session) { session in
@@ -252,8 +264,8 @@ func historyInputsSurviveRollbackAndReset() async throws {
         _ = try await session.evaluate("""
         assert list(In) == [1, 2, 3]
         assert 'raise ValueError' in In[2]
-        assert list(Out) == [1]
-        assert Out[1] is data and data['value'] == 1
+        assert list(Out) == [3] and Out[3] == {'unpublished': True}
+        assert data['value'] == 9
         """, recordingHistory: false)
 
         try await session.reset()
@@ -285,7 +297,6 @@ func historyRecordsInterruptedAttempts(timeout: Bool) async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(
         moduleDefinitions: [host],
-        transactional: true,
         history: .init(outputs: .unlimited),
     )
     try await withSession(session) { session in
@@ -311,8 +322,7 @@ func historyRecordsInterruptedAttempts(timeout: Bool) async throws {
         _ = try await session.evaluate("""
         assert list(In) == [1, 2]
         assert In[2].endswith('await wait()')
-        assert list(Out) == [1]
-        assert Out[1] == {'saved': True}
+        assert not Out
         """, recordingHistory: false)
     }
 }
@@ -485,7 +495,7 @@ func historyReservationsAreSingleUseAndSessionBound() async throws {
 func historyReservationsRemainSpentAfterPreparationAndExecutionFailures() async throws {
     try await withTemporaryDirectory { root in
         let runtime = try await Python::Runtime()
-        let session = try await runtime.session(transactional: true, history: .init())
+        let session = try await runtime.session(history: .init())
         try await withSession(session) { session in
             let preparation = try session.reserve()
             await #expect(throws: (any Error).self) {
@@ -518,7 +528,7 @@ func historyReservationsRemainSpentAfterPreparationAndExecutionFailures() async 
             }
             let result = try await session.evaluate("""
             assert list(In) == [2, 3, 4]
-            assert not Out
+            assert Out == {3: 'unpublished'}
             42
             """)
             #expect(result.number == 4)

@@ -28,9 +28,6 @@ extension Interpreter {
         func withStorage<Result: ~Copyable>(
             _ body: (Storage, OpaquePointer) throws -> Result,
         ) throws -> Result {
-            // Views and finalization guards outlive transactional Python allocations.
-            let previousHeap = unsafe CPython_BindHeap(nil)
-            defer { _ = unsafe CPython_BindHeap(previousHeap) }
             guard let guardPointer = unsafe PyInterpreterGuard_FromView(pointer) else {
                 throw Reference.wrongInterpreter()
             }

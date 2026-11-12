@@ -7,11 +7,8 @@
 
 typedef struct {
     int fd;
-    bool closed;
 
     uint64_t pipe;
-
-    off_t offset;
 } Descriptor;
 
 struct CPython_Files {
@@ -20,10 +17,6 @@ struct CPython_Files {
     size_t capacity;
 
     uint64_t next_pipe;
-
-    // Entries before this boundary existed when the checkpoint began.
-    size_t checkpoint_count;
-    bool checkpoint;
 };
 
 static _Thread_local CPython_FileAccessCheck check_file;
@@ -97,7 +90,7 @@ require_descriptor(int fd)
 {
     for (size_t i = 0; i < files->count; ++i) {
         Descriptor *entry = &files->descriptors[i];
-        if (entry->fd == fd && !entry->closed) {
+        if (entry->fd == fd) {
             return entry;
         }
     }
@@ -128,13 +121,6 @@ CPython_CloseFileDescriptor(int fd)
         return -1;
     }
 
-    // Newly opened pipes must deliver EOF before the block finishes.
-    if (files->checkpoint &&
-        (entry->pipe == 0 || (size_t)(entry - files->descriptors) < files->checkpoint_count)) {
-        entry->closed = true;
-        return 0;
-    }
-
     *entry = files->descriptors[--files->count];
     return close(fd);
 }
@@ -146,65 +132,6 @@ CPython_TruncateFileDescriptor(int fd, off_t size)
         return -1;
     }
     return ftruncate(fd, size);
-}
-
-int
-CPython_BeginFileCheckpoint(void)
-{
-    if (files == NULL) {
-        return 0;
-    }
-
-    for (size_t i = 0; i < files->count; ++i) {
-        Descriptor *entry = &files->descriptors[i];
-        if (entry->pipe != 0) {
-            continue;
-        }
-        entry->offset = lseek(entry->fd, 0, SEEK_CUR);
-        if (entry->offset < 0) {
-            return -1;
-        }
-    }
-
-    files->checkpoint_count = files->count;
-    files->checkpoint = true;
-    return 0;
-}
-
-static bool
-finish_descriptor_checkpoint(Descriptor *entry, size_t index, bool restoring)
-{
-    // Rollback drops newly opened descriptors. Commit releases descriptors closed by Python.
-    if (restoring ? index >= files->checkpoint_count : entry->closed) {
-        close(entry->fd);
-        return false;
-    }
-    if (restoring) {
-        if (entry->pipe == 0) {
-            (void)lseek(entry->fd, entry->offset, SEEK_SET);
-        }
-        entry->closed = false;
-    }
-    return true;
-}
-
-void
-CPython_FinishFileCheckpoint(bool restoring)
-{
-    if (files == NULL || !files->checkpoint) {
-        return;
-    }
-
-    size_t remaining = 0;
-    for (size_t i = 0; i < files->count; ++i) {
-        Descriptor entry = files->descriptors[i];
-
-        if (finish_descriptor_checkpoint(&entry, i, restoring)) {
-            files->descriptors[remaining++] = entry;
-        }
-    }
-    files->count = remaining;
-    files->checkpoint = false;
 }
 
 static int
@@ -267,7 +194,6 @@ CPython_HasOpenPipe(const CPython_Files *state, uint64_t identity)
     if (identity == 0) {
         return false;
     }
-    // A checkpoint can hold the OS descriptor open after Python closes it.
     for (size_t i = 0; i < state->count; ++i) {
         if (state->descriptors[i].pipe == identity) {
             return true;

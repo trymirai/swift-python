@@ -9,7 +9,7 @@ internal import SystemPackage
 // MARK: - Session.History.Store
 
 extension Session.History {
-    // The input index lives outside the checkpointed Python heap.
+    // The session owns input history across interpreter resets.
     final class Store: Sendable {
         let configuration: Session.History
 

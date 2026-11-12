@@ -1,0 +1,224 @@
+--- a/SocketModule.c
++++ b/SocketModule.c
+@@ -831,6 +831,10 @@
+ static int
+ internal_setblocking(PySocketSockObject *s, int block)
+ {
++    // The Python timeout remains logical; native waits stay interruptible.
++    if (CPython_RestrictedFiles()) {
++        block = 0;
++    }
+     int result = -1;
+ #ifdef MS_WINDOWS
+     u_long arg;
+@@ -896,6 +900,10 @@
+     /* must be called with a thread state */
+     _Py_AssertHoldsTstate();
+ 
++    if (CPython_RestrictedFiles()) {
++        return CPython_WaitForSocket(get_sock_fd(s), writing, interval);
++    }
++
+     /* Error condition is for output only */
+     assert(!(connect && !writing));
+ 
+@@ -1015,7 +1023,7 @@
+     while (1) {
+         /* For connect(), poll even for blocking socket. The connection
+            runs asynchronously. */
+-        if (has_timeout || connect) {
++        if (has_timeout || connect || (CPython_RestrictedFiles() && timeout < 0)) {
+             if (has_timeout) {
+                 PyTime_t interval;
+ 
+@@ -1040,6 +1048,12 @@
+                 res = internal_select(s, writing, timeout, connect);
+             }
+ 
++            if (res == -1 && PyErr_Occurred()) {
++                if (err) {
++                    *err = -1;
++                }
++                return -1;
++            }
+             if (res == -1) {
+                 if (err)
+                     *err = GET_SOCK_ERROR;
+@@ -1102,7 +1116,7 @@
+             /* retry sock_func() */
+         }
+ 
+-        if (s->sock_timeout > 0
++        if ((s->sock_timeout > 0 || (CPython_RestrictedFiles() && s->sock_timeout < 0))
+             && (CHECK_ERRNO(EWOULDBLOCK) || CHECK_ERRNO(EAGAIN))) {
+             /* False positive: sock_func() failed with EWOULDBLOCK or EAGAIN.
+ 
+@@ -1166,7 +1180,7 @@
+ #endif
+     {
+         s->sock_timeout = _Py_atomic_load_int64_relaxed(&state->defaulttimeout);
+-        if (s->sock_timeout >= 0) {
++        if (s->sock_timeout >= 0 || CPython_RestrictedFiles()) {
+             if (internal_setblocking(s, 0) == -1) {
+                 return -1;
+             }
+@@ -3773,8 +3787,9 @@
+         wait_connect = (s->sock_timeout != 0 && IS_SELECTABLE(s));
+     }
+     else {
+-        wait_connect = (s->sock_timeout > 0 && err == SOCK_INPROGRESS_ERR
+-                        && IS_SELECTABLE(s));
++        wait_connect = ((s->sock_timeout > 0 ||
++                         (CPython_RestrictedFiles() && s->sock_timeout < 0)) &&
++                        err == SOCK_INPROGRESS_ERR && IS_SELECTABLE(s));
+     }
+ 
+     if (!wait_connect) {
+--- a/SSLModule.c
++++ b/SSLModule.c
+@@ -1,3 +1,20 @@
++#include "interpreter.h"
++
++#if !__has_include(<openssl/ssl.h>)
++#error "OpenSSL headers are required. Enable the OpenSSL trait or supply headers for the target."
++#else
++// Use the system trust store for the upstream _ssl module on Apple platforms.
++#ifdef __APPLE__
++#include "tls/system_trust.h"
++#define SSL_CTX_set_default_verify_paths CPython_SetDefaultVerifyPaths
++#endif
++
++// CPython retains these deprecated OpenSSL APIs for Python compatibility.
++#ifdef __clang__
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++#endif
++
+ /* SSL socket module
+ 
+    SSL support based on patches by Brian E Gallew and Laszlo Kovacs.
+@@ -809,7 +826,7 @@
+     }
+     if (sock != NULL) {
+         /* just in case the blocking state of the socket has been changed */
+-        int nonblocking = (sock->sock_timeout >= 0);
++        int nonblocking = (sock->sock_timeout >= 0 || CPython_RestrictedFiles());
+         BIO_set_nbio(SSL_get_rbio(obj->ssl), nonblocking);
+         BIO_set_nbio(SSL_get_wbio(obj->ssl), nonblocking);
+     }
+@@ -994,7 +1011,7 @@
+     /* If the socket is in non-blocking mode or timeout mode, set the BIO
+      * to non-blocking mode (blocking is the default)
+      */
+-    if (sock && sock->sock_timeout >= 0) {
++    if (sock && (sock->sock_timeout >= 0 || CPython_RestrictedFiles())) {
+         BIO_set_nbio(SSL_get_rbio(self->ssl), 1);
+         BIO_set_nbio(SSL_get_wbio(self->ssl), 1);
+     }
+@@ -1094,6 +1111,9 @@
+             sockstate = SOCKET_OPERATION_OK;
+         }
+ 
++        if (PyErr_Occurred()) {
++            goto error;
++        }
+         if (sockstate == SOCKET_HAS_TIMED_OUT) {
+             PyErr_SetString(PyExc_TimeoutError,
+                             ERRSTR("The handshake operation timed out"));
+@@ -2512,7 +2532,7 @@
+     /* Nothing to do unless we're in timeout mode (not non-blocking) */
+     if ((s == NULL) || (timeout == 0))
+         return SOCKET_IS_NONBLOCKING;
+-    else if (timeout < 0) {
++    else if (timeout < 0 && (!CPython_RestrictedFiles() || s->sock_timeout > 0)) {
+         if (s->sock_timeout > 0)
+             return SOCKET_HAS_TIMED_OUT;
+         else
+@@ -2522,6 +2542,17 @@
+     /* Guard against closed socket */
+     if (s->sock_fd == INVALID_SOCKET)
+         return SOCKET_HAS_BEEN_CLOSED;
++
++    if (CPython_RestrictedFiles()) {
++        int result = CPython_WaitForSocket(s->sock_fd, writing, timeout);
++        if (result < 0) {
++            if (!PyErr_Occurred()) {
++                PyErr_SetFromErrno(PyExc_OSError);
++            }
++            return SOCKET_HAS_BEEN_CLOSED;
++        }
++        return result == 0 ? SOCKET_OPERATION_OK : SOCKET_HAS_TIMED_OUT;
++    }
+ 
+     /* Prefer poll, if available, since you can poll() any fd
+      * which can't be done with select(). */
+@@ -2654,6 +2685,9 @@
+     }
+ 
+     sockstate = PySSL_select(sock, 1, timeout);
++    if (PyErr_Occurred()) {
++        goto error;
++    }
+     switch (sockstate) {
+         case SOCKET_HAS_TIMED_OUT:
+             PyErr_SetString(PyExc_TimeoutError,
+@@ -2701,6 +2735,9 @@
+                 break;
+         }
+ 
++        if (PyErr_Occurred()) {
++            goto error;
++        }
+         if (sockstate == SOCKET_HAS_TIMED_OUT) {
+             PyErr_SetString(PyExc_TimeoutError,
+                             "The sendfile operation timed out");
+@@ -2786,6 +2823,9 @@
+     }
+ 
+     sockstate = PySSL_select(sock, 1, timeout);
++    if (PyErr_Occurred()) {
++        goto error;
++    }
+     if (sockstate == SOCKET_HAS_TIMED_OUT) {
+         PyErr_SetString(PyExc_TimeoutError,
+                         "The write operation timed out");
+@@ -2827,6 +2867,9 @@
+             sockstate = SOCKET_OPERATION_OK;
+         }
+ 
++        if (PyErr_Occurred()) {
++            goto error;
++        }
+         if (sockstate == SOCKET_HAS_TIMED_OUT) {
+             PyErr_SetString(PyExc_TimeoutError,
+                             "The write operation timed out");
+@@ -2989,6 +3032,9 @@
+         else
+             sockstate = SOCKET_OPERATION_OK;
+ 
++        if (PyErr_Occurred()) {
++            goto error;
++        }
+         if (sockstate == SOCKET_HAS_TIMED_OUT) {
+             PyErr_SetString(PyExc_TimeoutError,
+                             "The read operation timed out");
+@@ -3106,6 +3152,9 @@
+         else
+             break;
+ 
++        if (PyErr_Occurred()) {
++            goto error;
++        }
+         if (sockstate == SOCKET_HAS_TIMED_OUT) {
+             if (err.ssl == SSL_ERROR_WANT_READ)
+                 PyErr_SetString(PyExc_TimeoutError,
+@@ -7517,3 +7566,9 @@
+     _PyOpenSSL_SetupMemFunctions();
+     return PyModuleDef_Init(&_sslmodule_def);
+ }
++
++
++#ifdef __clang__
++#pragma clang diagnostic pop
++#endif
++#endif

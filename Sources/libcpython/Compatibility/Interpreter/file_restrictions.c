@@ -28,19 +28,18 @@ CPython_AllowBuiltin(PyObject *name)
         return 0;
     }
 
-    // Review file operations and checkpoint ownership before allowing another native module.
-    // Native code can bypass both the file hooks and the Python allocators.
+    // Review native file access before allowing another module.
     static const char *const allowed[] = {
-        "_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_codecs",
+        "_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs",
         "_codecs_cn", "_codecs_hk", "_codecs_iso2022", "_codecs_jp", "_codecs_kr",
-        "_codecs_tw", "_collections", "_contextvars", "_csv", "_datetime",
-        "_functools", "_heapq", "_imp", "_io", "_json", "_locale", "_math_integer",
+        "_codecs_tw", "_collections", "_contextvars", "_csv", "_datetime", "_elementtree",
+        "_functools", "_hashlib", "_heapq", "_imp", "_io", "_json", "_locale", "_lzma", "_math_integer",
         "_md5", "_multibytecodec", "_opcode", "_operator", "_pickle", "_posixsubprocess",
-        "_queue", "_random", "_scproxy", "_sha1", "_sha2", "_sha3", "_signal", "_socket", "_sre",
-        "_stat", "_string", "_struct", "_suggestions", "_swift_python", "_symtable",
+        "_queue", "_random", "_scproxy", "_sha1", "_sha2", "_sha3", "_signal", "_socket", "_sqlite3", "_sre",
+        "_ssl", "_stat", "_string", "_struct", "_suggestions", "_swift_python", "_symtable",
         "_sysconfig", "_thread", "_tokenize", "_types", "_typing", "_warnings", "_weakref",
         "array", "atexit", "binascii", "builtins", "cmath", "errno", "gc", "itertools",
-        "marshal", "math", "posix", "select", "sys", "time", "unicodedata", "zlib", NULL,
+        "marshal", "math", "posix", "pyexpat", "select", "sys", "time", "unicodedata", "zlib", NULL,
     };
 
     const char *value = PyUnicode_AsUTF8(name);
@@ -74,6 +73,21 @@ allows_posix_method(const char *name, bool allows_subprocesses)
     return listed(name, allowed) || (allows_subprocesses && listed(name, subprocess));
 }
 
+static inline int
+restrict_posix_method(PyObject *dict, PyObject *key, bool allows_subprocesses)
+{
+    PyObject *value = PyDict_GetItemWithError(dict, key);
+    if (value == NULL || !PyCFunction_Check(value)) {
+        return 0;
+    }
+
+    const char *name = PyUnicode_AsUTF8(key);
+    if (name == NULL) {
+        return -1;
+    }
+    return allows_posix_method(name, allows_subprocesses) ? 0 : PyDict_DelItem(dict, key);
+}
+
 int
 CPython_RestrictPOSIXModule(PyObject *module)
 {
@@ -92,13 +106,7 @@ CPython_RestrictPOSIXModule(PyObject *module)
     int result = 0;
     for (Py_ssize_t i = 0; i < PyList_GET_SIZE(keys); ++i) {
         PyObject *key = PyList_GET_ITEM(keys, i);
-        PyObject *value = PyDict_GetItemWithError(dict, key);
-        if (value == NULL || !PyCFunction_Check(value)) {
-            continue;
-        }
-        const char *name = PyUnicode_AsUTF8(key);
-        if (name == NULL ||
-            (!allows_posix_method(name, allows_subprocesses) && PyDict_DelItem(dict, key) < 0)) {
+        if (restrict_posix_method(dict, key, allows_subprocesses) < 0) {
             result = -1;
             break;
         }
@@ -117,8 +125,7 @@ audit_file_access(const char *event, PyObject *args, void *context)
     }
 
     // asyncio imports these modules even in sessions without the capability.
-    if (strncmp(event, "socket.", 7) == 0 ||
-        (strcmp(event, "_posixsubprocess.fork_exec") == 0 && !CPython_AllowsSubprocesses()) ||
+    if ((strcmp(event, "_posixsubprocess.fork_exec") == 0 && !CPython_AllowsSubprocesses()) ||
         strcmp(event, "sys.addaudithook") == 0) {
         CPython_UnsupportedNativeOperation();
         return -1;

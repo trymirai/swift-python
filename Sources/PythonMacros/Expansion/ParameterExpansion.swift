@@ -18,18 +18,7 @@ struct ParameterExpansion {
         owner: String,
         hasReceiver: Bool,
     ) throws {
-        let spelling = parameter.type.trimmedDescription
-        let isMutableSpan = spelling.hasPrefix("inout ") && spelling.contains("MutableSpan<")
-        guard
-            parameter.ellipsis == nil,
-            !spelling.hasPrefix("consuming "),
-            !spelling.hasPrefix("inout ") || isMutableSpan
-        else {
-            throw MacroExpansionErrorMessage(
-                "Python parameters do not support variadics, consuming or general inout arguments.",
-            )
-        }
-
+        let isMutableSpan = try Self.requiresMutableSpan(parameter)
         self.index = index
 
         let type = "(\(parameter.type.concreteSpelling(owner: owner))).self"
@@ -71,5 +60,20 @@ struct ParameterExpansion {
             \(expression)
         }
         """
+    }
+
+    private static func requiresMutableSpan(_ parameter: FunctionParameterSyntax) throws -> Bool {
+        let spelling = parameter.type.trimmedDescription
+        let isMutableSpan = spelling.hasPrefix("inout ") && spelling.contains("MutableSpan<")
+        guard
+            parameter.ellipsis == nil,
+            !spelling.hasPrefix("consuming "),
+            !spelling.hasPrefix("inout ") || isMutableSpan
+        else {
+            throw MacroExpansionErrorMessage(
+                "Python parameters do not support variadics, consuming or general inout arguments.",
+            )
+        }
+        return isMutableSpan
     }
 }

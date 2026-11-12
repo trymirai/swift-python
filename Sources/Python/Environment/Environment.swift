@@ -20,6 +20,7 @@ internal import Musl
 final class Environment {
     private let directory: Runtime.Path?
     let projectDirectory: Runtime.Path?
+
     let requirements: [String]
 
     private let packaging: Service.Lazy
@@ -300,6 +301,10 @@ extension Environment {
             }
         }
     }
+
+    private static func invalid(_ message: String) -> Exception {
+        Exception(name: "ValueError", message: message)
+    }
 }
 
 // MARK: Environment.Storage
@@ -435,9 +440,11 @@ private extension Environment {
             }
         }
     }
+}
 
-    // MARK: Staging cleanup
+// MARK: Environment + Staging cleanup
 
+private extension Environment {
     static func discard(_ path: FilePath) async {
         // A separate task lets cleanup finish after the operation is cancelled.
         _ = await Task { try? await FileSystem.shared.removeItem(at: path) }.value
@@ -456,18 +463,11 @@ private extension Environment {
             throw error
         }
     }
+}
 
-    static func invalid(_ message: String) -> Exception {
-        Exception(name: "ValueError", message: message)
-    }
+// MARK: Environment + Exclusive lease
 
-    static func isWheelDigest(_ name: String) -> Bool {
-        name.utf8.count == 64 && name.utf8
-            .allSatisfy { (48 ... 57).contains($0) || (97 ... 102).contains($0) }
-    }
-
-    // MARK: Exclusive lease
-
+private extension Environment {
     static let leaseMarker: UInt8 = 1
 
     static func isClaimed(_ lease: FileDescriptor) throws -> Bool {
@@ -545,6 +545,11 @@ extension Environment {
                 }
             }
         }
+    }
+
+    private static func isWheelDigest(_ name: String) -> Bool {
+        name.utf8.count == 64 && name.utf8
+            .allSatisfy { (48 ... 57).contains($0) || (97 ... 102).contains($0) }
     }
 
     static func stageFiles(

@@ -64,16 +64,6 @@ extension Reference {
             unsafe Object.decrementReferences(pendingReleases)
         }
 
-        func beginCheckpoint() {
-            state.withLock { $0.beginCheckpoint() }
-        }
-
-        // Finish after the interpreter has restored or committed its memory.
-        func finishCheckpoint(restoring: Bool) {
-            let releases = state.withLock { $0.finishCheckpoint(restoring: restoring) }
-            unsafe Object.decrementReferences(releases)
-        }
-
         func close() {
             let pendingReleases = state.withLock { $0.close() }
             unsafe Object.decrementReferences(pendingReleases)
@@ -93,8 +83,6 @@ private extension Reference.Store {
         var pendingReleases: [UInt] = []
         var isScheduled: Bool = false
 
-        var checkpoint: Checkpoint?
-
         mutating func insert(_ pointer: UInt) -> UInt64? {
             guard isActive else {
                 return nil
@@ -103,11 +91,7 @@ private extension Reference.Store {
             let token = nextToken
             nextToken += 1
 
-            if checkpoint != nil {
-                checkpoint?.pointersByToken[token] = pointer
-            } else {
-                pointersByToken[token] = pointer
-            }
+            pointersByToken[token] = pointer
             return token
         }
 
@@ -115,11 +99,11 @@ private extension Reference.Store {
             guard isActive else {
                 return nil
             }
-            return checkpoint?.pointersByToken[token] ?? pointersByToken[token]
+            return pointersByToken[token]
         }
 
         mutating func enqueueRelease(of token: UInt64) -> Bool {
-            guard let pointer = removeForRelease(token) else {
+            guard let pointer = pointersByToken.removeValue(forKey: token) else {
                 return false
             }
 
@@ -131,54 +115,12 @@ private extension Reference.Store {
             return true
         }
 
-        private mutating func removeForRelease(_ token: UInt64) -> UInt? {
-            if let created = checkpoint?.pointersByToken.removeValue(forKey: token) {
-                return created
-            }
-            guard let pointer = pointersByToken.removeValue(forKey: token) else {
-                return nil
-            }
-
-            if checkpoint != nil {
-                // A baseline reference is still included in the saved refcounts.
-                checkpoint?.releases.append(pointer)
-                return nil
-            }
-            return pointer
-        }
-
         mutating func takePendingReleases() -> [UInt] {
             isScheduled = false
             return exchange(&pendingReleases, with: [])
         }
 
-        mutating func beginCheckpoint() {
-            precondition(isActive && checkpoint == nil)
-            // Pending releases still contribute to the saved refcounts.
-            let releases = takePendingReleases()
-            checkpoint = Checkpoint(releases: releases)
-        }
-
-        mutating func finishCheckpoint(restoring: Bool) -> [UInt] {
-            guard var saved = exchange(&checkpoint, with: nil) else {
-                preconditionFailure("A Python reference checkpoint is not active.")
-            }
-
-            let pending = takePendingReleases()
-
-            // Rollback already undoes the retains made during the block.
-            if restoring {
-                return saved.releases
-            }
-            pointersByToken.merge(saved.pointersByToken) { _, _ in
-                preconditionFailure("A Python reference token cannot be reused.")
-            }
-            saved.releases.append(contentsOf: pending)
-            return saved.releases
-        }
-
         mutating func close() -> [UInt] {
-            precondition(checkpoint == nil)
             isActive = false
 
             let active = exchange(&pointersByToken, with: [:])
@@ -186,14 +128,5 @@ private extension Reference.Store {
             releases.insert(contentsOf: active.values, at: 0)
             return releases
         }
-    }
-}
-
-// MARK: - Reference.Store.Checkpoint
-
-private extension Reference.Store {
-    struct Checkpoint {
-        var pointersByToken: [UInt64: UInt] = [:]
-        var releases: [UInt]
     }
 }

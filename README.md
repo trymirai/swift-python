@@ -87,8 +87,12 @@ With history enabled, `session.reserve()` reserves a number before execution.
 Pass it to `evaluate(..., reservation:)`. Reservations are single-use; unused numbers
 remain gaps. Reset preserves input history, numbering and outstanding reservations.
 
-Pass `transactional: true` when creating a session to restore Python state after a failed or
-interrupted evaluation. File changes persist.
+Changes made before an error or interruption remain in the session, including variables,
+mutated objects and file positions. Use `reset()` to start a fresh interpreter.
+
+`evaluate(..., committing:)` publishes prepared host changes after Python and its callbacks
+succeed. Call `Commit.seal()` immediately before publication. A publication failure preserves
+Python state; the host owns recovery of its external changes.
 
 Run slow, synchronous Python calls outside the main actor and limit concurrent calls.
 

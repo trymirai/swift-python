@@ -8,11 +8,11 @@ internal import libcpython
 
 extension Object {
     private final class Callback {
+        let body: any Callable
+
         init(_ body: any Callable) {
             self.body = body
         }
-
-        let body: any Callable
     }
 }
 

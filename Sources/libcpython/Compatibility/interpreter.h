@@ -8,23 +8,17 @@
 
 PyStatus CPython_InitializeRuntime(void);
 
-typedef struct CPython_Heap CPython_Heap;
-
-// Create a detached interpreter. Request a heap to track its allocations for checkpoints.
-PyStatus CPython_NewThreadState(PyThreadState *_Nullable *_Nonnull state,
-                                CPython_Heap *_Nullable *_Nullable heap);
-void CPython_EndThreadState(PyThreadState *_Nonnull state, CPython_Heap *_Nullable heap);
-void CPython_AttachThreadState(PyThreadState *_Nonnull state, CPython_Heap *_Nullable heap);
+// Create a detached interpreter with its own namespace and GIL.
+PyStatus CPython_NewThreadState(PyThreadState *_Nullable *_Nonnull state);
+void CPython_EndThreadState(PyThreadState *_Nonnull state);
+void CPython_AttachThreadState(PyThreadState *_Nonnull state);
 void CPython_DetachThreadState(void);
+
 PyInterpreterView *_Nullable CPython_NewInterpreterView(PyThreadState *_Nonnull state);
 uintptr_t CPython_InterpreterKey(PyThreadState *_Nullable state);
 
-CPython_Heap *_Nullable CPython_BindHeap(CPython_Heap *_Nullable heap);
 void *_Nullable CPython_SetScope(void *_Nullable scope);
 void *_Nullable CPython_CurrentScope(void);
-
-int CPython_BeginCheckpoint(void);
-void CPython_FinishCheckpoint(bool restoring);
 
 PyObject *_Nullable CPython_Call3(PyObject *_Nonnull function, PyObject *_Nonnull first,
                                   PyObject *_Nonnull second, PyObject *_Nonnull third);
@@ -46,9 +40,13 @@ typedef struct {
 } CPython_Evaluation;
 
 CPython_Evaluation *_Nullable CPython_SetEvaluation(CPython_Evaluation *_Nullable evaluation);
+int CPython_CheckEvaluation(void);
+
 void CPython_InterruptThreadState(PyThreadState *_Nonnull state);
 bool CPython_TakeThreadInterruption(void);
 void CPython_RequestEvaluationInterrupt(PyInterpreterState *_Nonnull interpreter);
+
+int CPython_WaitForSocket(int fd, bool writing, int64_t timeout);
 
 void CPython_RaiseSwiftError(const char *_Nonnull name, const char *_Nonnull message);
 void CPython_RaiseKeyboardInterrupt(void);

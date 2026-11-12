@@ -177,7 +177,9 @@ def configure(
         with capture(control, streams) as (stdout, stderr):
             # Restore argv even if interactive code rebinds it.
             previous_argv = sys.argv
+
             failure = ""
+
             captured_result = None
             previous_displayhook = None
             display_hook = None
@@ -200,26 +202,23 @@ def configure(
 
                         sys.displayhook = display_hook
 
-                    code = compile(
-                        ast.Interactive(body=tree.body),
-                        filename,
-                        "single",
-                        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
-                        dont_inherit=True,
-                    )
+                    compiled_source = ast.Interactive(body=tree.body)
+                    mode = "single"
                 else:
                     namespace["__name__"] = "__main__"
                     namespace["__file__"] = filename
                     sys.argv = [filename, *arguments]
 
-                    code = compile(
-                        source,
-                        filename,
-                        "exec",
-                        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
-                        dont_inherit=True,
-                    )
+                    compiled_source = source
+                    mode = "exec"
 
+                code = compile(
+                    compiled_source,
+                    filename,
+                    mode,
+                    flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+                    dont_inherit=True,
+                )
                 run_code(code, source, filename, namespace, control)
                 if display_hook is not None and getattr(sys, "displayhook", None) is display_hook:
                     history.remember(number, captured_result)

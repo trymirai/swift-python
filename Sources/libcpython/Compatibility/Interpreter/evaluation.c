@@ -70,3 +70,9 @@ CPython_CallInterruptibly(PyObject *function, PyObject *const *arguments, size_t
     CPython_SetEvaluation(previous);
     return result;
 }
+
+int
+CPython_CheckEvaluation(void)
+{
+    return deliver_interrupt(NULL);
+}

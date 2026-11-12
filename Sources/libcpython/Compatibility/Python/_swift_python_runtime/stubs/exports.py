@@ -37,12 +37,7 @@ def render_function(
     overload = annotations.import_module("typing", preferred="_typing") + ".overload"
     lines = []
     for count in range(len(parameters) + 1):
-        arguments = ["self"] if receiver else []
-        arguments += [_parameter(p, default=False) for p in parameters[:count]]
-        if count:
-            arguments.append("/")
-        if count < len(parameters):
-            arguments += ["*", *(_parameter(p) for p in parameters[count:])]
+        arguments = _overload_parameters(parameters, count, receiver)
         if lines:
             lines.append("")
         lines += function(
@@ -55,6 +50,16 @@ def render_function(
         )
 
     return lines
+
+
+def _overload_parameters(parameters, count: int, receiver: bool) -> list[str]:
+    arguments = ["self"] if receiver else []
+    arguments += [_parameter(p, default=False) for p in parameters[:count]]
+    if count:
+        arguments.append("/")
+    if count < len(parameters):
+        arguments += ["*", *(_parameter(p) for p in parameters[count:])]
+    return arguments
 
 
 def _parameter(parameter, *, default: bool = True) -> str:

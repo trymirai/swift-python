@@ -10,22 +10,15 @@ internal import libcpython
 @safe
 struct PThread: ~Copyable {
     private let pointer: UnsafeMutablePointer<PyThreadState>
-    private let heap: OpaquePointer?
 
     let storage: Interpreter.Storage
 
     init(
-        transactional: Bool = false,
         fileAccess: Interpreter.FileAccess? = nil,
         scheduleRelease: @escaping @Sendable () -> Void = {},
     ) throws {
         var pointer: UnsafeMutablePointer<PyThreadState>?
-        var heap: OpaquePointer?
-        let status = if transactional {
-            unsafe CPython_NewThreadState(&pointer, &heap)
-        } else {
-            unsafe CPython_NewThreadState(&pointer, nil)
-        }
+        let status = unsafe CPython_NewThreadState(&pointer)
         guard unsafe PyStatus_Exception(status) == 0, let pointer = unsafe pointer else {
             throw Runtime.Failure(unsafe Self.message(
                 status,
@@ -38,27 +31,25 @@ struct PThread: ~Copyable {
             let view = unsafe try Interpreter.View(state: pointer)
             storage = unsafe Interpreter.Storage(
                 key: CPython_InterpreterKey(pointer),
-                heap: heap,
                 view: view,
                 fileAccess: fileAccess,
                 schedule: scheduleRelease,
             )
         } catch {
-            unsafe CPython_EndThreadState(pointer, heap)
+            unsafe CPython_EndThreadState(pointer)
             throw error
         }
 
         unsafe self.pointer = pointer
-        unsafe self.heap = heap
         self.storage = storage
     }
 
     deinit {
         storage.withFileAccess {
-            unsafe CPython_AttachThreadState(pointer, heap)
+            unsafe CPython_AttachThreadState(pointer)
             storage.close()
             CPython_DetachThreadState()
-            unsafe CPython_EndThreadState(pointer, heap)
+            unsafe CPython_EndThreadState(pointer)
         }
         storage.unregister()
     }
@@ -79,7 +70,7 @@ struct PThread: ~Copyable {
         _ body: (borrowing Attachment) throws -> Result,
     ) rethrows -> Result {
         precondition(unsafe PyThreadState_GetUnchecked() == nil)
-        unsafe CPython_AttachThreadState(pointer, heap)
+        unsafe CPython_AttachThreadState(pointer)
         defer { CPython_DetachThreadState() }
 
         return try Scope.run(storage: storage, execution: execution) { scope in

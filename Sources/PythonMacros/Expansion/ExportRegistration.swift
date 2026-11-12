@@ -20,12 +20,7 @@ struct ExportRegistration {
         definition: String,
         in context: some MacroExpansionContext,
     ) {
-        // Swift 6.4 gives overloaded declarations the same expansion-name base.
-        // Include their source signature so each registration has a distinct name.
-        var signature: UInt64 = 14_695_981_039_346_656_037
-        for byte in method.signature.trimmedDescription.utf8 {
-            signature = (signature ^ UInt64(byte)) &* 1_099_511_628_211
-        }
+        let signature = Self.signatureHash(method.signature.trimmedDescription)
         self.init(
             name: method.name.text + "_" + String(signature, radix: 16),
             definition: definition,
@@ -70,5 +65,15 @@ struct ExportRegistration {
         }
         #endif
         """
+    }
+
+    private static func signatureHash(_ signature: String) -> UInt64 {
+        // Swift 6.4 gives overloads the same expansion-name base. FNV-1a keeps
+        // registration names distinct and stable across compiler processes.
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in signature.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
+        }
+        return hash
     }
 }

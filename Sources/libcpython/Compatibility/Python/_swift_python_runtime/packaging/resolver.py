@@ -60,6 +60,7 @@ class Provider(AbstractProvider):
         self.pinned = pinned
 
         self.wheels = WheelCache(configuration.cache)
+
         self._index_cache = {}
         self._wheel_metadata = {}
 
@@ -82,6 +83,28 @@ class Provider(AbstractProvider):
             and requirement.extras.issubset(candidate.extras)
             and requirement.specifier.contains(candidate.version, prereleases=None)
         )
+
+    def find_matches(self, identifier: str, requirements, incompatibilities):
+        # The resolver can advance before it starts consuming the returned generator.
+        requirements = list(requirements[identifier])
+        extras = frozenset(extra for requirement in requirements for extra in requirement.extras)
+        excluded = set(incompatibilities[identifier])
+
+        return self._matching_candidates(identifier, extras, requirements, excluded)
+
+    def get_dependencies(self, candidate: Candidate) -> list[Requirement]:
+        distribution = candidate.distribution
+        if isinstance(distribution, Wheel):
+            metadata = self._metadata(distribution)
+            if not supports_python(metadata.get("Requires-Python")):
+                # An impossible requirement makes resolvelib reject this wheel and try another.
+                return [Requirement(candidate.name + "==0,!=0")]
+
+            values = metadata.get_all("Requires-Dist", [])
+        else:
+            values = self.configuration.base[candidate.name]["requires"]
+
+        return _dependencies_for_extras(values, candidate.extras)
 
     def _index_files(self, name: str) -> list[dict]:
         cached = self._index_cache.get(name)
@@ -158,14 +181,6 @@ class Provider(AbstractProvider):
         )
         yield from (Candidate(wheel, extras) for wheel in wheels)
 
-    def find_matches(self, identifier: str, requirements, incompatibilities):
-        # The resolver can advance before it starts consuming the returned generator.
-        requirements = list(requirements[identifier])
-        extras = frozenset(extra for requirement in requirements for extra in requirement.extras)
-        excluded = set(incompatibilities[identifier])
-
-        return self._matching_candidates(identifier, extras, requirements, excluded)
-
     def _matching_candidates(
         self,
         name: str,
@@ -187,20 +202,6 @@ class Provider(AbstractProvider):
             metadata = self.wheels.metadata(wheel)
             self._wheel_metadata[wheel.digest] = metadata
         return metadata
-
-    def get_dependencies(self, candidate: Candidate) -> list[Requirement]:
-        distribution = candidate.distribution
-        if isinstance(distribution, Wheel):
-            metadata = self._metadata(distribution)
-            if not supports_python(metadata.get("Requires-Python")):
-                # An impossible requirement makes resolvelib reject this wheel and try another.
-                return [Requirement(candidate.name + "==0,!=0")]
-
-            values = metadata.get_all("Requires-Dist", [])
-        else:
-            values = self.configuration.base[candidate.name]["requires"]
-
-        return _dependencies_for_extras(values, candidate.extras)
 
 
 def _prepare_distribution(cache: WheelCache, wheel: Wheel) -> dict:
@@ -294,6 +295,7 @@ def _changes_installed_wheels(wheels: dict[str, Wheel], installed: dict) -> bool
 
 def prepare(request: dict, configuration: Configuration) -> dict:
     overrides, pinned = _select_overrides(request, configuration.base)
+
     installed = request["installed"]
     requirements = request["requirements"] + request["local"]
     fingerprint = _resolution_fingerprint(requirements, configuration, overrides)

@@ -187,6 +187,7 @@ private final class EscapedCallback: Sendable {
         continuation: AsyncStream<Void>.Continuation,
     ) = AsyncStream<Void>
         .makeStream()
+
     let task: Mutex<Task<Int, any Swift::Error>?> = .init(nil)
 
     init(session: Python::Session? = nil) {
@@ -202,12 +203,11 @@ private final class EscapedCallback: Sendable {
     }
 }
 
-@Test(arguments: [false, true])
-func nativeMembersWorkAcrossSwiftCallbackSuspension(transactional: Bool) async throws {
+@Test
+func nativeMembersWorkAcrossSwiftCallbackSuspension() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(
         modules: [CallbackAccess.self],
-        transactional: transactional,
     )
     defer { await session.close() }
     let result = try await session.evaluate("""
@@ -255,9 +255,9 @@ func synchronousCallbacksCannotInheritAnotherSessionsExport() async throws {
 }
 
 @Test
-func nativeCallbackMutationsRollBack() async throws {
+func nativeCallbackMutationsRemainAfterFailure() async throws {
     let runtime = try await Python::Runtime()
-    let session = try await runtime.session(modules: [CallbackAccess.self], transactional: true)
+    let session = try await runtime.session(modules: [CallbackAccess.self])
     defer { await session.close() }
     _ = try await session.evaluate("""
     from callback_access import Counter, inspect
@@ -268,12 +268,12 @@ func nativeCallbackMutationsRollBack() async throws {
     await #expect(throws: Python::ExecutionError.self) {
         try await session.evaluate("""
         assert await inspect(date, counter) == [2026, 11, 8]
-        raise ValueError("rollback")
+        raise ValueError("state remains")
         """)
     }
     let result = try await session.evaluate("""
-    assert counter.value == 7
-    assert await inspect(date, counter) == [2026, 11, 8]
+    assert counter.value == 8
+    assert await inspect(date, counter) == [2026, 11, 9]
     """)
     #expect(result.end == .finished)
 }
@@ -332,7 +332,7 @@ func nativeCallbackAccessUsesTheFileDelegate(allowed: Bool) async throws {
 func interruptionReachesEveryAttachedThread(timeout: Bool) async throws {
     let signal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(2))
     let runtime = try await Python::Runtime()
-    let session = try await runtime.session(modules: [CallbackAccess.self], transactional: true)
+    let session = try await runtime.session(modules: [CallbackAccess.self])
     defer { await session.close() }
     try await session.initialize()
     let evaluation = Task {
@@ -356,7 +356,7 @@ func interruptionReachesEveryAttachedThread(timeout: Bool) async throws {
     }
     let interrupted = try await evaluation.value
     #expect(interrupted.end == (timeout ? .timedOut : .stopped))
-    let next = try await session.evaluate("assert 'Runner' not in globals()")
+    let next = try await session.evaluate("assert 'Runner' in globals()")
     #expect(next.end == .finished)
 }
 
@@ -365,7 +365,7 @@ func synchronousSwiftExportsUseTaskCancellation(timeout: Bool) async throws {
     let signal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
 
     let runtime = try await Python::Runtime()
-    let session = try await runtime.session(modules: [CallbackAccess.self], transactional: true)
+    let session = try await runtime.session(modules: [CallbackAccess.self])
     defer { await session.close() }
     try await session.initialize()
 

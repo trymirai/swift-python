@@ -20,14 +20,12 @@ struct Interpreter: ~Copyable {
         importPaths: [String],
         modules: [Module],
         packages: [Runtime.PackageSource.Resolved],
-        transactional: Bool,
         history: Session.History.Store?,
         scheduleRelease: @escaping @Sendable () -> Void,
         session: Session,
         delegate: (any Session.Delegate)?,
     ) throws {
         let pThread = try PThread(
-            transactional: transactional,
             fileAccess: try FileAccess(
                 importPaths: importPaths,
                 packages: packages,

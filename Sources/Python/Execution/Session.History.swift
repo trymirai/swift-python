@@ -9,15 +9,15 @@ import Synchronization
 public extension Session {
     /// A single-use history number for an interactive evaluation in this session.
     final class Reservation: Sendable {
-        init(number: Int, history: History.Store) {
-            self.number = number
-            self.history = history
-        }
-
         public let number: Int
 
         private let history: History.Store
         private let isConsumed: Mutex<Bool> = .init(false)
+
+        init(number: Int, history: History.Store) {
+            self.number = number
+            self.history = history
+        }
 
         func claim(in history: History.Store) throws -> Int {
             guard self.history === history else {

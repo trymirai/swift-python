@@ -15,6 +15,7 @@ public struct Context: Sendable {
     private weak var session: Session?
 
     private weak var execution: Session.Control?
+
     private(set) weak var streams: Session.Stream.Descriptors?
 
     init(storage: Interpreter.Storage) {
@@ -192,7 +193,7 @@ extension Context {
             return try PThread.Scope
                 .run(storage: storage, execution: execution, streams: streams) { scope in
                     try storage.withFileAccess {
-                        unsafe try withThreadState(in: storage, guardedBy: guardPointer) {
+                        unsafe try withThreadState(guardedBy: guardPointer) {
                             try withAttachedContext(in: scope, body)
                         }
                     }
@@ -215,17 +216,14 @@ extension Context {
 
     @unsafe
     private func withThreadState<Result: ~Copyable>(
-        in storage: Interpreter.Storage,
         guardedBy guardPointer: OpaquePointer,
         _ body: () throws -> Result,
     ) throws -> Result {
         guard let token = unsafe PyThreadState_Ensure(guardPointer) else {
             throw Runtime.Failure("Unable to attach to the Python interpreter.")
         }
-        let previousHeap = unsafe CPython_BindHeap(storage.heap)
         defer {
             unsafe PyThreadState_Release(token)
-            _ = unsafe CPython_BindHeap(previousHeap)
         }
         return try body()
     }

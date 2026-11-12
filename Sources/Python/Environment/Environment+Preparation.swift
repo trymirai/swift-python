@@ -83,12 +83,18 @@ extension Environment {
         let preparation = try await service.request(request, execution: execution)
         try execution.checkInterruption()
 
-        func publish(_ resolution: Preparation.Resolution?) async throws {
-            let next = previous.updating(local: local.byName, resolution: resolution)
-            guard next != previous else {
-                return
-            }
+        let resolution: Preparation.Resolution?
+        switch preparation {
+        case .unchanged:
+            resolution = nil
+        case .requiresReset:
+            return .requiresReset
+        case let .resolved(value):
+            resolution = value
+        }
 
+        let next = previous.updating(local: local.byName, resolution: resolution)
+        if next != previous {
             let replacesFiles = !next.hasSameWheels(as: previous)
             try await save(
                 next,
@@ -97,15 +103,6 @@ extension Environment {
                 configuration: configuration,
                 execution: execution,
             )
-        }
-
-        switch preparation {
-        case .unchanged:
-            try await publish(nil)
-        case .requiresReset:
-            return .requiresReset
-        case let .resolved(resolution):
-            try await publish(resolution)
         }
         return .applied
     }

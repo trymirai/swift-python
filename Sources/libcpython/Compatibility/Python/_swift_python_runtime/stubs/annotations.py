@@ -22,6 +22,7 @@ class Annotations:
     def __init__(self, module: str, names: set[str]) -> None:
         self.module = module
         self.names = names
+
         self._source_imports = []
         self._module_aliases = {}
         self._imports = {}

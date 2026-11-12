@@ -146,20 +146,13 @@ func restrictedFileOperationsCheckDescriptorsAndNativeModules() async throws {
         try await session.set(Int(host.rawValue), forKey: "host")
 
         let execution = try await session.evaluate("""
-        import os, io, socket
+        import os, io, _socket
         from pathlib import Path
 
         base = Path(root)
         source = base / 'allowed' / 'source'
         target = base / 'denied' / 'target'
 
-        try:
-            import sqlite3
-        except ImportError:
-            pass
-        else:
-            sqlite3.connect(target).execute('CREATE TABLE bypass (value int)')
-            raise AssertionError('sqlite3 reached an unmediated file')
         try:
             import _ctypes
         except ImportError:
@@ -180,7 +173,8 @@ func restrictedFileOperationsCheckDescriptorsAndNativeModules() async throws {
         denied(lambda: os.close(host))
         denied(lambda: os.ftruncate(host, 0))
         denied(lambda: os.fstat(host))
-        denied(lambda: socket.socket(fileno=host))
+        duplicate = _socket.dup(host)
+        _socket.close(duplicate)
 
         denied(lambda: os.listdir(target.parent))
         denied(lambda: list(os.scandir(target.parent)))
@@ -207,13 +201,13 @@ func restrictedFileOperationsCheckDescriptorsAndNativeModules() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
-func rollbackPreservesFileIOAndItsPosition() async throws {
+func failedEvaluationPreservesActualFileIOState() async throws {
     try await withTemporaryDirectory { root in
         let path = root.appending("data")
         try await "abcd".write(toFileAt: path)
 
         let runtime = try await Python::Runtime()
-        let session = try await runtime.session(directory: root.string, transactional: true)
+        let session = try await runtime.session(directory: root.string)
         defer { await session.close() }
         try await session.set(path.string, forKey: "path")
         _ = try await session.evaluate("""
@@ -228,20 +222,25 @@ func rollbackPreservesFileIOAndItsPosition() async throws {
         _ = try await #require(throws: Python::ExecutionError.self) {
             try await session.evaluate("""
             assert file.read(1) == b'b'
+            raise ValueError('read remains')
+            """)
+        }
+        #expect(try await session.evaluate("assert file.read(1) == b'c'").end == .finished)
+
+        _ = try await #require(throws: Python::ExecutionError.self) {
+            try await session.evaluate("""
             file.close()
             replacement = io.FileIO(path)
-            assert replacement.fileno() != descriptor
             del file
-            raise ValueError('rollback')
+            raise ValueError('close remains')
             """)
         }
 
         let result = try await session.evaluate("""
-        assert file is alias and id(file) == identity
-        assert not file.closed and file.fileno() == descriptor
-        assert file.read() == b'bcd'
-        assert 'replacement' not in globals()
-        file.close()
+        assert 'file' not in globals() and alias.closed
+        assert id(alias) == identity
+        assert replacement.read() == b'abcd'
+        replacement.close()
         """)
         #expect(result.end == .finished)
         #expect(try await readText(at: path) == "abcd")

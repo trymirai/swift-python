@@ -14,6 +14,8 @@ struct CPython_Subprocess {
     CPython_Subprocess *next;
 };
 
+// The interpreter thread admits and reaps children. Interruption threads only
+// signal them under the lock while the interpreter can be blocked in read or waitid.
 struct CPython_Subprocesses {
     pthread_mutex_t lock;
 
@@ -23,8 +25,6 @@ struct CPython_Subprocesses {
 
 static _Thread_local CPython_Subprocesses *current;
 
-// The interpreter thread alone admits and reaps children. The interruption
-// thread can signal them while the interpreter is blocked in read or waitid.
 CPython_Subprocesses *
 CPython_NewSubprocesses(void)
 {
@@ -230,14 +230,22 @@ child_is_running(pid_t pid)
     return result == 0 && info.si_pid == 0;
 }
 
+static inline bool
+child_has_open_pipe(const CPython_Subprocess *child, const CPython_Files *files)
+{
+    for (size_t i = 0; i < 3; ++i) {
+        if (CPython_HasOpenPipe(files, child->pipes[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool
 CPython_SubprocessesHaveOpenPipes(CPython_Subprocesses *scope, const CPython_Files *files)
 {
     for (CPython_Subprocess *child = scope->children; child != NULL; child = child->next) {
-        bool has_pipes = CPython_HasOpenPipe(files, child->pipes[0]) ||
-                         CPython_HasOpenPipe(files, child->pipes[1]) ||
-                         CPython_HasOpenPipe(files, child->pipes[2]);
-        if (has_pipes && child_is_running(child->pid)) {
+        if (child_has_open_pipe(child, files) && child_is_running(child->pid)) {
             return true;
         }
     }

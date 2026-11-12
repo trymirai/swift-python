@@ -40,10 +40,6 @@ public extension Object {
             }
         }
 
-        func restoreWrapper(_ wrapper: WeakReference?) {
-            state.withLock { $0.wrapper = wrapper.map(Wrapper.bound) ?? .unbound }
-        }
-
         func bind(_ wrapper: WeakReference) throws {
             try state.withLock { try $0.wrapper.bind(wrapper) }
         }

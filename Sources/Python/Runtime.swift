@@ -4,6 +4,9 @@
 
 /// A handle to the process-wide embedded Python runtime.
 public struct Runtime: Sendable {
+    let packaging: Environment.Service.Lazy
+    private let options: Options
+
     private static let startup: Task<Void, any Swift::Error> = .detached {
         let session = Session(
             executor: try Interpreter.Executor(),
@@ -13,13 +16,6 @@ public struct Runtime: Sendable {
         )
         try await session.initializeRuntime()
     }
-
-    static func initialize() async throws {
-        try await startup.value
-    }
-
-    let packaging: Environment.Service.Lazy
-    private let options: Options
 
     /// Creates a runtime with immutable application packages and a shared wheel cache.
     public init(
@@ -66,8 +62,8 @@ public struct Runtime: Sendable {
     /// `directory` and `importPaths` grant read access alongside project and package roots.
     /// The delegate decides other access. Relative OS paths use the process working directory.
     ///
-    /// Transactional evaluation restores Python state and the positions of session-owned
-    /// descriptors after failure or interruption. Filesystem mutations persist across rollback.
+    /// Changes made before an error or interruption remain in the Python namespace.
+    /// Filesystem and native resource operations take effect immediately.
     public func session(
         _ startup: Session.Startup = .source(""),
         directory: String? = nil,
@@ -75,7 +71,6 @@ public struct Runtime: Sendable {
         packages: [PackageSource] = [],
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
-        transactional: Bool = false,
         history: Session.History? = nil,
         delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
@@ -87,7 +82,6 @@ public struct Runtime: Sendable {
             importPaths: importPaths,
             modules: modules,
             moduleDefinitions: [],
-            transactional: transactional,
             history: history,
             delegate: delegate,
         )
@@ -101,7 +95,6 @@ public struct Runtime: Sendable {
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
         moduleDefinitions: [Module],
-        transactional: Bool = false,
         history: Session.History? = nil,
         delegate: (any Session.Delegate)? = nil,
     ) async throws -> Session {
@@ -113,7 +106,6 @@ public struct Runtime: Sendable {
             packages: packages.map { try $0.resolved() },
             importPaths: importPaths.map(Path.init),
             modules: definitions,
-            transactional: transactional,
             history: history,
             delegate: delegate,
         )
@@ -126,7 +118,6 @@ public struct Runtime: Sendable {
         packages: [PackageSource.Resolved] = [],
         importPaths: [Path],
         modules: [Module],
-        transactional: Bool = false,
         history: Session.History? = nil,
         requirements: [String] = [],
         delegate: (any Session.Delegate)?,
@@ -155,7 +146,6 @@ public struct Runtime: Sendable {
             importPaths: importPaths,
             modules: modules,
             startup: startup,
-            transactional: transactional,
             history: history,
             allowsSubprocesses: options.contains(.subprocesses),
             environment: environment,
@@ -181,6 +171,10 @@ public struct Runtime: Sendable {
                 execution: execution,
             )
         }
+    }
+
+    static func initialize() async throws {
+        try await startup.value
     }
 
     func withPackageService<Result>(

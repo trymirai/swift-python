@@ -13,8 +13,8 @@ import Testing
 @Suite(.timeLimit(.minutes(2)))
 struct SubprocessTests {
     @Test
-    func capturesOutputInATransaction() async throws {
-        let session = try await transactionalSession()
+    func capturesOutput() async throws {
+        let session = try await subprocessSession()
         defer { await session.close() }
 
         let execution = try await session.evaluate(
@@ -68,7 +68,7 @@ struct SubprocessTests {
     func waitsForChildrenBeforePublishing() async throws {
         try await withTemporaryDirectory { directory in
             let output = directory.appending("child.txt")
-            let session = try await transactionalSession()
+            let session = try await subprocessSession()
             defer { await session.close() }
 
             try await session.set(output.string, forKey: "path")
@@ -93,7 +93,7 @@ struct SubprocessTests {
 
     @Test
     func stopsWaitingAtTheExecutionDeadline() async throws {
-        let session = try await transactionalSession()
+        let session = try await subprocessSession()
         defer { await session.close() }
 
         _ = try await session.evaluate("import subprocess")
@@ -114,7 +114,7 @@ struct SubprocessTests {
 
     @Test
     func cancellingTheTaskStopsTheProcessGroup() async throws {
-        let session = try await transactionalSession()
+        let session = try await subprocessSession()
         defer { await session.close() }
 
         let (started, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -150,7 +150,7 @@ struct SubprocessTests {
 
     @Test
     func rejectsReturningWithALiveChildAndOpenPipe() async throws {
-        let session = try await transactionalSession()
+        let session = try await subprocessSession()
         defer { await session.close() }
 
         do {
@@ -167,8 +167,8 @@ struct SubprocessTests {
         #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")
     }
 
-    private func transactionalSession() async throws -> Session {
-        try await Runtime(options: [.subprocesses]).session(transactional: true)
+    private func subprocessSession() async throws -> Session {
+        try await Runtime(options: [.subprocesses]).session()
     }
 }
 

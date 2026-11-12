@@ -14,14 +14,12 @@ extension Interpreter {
         private static let registry: Mutex<[UInt: UInt]> = .init([:])
 
         let key: UInt
-        let heap: OpaquePointer?
         let references: Reference.Store
 
         let fileAccess: Interpreter.FileAccess?
         weak var session: Session?
 
         private var isClosed: Bool = false
-        var checkpoint: CheckpointState = .inactive
 
         var namespace: Reference?
         var classRegistry: Interpreter.ClassRegistry?
@@ -30,6 +28,7 @@ extension Interpreter {
         private var nextCallID: Int = 0
 
         var arrayType: Reference?
+
         private var borrowedBuffers: [BufferBorrow] = []
         private var nextBorrowID: UInt64 = 0
 
@@ -43,13 +42,11 @@ extension Interpreter {
 
         init(
             key: UInt,
-            heap: OpaquePointer?,
             view: Interpreter.View,
             fileAccess: Interpreter.FileAccess?,
             schedule: @escaping @Sendable () -> Void,
         ) {
             self.key = key
-            unsafe self.heap = heap
             self.fileAccess = fileAccess
             self.references = Reference.Store(view: view, schedule: schedule)
 
@@ -96,26 +93,12 @@ extension Interpreter {
         }
 
         private func checkReentry() throws {
-            guard checkpoint != .settling else {
-                throw Exception(
-                    name: "RuntimeError",
-                    message: "The interpreter is restoring its execution state.",
-                )
-            }
-
             guard borrowedBuffers.isEmpty else {
                 throw Exception(
                     name: "RuntimeError",
                     message: "Python reentry is unavailable while a buffer is borrowed.",
                 )
             }
-        }
-
-        func settleCheckpoint(_ body: () -> Void) {
-            precondition(checkpoint == .active)
-            checkpoint = .settling
-            body()
-            checkpoint = .inactive
         }
 
         func allocateCallID() -> Session.Control.CallID {
@@ -279,15 +262,5 @@ private extension Interpreter.Storage {
             }
             return other - address < byteCount
         }
-    }
-}
-
-// MARK: - Interpreter.Storage.CheckpointState
-
-extension Interpreter.Storage {
-    enum CheckpointState {
-        case inactive
-        case active
-        case settling
     }
 }

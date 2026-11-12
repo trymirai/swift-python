@@ -44,7 +44,7 @@ public extension Session {
         )
     }
 
-    /// Calls the host after a transactional block and its Swift callbacks finish.
+    /// Calls the host after a successful block and its Swift callbacks finish.
     /// Call `Commit.seal()` immediately before publishing external changes.
     /// If publication fails after sealing, restore those changes before throwing.
     nonisolated func evaluate(
@@ -143,21 +143,9 @@ extension Session {
         output: Control.OutputHandler?,
         committing: (@Sendable (Commit) async throws -> Void)? = nil,
     ) async throws -> Execution {
-        guard committing == nil || transactional else {
-            throw Runtime.Failure("A host commit requires a transactional Python session.")
-        }
+        let reservedNumber = try claim(reservation, for: source, recordingHistory: recordingHistory)
 
-        let reservedNumber: Int?
-        if let reservation {
-            guard recordingHistory, case .interactive = source, let history else {
-                throw Runtime.Failure("A reservation requires recorded interactive input.")
-            }
-            reservedNumber = try reservation.claim(in: history)
-        } else {
-            reservedNumber = nil
-        }
-
-        let settlement = transactional ? Self.checkpointSettlement(committing: committing) : nil
+        let settlement = committing.map(Self.publicationSettlement)
         let number = Mutex<Int?>(reservedNumber)
         return try await withExecution(
             in: context,
@@ -176,29 +164,50 @@ extension Session {
                 redirecting: redirects,
                 number: number,
             )
-            let number = number.withLock { $0 }
-            do {
-                return try session.withInterpreter(execution: execution) { interpreter in
-                    if session.transactional {
-                        try interpreter.beginCheckpoint()
-                    }
+            return try session.evaluate(
+                source,
+                filename: filename,
+                number: number.withLock { $0 },
+                redirecting: redirects,
+                execution: execution,
+            )
+        }
+    }
 
-                    let captured = try interpreter.evaluate(
-                        source,
-                        filename: filename,
-                        number: number,
-                        redirecting: redirects,
-                        execution: execution,
-                    )
-                    return Execution(output: captured, end: .finished, number: number)
-                }
-            } catch let error as ExecutionError {
-                throw ExecutionError(
-                    traceback: error.traceback,
-                    output: error.output,
+    private nonisolated func claim(
+        _ reservation: Reservation?,
+        for source: Interpreter.Source,
+        recordingHistory: Bool,
+    ) throws -> Int? {
+        guard let reservation else {
+            return nil
+        }
+        guard recordingHistory, case .interactive = source, let history else {
+            throw Runtime.Failure("A reservation requires recorded interactive input.")
+        }
+        return try reservation.claim(in: history)
+    }
+
+    private func evaluate(
+        _ source: Interpreter.Source,
+        filename: String?,
+        number: Int?,
+        redirecting redirects: [Stream: Runtime.Path],
+        execution: Control,
+    ) throws -> Execution {
+        do {
+            return try withInterpreter(execution: execution) { interpreter in
+                let captured = try interpreter.evaluate(
+                    source,
+                    filename: filename,
                     number: number,
+                    redirecting: redirects,
+                    execution: execution,
                 )
+                return Execution(output: captured, end: .finished, number: number)
             }
+        } catch let error as ExecutionError {
+            throw ExecutionError(traceback: error.traceback, output: error.output, number: number)
         }
     }
 
@@ -213,22 +222,26 @@ extension Session {
         }
 
         let destination = redirects[.source]
-        if let destination {
-            let sourcePath = destination.file.lexicallyNormalized()
-            let hasConflictingRedirect = redirects.contains { stream, path in
-                stream != .source && path.file.lexicallyNormalized() == sourcePath
-            }
-            if hasConflictingRedirect {
-                throw Runtime.Failure(
-                    "A source history file must be separate from standard streams.",
-                )
-            }
-        }
+        try Self.validateSourceDestination(in: redirects)
+
         let reserved = number.withLock { $0 }
         let next = try reserved ?? history.reserveNumber()
         // Interruption must report the reserved number even if saving the source fails.
         number.withLock { $0 = next }
         try await history.save(source, number: next, destination: destination)
+    }
+
+    private static func validateSourceDestination(in redirects: [Stream: Runtime.Path]) throws {
+        guard let destination = redirects[.source] else {
+            return
+        }
+        let sourcePath = destination.file.lexicallyNormalized()
+        let hasConflictingRedirect = redirects.contains { stream, path in
+            stream != .source && path.file.lexicallyNormalized() == sourcePath
+        }
+        if hasConflictingRedirect {
+            throw Runtime.Failure("A source history file must be separate from standard streams.")
+        }
     }
 }
 
@@ -259,24 +272,19 @@ private extension Session {
         return Execution(output: captured, end: end, number: number)
     }
 
-    static func checkpointSettlement(
-        committing: (@Sendable (Commit) async throws -> Void)?,
+    static func publicationSettlement(
+        committing: @escaping @Sendable (Commit) async throws -> Void,
     ) -> Control.Settlement<Execution> {
-        { session, control, result in
+        { _, control, result in
             do {
                 _ = try result.get()
                 try control.checkInterruption()
 
-                if let committing {
-                    let commit = Commit(checking: control.finishCheckingInterruption)
-                    try await committing(commit)
-                }
-
+                let commit = Commit(checking: control.finishCheckingInterruption)
+                try await committing(commit)
                 try control.finishCheckingInterruption()
-                session.finishCheckpoint(.commit)
                 return result
             } catch {
-                session.finishCheckpoint(.rollback)
                 return control.interruption == nil ? .failure(error) : result
             }
         }

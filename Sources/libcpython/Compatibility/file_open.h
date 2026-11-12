@@ -70,10 +70,6 @@ PyObject *_Nullable CPython_UnsupportedNativeOperation(void);
 // The host owns these descriptors and keeps them open until execution finishes.
 void CPython_SetStreamDescriptors(int input, int output, int error);
 
-// Rollback restores descriptor identity and position. Filesystem mutations take effect immediately.
-int CPython_BeginFileCheckpoint(void);
-void CPython_FinishFileCheckpoint(bool restoring);
-
 int CPython_OpenFile(const char *_Nonnull path, int base, int flags, mode_t mode,
                      PyObject *_Nonnull filename);
 CPython_FileTarget *_Nullable CPython_CheckFile(const char *_Nonnull path, int base, int flags,

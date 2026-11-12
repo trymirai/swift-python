@@ -1,6 +1,7 @@
 """Collect module declarations, resolve annotations and assemble interface files."""
 
 import ast
+from collections.abc import Iterator
 
 from ..exports.functions import module_parts
 from . import exports, source
@@ -16,6 +17,7 @@ class Module:
         module_parts(self.name)
 
         self.bindings, self.fields = bindings, fields
+
         self.functions = {record[0]: record for record in functions}
         self.classes = {record[2]: record for record in classes}
 
@@ -158,6 +160,12 @@ class Module:
         if variables:
             append(variables)
 
+        for declaration in self._render_functions():
+            append(declaration)
+
+        return body
+
+    def _render_functions(self) -> Iterator[list[str]]:
         source_functions = {
             name: statement
             for name, statement in self.declarations.items()
@@ -166,11 +174,9 @@ class Module:
         }
         for name in sorted(self.functions.keys() | source_functions.keys()):
             if name in self.functions:
-                append(exports.render_function(self.functions[name], self.annotations))
+                yield exports.render_function(self.functions[name], self.annotations)
             else:
-                append(source.render_function(source_functions[name]))
-
-        return body
+                yield source.render_function(source_functions[name])
 
     def _variables(self) -> list[str]:
         lines = []

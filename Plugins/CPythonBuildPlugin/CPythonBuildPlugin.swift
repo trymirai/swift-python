@@ -52,6 +52,7 @@ extension CPythonBuildPlugin: BuildToolPlugin {
                 "PosixSubprocess.c",
                 "Import.c",
                 "SocketModule.c",
+                "SSLModule.c",
                 "SelectModule.c",
                 "ThreadModule.c",
             ]

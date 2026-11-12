@@ -12,18 +12,19 @@ extension StandardLibraryBuilder {
             ("Modules/_posixsubprocess.c", "PosixSubprocess.c"),
             ("Python/import.c", "Import.c"),
             ("Modules/socketmodule.c", "SocketModule.c"),
+            ("Modules/_ssl.c", "SSLModule.c"),
             ("Modules/selectmodule.c", "SelectModule.c"),
             ("Modules/_threadmodule.c", "ThreadModule.c"),
             ("Lib/subprocess.py", "subprocess.py"),
         ]
         let patchDirectory = workspace.packageDirectory.appending("Tools/CPythonPatches")
 
-        // Stage both patches before replacing outputs so a rejected patch leaves them intact.
+        // Stage patches before replacing outputs so a rejected patch leaves them intact.
         try await workspace.fileSystem
             .withTemporaryDirectory(prefix: workspace.outputDirectory) { _, directory in
                 try await copySources(sources, from: workspace.sourceDirectory, to: directory)
 
-                for patch in ["FileAccess.patch", "ThreadHandles.patch"] {
+                for patch in ["FileAccess.patch", "ThreadHandles.patch", "Network.patch"] {
                     try await workspace.run(
                         "/usr/bin/patch",
                         [

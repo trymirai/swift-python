@@ -21,11 +21,10 @@ extension Interpreter {
         private let classBindings: [String: (module: String, name: String)]
 
         private var isInstalled: Bool = false
+
         private var typesByKey: [String: Reference] = [:]
         private var keysByTypeAddress: [UInt: String] = [:]
         private var wrapperFactory: Reference?
-
-        private var savedWrappers: [ObjectIdentifier: (Object.Identity, WeakReference?)]?
 
         init(modules: [Module]) {
             classBindings = Dictionary(uniqueKeysWithValues: modules.flatMap { module in
@@ -68,26 +67,6 @@ extension Interpreter {
             isInstalled = true
         }
 
-        func beginCheckpoint() {
-            precondition(savedWrappers == nil)
-            savedWrappers = [:]
-        }
-
-        func finishCheckpoint(restoring: Bool) {
-            guard let saved = exchange(&savedWrappers, with: nil) else {
-                preconditionFailure("A Python class checkpoint is not active.")
-            }
-            if restoring {
-                for (identity, wrapper) in saved.values {
-                    identity.restoreWrapper(wrapper)
-                }
-            }
-        }
-
-        static func unregistered() -> Exception {
-            Module.Catalog.failure("The Swift class's module is not installed in this session.")
-        }
-
         @_lifetime(borrow owner)
         func wrapper<Owner: ~Copyable & ~Escapable>(
             for instance: any _PClass,
@@ -117,6 +96,33 @@ extension Interpreter {
             return unsafe Object(owned: wrapper.release(), in: owner)
         }
 
+        @unsafe
+        func instance(for wrapper: UnsafeMutablePointer<PyObject>) throws -> any _PClass {
+            let storage = try Interpreter.Storage.requireCurrent()
+            let instance = unsafe try peer(of: wrapper, in: storage)
+            let context = Context(storage: storage)
+            guard
+                let weak = instance._pIdentity.wrapper,
+                let bound = try weak.resolve(in: context),
+                unsafe bound.pointer == wrapper
+            else {
+                throw Module.Catalog
+                    .failure("The Swift payload belongs to a different Python object.")
+            }
+            return instance
+        }
+
+        func bind(_ object: borrowing Object) throws {
+            let storage = try Interpreter.Storage.requireCurrent()
+            let context = Context(storage: storage)
+            let instance = unsafe try peer(of: object.pointer, in: storage)
+            try instance._pIdentity.bind(WeakReference(object, in: context))
+        }
+
+        static func unregistered() -> Exception {
+            Module.Catalog.failure("The Swift class's module is not installed in this session.")
+        }
+
         @_lifetime(borrow context)
         private func constructWrapper(
             for instance: any _PClass,
@@ -128,7 +134,6 @@ extension Interpreter {
                 throw Self.unregistered()
             }
 
-            rememberWrapper(for: identity)
             try identity.beginWrapperConstruction()
             defer { identity.endWrapperConstruction() }
 
@@ -151,41 +156,6 @@ extension Interpreter {
 
             let pointer = unsafe try Object.require(capsule, "Unable to retain a Swift instance.")
             return unsafe Object(owned: pointer, in: context)
-        }
-
-        private func rememberWrapper(for identity: Object.Identity) {
-            guard savedWrappers != nil else {
-                return
-            }
-
-            // Only the first change to an identity records its pre-block wrapper.
-            let id = ObjectIdentifier(identity)
-            if savedWrappers?[id] == nil {
-                savedWrappers?[id] = (identity, identity.wrapper)
-            }
-        }
-
-        @unsafe
-        func instance(for wrapper: UnsafeMutablePointer<PyObject>) throws -> any _PClass {
-            let storage = try Interpreter.Storage.requireCurrent()
-            let instance = unsafe try peer(of: wrapper, in: storage)
-            let context = Context(storage: storage)
-            guard
-                let weak = instance._pIdentity.wrapper,
-                let bound = try weak.resolve(in: context),
-                unsafe bound.pointer == wrapper
-            else {
-                throw Module.Catalog
-                    .failure("The Swift payload belongs to a different Python object.")
-            }
-            return instance
-        }
-
-        func bind(_ object: borrowing Object) throws {
-            let storage = try Interpreter.Storage.requireCurrent()
-            let context = Context(storage: storage)
-            let instance = unsafe try peer(of: object.pointer, in: storage)
-            try instance._pIdentity.bind(WeakReference(object, in: context))
         }
 
         @unsafe

@@ -7,7 +7,7 @@ internal import libcpython
 // MARK: - Reference
 
 /// Keeps a Python object alive in its interpreter generation.
-/// Reset, close, or rollback of the creating block invalidates the reference.
+/// Reset or close invalidates the reference.
 public struct Reference: Sendable {
     let storage: Storage
 
