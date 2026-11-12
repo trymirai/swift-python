@@ -193,6 +193,7 @@ public actor Session {
 
     /// Discards the interpreter and invalidates its references. Package changes can run before
     /// the next execution starts a new interpreter.
+    /// Input history, numbering and reservations remain; output history is cleared.
     public nonisolated func reset(in context: Context? = nil) async throws {
         try await withOperation(in: context) { session in
             session.state = .idle

@@ -83,6 +83,10 @@ explicitly, and read `startupOutput` for its output.
 The `inputs` and `outputs` limits accept `.last(n)` or `.unlimited`; `history: nil` disables both.
 Sources use memory or `redirecting: [.source: path]`. Eviction deletes source files.
 
+With history enabled, `session.reserve()` reserves a number before execution.
+Pass it to `evaluate(..., reservation:)`. Reservations are single-use; unused numbers
+remain gaps. Reset preserves input history, numbering and outstanding reservations.
+
 Pass `transactional: true` when creating a session to restore Python state after a failed or
 interrupted evaluation. File changes persist.
 

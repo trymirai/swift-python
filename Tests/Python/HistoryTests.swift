@@ -290,11 +290,14 @@ func historyRecordsInterruptedAttempts(timeout: Bool) async throws {
     )
     try await withSession(session) { session in
         _ = try await session.evaluate("from host import wait\n{'saved': True}")
+        let reservation = try session.reserve()
+        #expect(reservation.number == 2)
         let task = Task {
             defer { entered.continuation.finish() }
             return try await session.evaluate(
                 "Out.clear()\nawait wait()",
                 timeout: timeout ? .seconds(2) : nil,
+                reservation: reservation,
             )
         }
         defer { task.cancel() }
@@ -406,5 +409,169 @@ func historyBindsToTheSelectedModuleNamespace(project: Bool) async throws {
             assert read_output(1) is data
             """, recordingHistory: false)
         }
+    }
+}
+
+@Test
+func historyReservationsPreserveNumbersAcrossGapsAndReset() async throws {
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(history: .init(outputs: .unlimited))
+    try await withSession(session) { session in
+        let first = try session.reserve()
+        let unused = try session.reserve()
+        let pending = try session.reserve()
+        #expect([first.number, unused.number, pending.number] == [1, 2, 3])
+
+        let result = try await session.evaluate("{'first': True}", reservation: first)
+        #expect(result.number == first.number)
+        try await session.reset()
+
+        let resumed = try await session.evaluate("{'resumed': True}", reservation: pending)
+        #expect(resumed.number == pending.number)
+        _ = try await session.evaluate("""
+        assert list(In) == [1, 3]
+        assert In[1] == "{'first': True}"
+        assert In[3] == "{'resumed': True}"
+        assert list(Out) == [3] and Out[3] == {'resumed': True}
+        """, recordingHistory: false)
+        #expect(try await session.evaluate("4").number == 4)
+    }
+}
+
+@Test
+func historyReservationsAreSingleUseAndSessionBound() async throws {
+    let runtime = try await Python::Runtime()
+    let first = try await runtime.session(history: .init())
+    let second = try await runtime.session(history: .init())
+    let disabled = try await runtime.session()
+    defer {
+        await first.close()
+        await second.close()
+        await disabled.close()
+    }
+
+    #expect(throws: (any Error).self) { try disabled.reserve() }
+    let reservation = try first.reserve()
+    await #expect(throws: (any Error).self) {
+        try await second.evaluate("'foreign'", reservation: reservation)
+    }
+    await #expect(throws: (any Error).self) {
+        try await first.evaluate("'unrecorded'", recordingHistory: false, reservation: reservation)
+    }
+
+    let tasks = (0 ..< 2).map { _ in
+        Task { try await first.evaluate("'once'", reservation: reservation) }
+    }
+    var successes = 0
+    var failures = 0
+    for task in tasks {
+        do {
+            let result = try await task.value
+            #expect(result.number == 1)
+            successes += 1
+        } catch {
+            #expect(String(describing: error).contains("already been used"))
+            failures += 1
+        }
+    }
+    #expect(successes == 1 && failures == 1)
+    #expect(try await first.evaluate("2").number == 2)
+    #expect(try await second.evaluate("1").number == 1)
+    await first.close()
+    #expect(throws: Python::Session.Error.closed) { try first.reserve() }
+}
+
+@Test
+func historyReservationsRemainSpentAfterPreparationAndExecutionFailures() async throws {
+    try await withTemporaryDirectory { root in
+        let runtime = try await Python::Runtime()
+        let session = try await runtime.session(transactional: true, history: .init())
+        try await withSession(session) { session in
+            let preparation = try session.reserve()
+            await #expect(throws: (any Error).self) {
+                try await session.evaluate(
+                    "'not reached'",
+                    reservation: preparation,
+                    redirecting: [.source: root.appending("missing/input.py")],
+                )
+            }
+            let execution = try session.reserve()
+            let error = try await #require(throws: Python::ExecutionError.self) {
+                try await session.evaluate("raise ValueError('failed')", reservation: execution)
+            }
+            #expect(error.number == 2)
+
+            let publication = try session.reserve()
+            await #expect(throws: HistoryPublicationError.self) {
+                try await session.evaluate(
+                    "'unpublished'",
+                    reservation: publication,
+                    committing: { _ in
+                        throw HistoryPublicationError.rejected
+                    },
+                )
+            }
+            for reservation in [preparation, execution, publication] {
+                await #expect(throws: (any Error).self) {
+                    try await session.evaluate("'retry'", reservation: reservation)
+                }
+            }
+            let result = try await session.evaluate("""
+            assert list(In) == [2, 3, 4]
+            assert not Out
+            42
+            """)
+            #expect(result.number == 4)
+            _ = try await session.evaluate("assert Out[4] == 42", recordingHistory: false)
+        }
+    }
+}
+
+@Test(.timeLimit(.minutes(1)))
+func historyReservationDoesNotWaitForExecutionAndSurvivesQueuedCancellation() async throws {
+    let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    let suspended = AsyncStream<Void>.makeStream()
+    defer {
+        entered.continuation.finish()
+        suspended.continuation.finish()
+    }
+    let host = Python::Module("host", functions: [
+        .init("wait") { _ in
+            entered.continuation.yield(())
+            for await _ in suspended.stream {}
+            return .none
+        },
+    ])
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(moduleDefinitions: [host], history: .init())
+    try await withSession(session) { session in
+        let running = Task { try await session.evaluate("from host import wait\nawait wait()") }
+        defer { running.cancel() }
+        _ = try await #require(nextSignal(from: entered.stream))
+
+        let reservation = try session.reserve()
+        #expect(reservation.number == 2)
+        let queued = Task.immediate {
+            try await session.evaluate("'cancelled'", reservation: reservation)
+        }
+        queued.cancel()
+        await #expect(throws: CancellationError.self) { try await queued.value }
+        suspended.continuation.finish()
+        #expect(try await running.value.number == 1)
+
+        await #expect(throws: (any Error).self) {
+            try await session.evaluate("'retry'", reservation: reservation)
+        }
+        let resumed = try session.reserve()
+        #expect(resumed.number == 3)
+        let result = try await session.evaluate(
+            "assert list(In) == [1, 3]\n3",
+            reservation: resumed,
+        )
+        #expect(result.number == 3)
+        _ = try await session.evaluate(
+            "assert Out[3] == 3 and 2 not in Out",
+            recordingHistory: false,
+        )
     }
 }

@@ -16,6 +16,8 @@ public extension Session {
     /// A source redirection saves recorded input to a new file. Implicit startup captures
     /// its own output.
     /// Set recordingHistory to false to exclude an internal block from In/Out and numbering.
+    /// An explicit reservation supplies the history number and requires recordingHistory.
+    /// It is consumed before queue admission, including when that wait is cancelled.
     ///
     /// The scope is available to Swift exports and the file access delegate during the block.
     nonisolated func evaluate(
@@ -24,6 +26,7 @@ public extension Session {
         filename: String? = nil,
         timeout: Duration? = nil,
         recordingHistory: Bool = true,
+        reservation: Reservation? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
         in context: Context? = nil,
         _ output: (@Sendable (Output.Stream, String) -> Void)? = nil,
@@ -35,6 +38,7 @@ public extension Session {
             filename: filename,
             timeout: timeout,
             recordingHistory: recordingHistory,
+            reservation: reservation,
             redirecting: redirects,
             output: output,
         )
@@ -49,6 +53,7 @@ public extension Session {
         filename: String? = nil,
         timeout: Duration? = nil,
         recordingHistory: Bool = true,
+        reservation: Reservation? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
         in context: Context? = nil,
         committing: @escaping @Sendable (Commit) async throws -> Void,
@@ -61,6 +66,7 @@ public extension Session {
             filename: filename,
             timeout: timeout,
             recordingHistory: recordingHistory,
+            reservation: reservation,
             redirecting: redirects,
             output: output,
             committing: committing,
@@ -132,6 +138,7 @@ extension Session {
         filename: String?,
         timeout: Duration?,
         recordingHistory: Bool = true,
+        reservation: Reservation? = nil,
         redirecting redirects: [Stream: FilePath],
         output: Control.OutputHandler?,
         committing: (@Sendable (Commit) async throws -> Void)? = nil,
@@ -140,8 +147,18 @@ extension Session {
             throw Runtime.Failure("A host commit requires a transactional Python session.")
         }
 
+        let reservedNumber: Int?
+        if let reservation {
+            guard recordingHistory, case .interactive = source, let history else {
+                throw Runtime.Failure("A reservation requires recorded interactive input.")
+            }
+            reservedNumber = try reservation.claim(in: history)
+        } else {
+            reservedNumber = nil
+        }
+
         let settlement = transactional ? Self.checkpointSettlement(committing: committing) : nil
-        let number = Mutex<Int?>(nil)
+        let number = Mutex<Int?>(reservedNumber)
         return try await withExecution(
             in: context,
             timeout: timeout,
@@ -207,7 +224,8 @@ extension Session {
                 )
             }
         }
-        let next = try history.reserveNumber()
+        let reserved = number.withLock { $0 }
+        let next = try reserved ?? history.reserveNumber()
         // Interruption must report the reserved number even if saving the source fails.
         number.withLock { $0 = next }
         try await history.save(source, number: next, destination: destination)
