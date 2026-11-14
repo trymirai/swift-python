@@ -143,6 +143,11 @@ private final class LabeledCounter: Counter {
     }
 }
 
+// MARK: - ExistingCounter
+
+@PythonExportedClass(module: LabeledCounterModule.self)
+private final class ExistingCounter: Counter {}
+
 // MARK: - ExistingInstance
 
 @PythonExportedClass(module: LabeledCounterModule.self)
@@ -157,6 +162,53 @@ private final class ExistingInstance: Sendable {
     func asynchronous(_ context: Python::Context) async -> Int {
         await Task.yield()
         return number + (context.scope as? Int ?? 0)
+    }
+}
+
+@Test
+func exportedClassHelpAndConstructorSignatures() async throws {
+    let runtime = try await Python::Runtime()
+    let session = try await runtime.session(modules: [LabeledCounterModule.self])
+
+    try await withSession(session) { session in
+        _ = try await session.evaluate("""
+        from counter_base import Counter
+        from counter_child import Labeled, ExistingCounter, ExistingInstance
+        from contextlib import redirect_stdout
+        from inspect import Parameter, Signature, getmro, signature
+        from io import StringIO
+
+        parameters = signature(Counter).parameters
+        assert list(parameters) == ['value', 'linkToSelf']
+        assert parameters['value'].annotation == 'int'
+        assert parameters['value'].default is not Parameter.empty
+        assert signature(Counter).return_annotation is Signature.empty
+        parameters = signature(Labeled).parameters
+        assert list(parameters) == ['value', 'label']
+        assert parameters['value'].default is Parameter.empty
+        assert parameters['label'].default is not Parameter.empty
+        assert getmro(Counter) == (Counter, object)
+        assert getmro(Labeled) == (Labeled, Counter, object)
+        for cls in (ExistingCounter, ExistingInstance):
+            assert all(parameter.kind in (Parameter.VAR_POSITIONAL, Parameter.VAR_KEYWORD)
+                       for parameter in signature(cls).parameters.values())
+            try:
+                cls(1)
+            except TypeError:
+                pass
+            else:
+                raise AssertionError('A returned-only class accepted construction')
+
+        for cls in (Counter, Labeled, ExistingCounter, ExistingInstance):
+            assert cls.__new__.__module__ == cls.__module__
+            assert cls.__new__.__qualname__ == f'{cls.__name__}.__new__'
+            with redirect_stdout(StringIO()) as output:
+                help(cls)
+            text = output.getvalue()
+            assert '_swift_python_runtime' not in text
+            assert '_SwiftObject' not in text
+            assert 'NativeClasses' not in text and 'initialize(' not in text
+        """)
     }
 }
 

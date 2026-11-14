@@ -26,8 +26,6 @@ class NativeClasses:
         self._functions = functions
 
         self._types = {}
-        self._base = None
-
         self._creating = False
 
     def prepare(self, record, module: ModuleType) -> _PreparedClass:
@@ -64,19 +62,6 @@ class NativeClasses:
         return name, descriptor
 
     def install(self, pending: list[_PreparedClass]) -> None:
-        registry = self
-
-        class _SwiftObject:
-            __slots__ = ("_swift_peer", "_swift_fields", "__weakref__")
-
-            def __init_subclass__(cls, **kwargs) -> None:
-                if not registry._creating:
-                    raise TypeError("Subclass native classes in Swift using PythonExportedClass")
-
-                super().__init_subclass__(**kwargs)
-
-        self._base = _SwiftObject
-        self._invoke("freeze", _SwiftObject)
         self._invoke("register_wrap", self.wrap)
 
         self._install_pending(pending)
@@ -109,6 +94,7 @@ class NativeClasses:
         module = record.module
         name = record.name
         constructor = record.constructor
+        base = self._types[record.base] if record.base is not None else object
 
         native_type = None
 
@@ -121,21 +107,40 @@ class NativeClasses:
 
             return constructor(*args, **kwargs)
 
-        def initialize(self, *args, **kwargs) -> None:
-            # __new__ has already initialized and bound the complete Swift peer.
-            pass
+        new.__name__ = "__new__"
+        new.__qualname__ = f"{name}.__new__"
+        new.__module__ = module.__name__
+
+        if constructor is not None:
+            record.members["__signature__"] = constructor.__signature__.replace(
+                return_annotation=Signature.empty
+            )
+        elif getattr(base, "__signature__", None) is not None:
+            # A returned-only subclass must not advertise its base's constructor.
+            record.members["__signature__"] = None
+
+        if record.base is None:
+            def init_subclass(cls, **kwargs) -> None:
+                """Python subclassing is unavailable."""
+                if not self._creating:
+                    raise TypeError("Subclass native classes in Swift using PythonExportedClass")
+
+            init_subclass.__name__ = "__init_subclass__"
+            init_subclass.__qualname__ = f"{name}.__init_subclass__"
+            init_subclass.__module__ = module.__name__
+            record.members["__init_subclass__"] = classmethod(init_subclass)
 
         record.members.update(
-            __slots__=(),
+            __slots__=(
+                ("_swift_peer", "_swift_fields", "__weakref__") if record.base is None else ()
+            ),
             __module__=module.__name__,
             __doc__=record.documentation,
             __new__=staticmethod(new),
-            __init__=initialize,
         )
 
         self._creating = True
         try:
-            base = self._types[record.base] if record.base else self._base
             native_type = type(name, (base,), record.members)
         finally:
             self._creating = False
