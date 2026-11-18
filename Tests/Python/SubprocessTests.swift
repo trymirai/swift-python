@@ -7,6 +7,9 @@
 import _NIOFileSystem
 import Python
 import Testing
+#if os(macOS)
+private import Darwin
+#endif
 
 // MARK: - SubprocessTests
 
@@ -32,6 +35,36 @@ struct SubprocessTests {
         #expect(execution.end == .finished)
         #expect(execution.output.stdout == "captured\n")
     }
+
+    #if os(macOS)
+    @Test
+    func closedSubprocessInputRaisesBrokenPipeError() async {
+        await #expect(processExitsWith: .success) {
+            _ = Darwin.signal(SIGPIPE, SIG_DFL)
+            let session = try await Runtime(options: [.subprocesses]).session()
+            defer { await session.close() }
+
+            let execution = try await session.evaluate(
+                """
+                import subprocess
+
+                with subprocess.Popen(["/usr/bin/true"], stdin=subprocess.PIPE, bufsize=0) as child:
+                    assert child.wait() == 0
+                    try:
+                        child.stdin.write(b"data")
+                    except BrokenPipeError:
+                        pass
+                    else:
+                        raise AssertionError("Expected a broken stdin pipe")
+                """,
+            )
+
+            try #require(execution.end == .finished)
+            let previousHandler = Darwin.signal(SIGPIPE, SIG_DFL)
+            try #require(previousHandler == nil)
+        }
+    }
+    #endif
 
     @Test
     func defaultRuntimeDisallowsStartingAProcess() async throws {
