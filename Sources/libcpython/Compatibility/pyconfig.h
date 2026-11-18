@@ -27,12 +27,20 @@
 #error Unsupported iOS device architecture
 #endif
 #elif TARGET_OS_OSX
+#include <Availability.h>
+
 #if defined(__arm64__)
 #include "Configuration/macos-arm64.h"
 #elif defined(__x86_64__)
 #include "Configuration/macos-x86_64.h"
 #else
 #error Unsupported macOS architecture
+#endif
+
+#if __MAC_OS_X_VERSION_MAX_ALLOWED < 270000
+// Older SDKs do not declare dup3 or pipe2.
+#undef HAVE_DUP3
+#undef HAVE_PIPE2
 #endif
 #if defined(HAVE_CURSES_IS_PAD)
 // Use the SDK's opaque WINDOW and its is_pad accessor.
