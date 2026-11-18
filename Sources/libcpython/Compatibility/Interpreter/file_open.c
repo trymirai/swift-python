@@ -173,6 +173,12 @@ CPython_TrackPipe(int reader, int writer)
     if (files == NULL) {
         return 0;
     }
+#ifdef F_SETNOSIGPIPE
+    if (fcntl(writer, F_SETNOSIGPIPE, 1) < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+#endif
     if (reserve_descriptors(2) < 0) {
         return -1;
     }

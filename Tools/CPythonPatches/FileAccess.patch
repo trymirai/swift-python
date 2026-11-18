@@ -606,7 +606,7 @@
      PyObject *converted_args = NULL, *fast_args = NULL;
      PyObject *preexec_fn_args_tuple = NULL;
      gid_t *extra_groups = NULL;
-@@ -1227,6 +1230,51 @@
+@@ -1227,6 +1230,52 @@
          goto cleanup;
      }
  
@@ -640,8 +640,9 @@
 +        }
 +
 +#ifdef F_SETNOSIGPIPE
-+        // Report a closed child stdin to the parent through EPIPE.
-+        if (p2cwrite >= 0 && fcntl(p2cwrite, F_SETNOSIGPIPE, 1) < 0) {
++        // The child owns the write ends of its automatically created output pipes.
++        if ((c2pread >= 0 && fcntl(c2pwrite, F_SETNOSIGPIPE, 0) < 0) ||
++            (errread >= 0 && fcntl(errwrite, F_SETNOSIGPIPE, 0) < 0)) {
 +            PyErr_SetFromErrno(PyExc_OSError);
 +            goto cleanup;
 +        }
@@ -658,7 +659,7 @@
      /* This must be the last thing done before fork() because we do not
       * want to call PyOS_BeforeFork() if there is any chance of another
       * error leading to the cleanup: code without calling fork(). */
-@@ -1300,6 +1348,9 @@
+@@ -1300,6 +1349,9 @@
          PyOS_AfterFork_Parent();
  
  cleanup:
@@ -668,7 +669,7 @@
      if (c_fds_to_keep != NULL) {
          PyMem_Free(c_fds_to_keep);
      }
-@@ -1361,3 +1412,4 @@
+@@ -1361,3 +1413,4 @@
  {
      return PyModuleDef_Init(&_posixsubprocessmodule);
  }

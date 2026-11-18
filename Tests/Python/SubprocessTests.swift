@@ -42,7 +42,7 @@ struct SubprocessTests {
 
     #if os(macOS) || os(Linux)
     @Test
-    func closedSubprocessInputRaisesBrokenPipeError() async {
+    func closedPipesRaiseBrokenPipeError() async {
         await #expect(processExitsWith: .success) {
             _ = signal(SIGPIPE, SIG_DFL)
             var signals = sigset_t()
@@ -59,15 +59,24 @@ struct SubprocessTests {
                 import os
                 import subprocess
 
+                def expect_broken_pipe(write):
+                    try:
+                        write(b"data")
+                    except BrokenPipeError:
+                        pass
+                    else:
+                        raise AssertionError("Expected a broken pipe")
+
+                reader, writer = os.pipe()
+                os.close(reader)
+                with os.fdopen(writer, "wb", buffering=0) as pipe:
+                    expect_broken_pipe(pipe.write)
+                    expect_broken_pipe(lambda data: os.write(writer, data))
+
                 with subprocess.Popen(["/bin/sh", "-c", ":"], stdin=subprocess.PIPE, bufsize=0) as child:
                     assert child.wait() == 0
-                    for write in (child.stdin.write, lambda data: os.write(child.stdin.fileno(), data)):
-                        try:
-                            write(b"data")
-                        except BrokenPipeError:
-                            pass
-                        else:
-                            raise AssertionError("Expected a broken stdin pipe")
+                    expect_broken_pipe(child.stdin.write)
+                    expect_broken_pipe(lambda data: os.write(child.stdin.fileno(), data))
                 """,
             )
 
@@ -77,6 +86,28 @@ struct SubprocessTests {
         }
     }
     #endif
+
+    @Test
+    func closedSubprocessOutputDeliversSIGPIPE() async throws {
+        let session = try await subprocessSession()
+        defer { await session.close() }
+
+        let execution = try await session.evaluate("""
+        import signal
+        import subprocess
+
+        for fd, stream in ((1, "stdout"), (2, "stderr")):
+            command = ["/bin/sh", "-c", f"read ready; printf data >&{fd}"]
+            with subprocess.Popen(
+                command, stdin=subprocess.PIPE, **{stream: subprocess.PIPE}
+            ) as child:
+                getattr(child, stream).close()
+                child.stdin.close()
+                assert child.wait() == -signal.SIGPIPE
+        """)
+
+        #expect(execution.end == .finished)
+    }
 
     @Test
     func defaultRuntimeDisallowsStartingAProcess() async throws {
