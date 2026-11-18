@@ -48,6 +48,7 @@ extension CPythonBuildPlugin: BuildToolPlugin {
                 "Resources.c",
                 "GetPath.c",
                 "FileIO.c",
+                "FileUtils.c",
                 "PosixModule.c",
                 "PosixSubprocess.c",
                 "Import.c",

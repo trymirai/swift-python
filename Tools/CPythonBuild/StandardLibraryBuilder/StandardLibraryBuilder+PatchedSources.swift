@@ -8,6 +8,7 @@ extension StandardLibraryBuilder {
     func writePatchedSources() async throws {
         let sources: [(input: String, output: String)] = [
             ("Modules/_io/fileio.c", "FileIO.c"),
+            ("Python/fileutils.c", "FileUtils.c"),
             ("Modules/posixmodule.c", "PosixModule.c"),
             ("Modules/_posixsubprocess.c", "PosixSubprocess.c"),
             ("Python/import.c", "Import.c"),

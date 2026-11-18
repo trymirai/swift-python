@@ -80,6 +80,10 @@ int CPython_RequireFileDescriptor(int fd, bool borrowing_stream);
 int CPython_CloseFileDescriptor(int fd);
 int CPython_TruncateFileDescriptor(int fd, off_t size);
 
+#ifdef __linux__
+ssize_t CPython_WriteFileDescriptor(int fd, const void *_Nonnull data, size_t size);
+#endif
+
 int CPython_TrackPipe(int reader, int writer);
 int CPython_DuplicateFileDescriptor(int fd);
 uint64_t CPython_PipeIdentity(int fd);

@@ -9,6 +9,10 @@ import Python
 import Testing
 #if os(macOS)
 private import Darwin
+#elseif canImport(Glibc)
+private import Glibc
+#elseif canImport(Musl)
+private import Musl
 #endif
 
 // MARK: - SubprocessTests
@@ -36,31 +40,39 @@ struct SubprocessTests {
         #expect(execution.output.stdout == "captured\n")
     }
 
-    #if os(macOS)
+    #if os(macOS) || os(Linux)
     @Test
     func closedSubprocessInputRaisesBrokenPipeError() async {
         await #expect(processExitsWith: .success) {
-            _ = Darwin.signal(SIGPIPE, SIG_DFL)
+            _ = signal(SIGPIPE, SIG_DFL)
+            var signals = sigset_t()
+            unsafe sigemptyset(&signals)
+            unsafe sigaddset(&signals, SIGPIPE)
+            let unmaskResult = unsafe pthread_sigmask(SIG_UNBLOCK, &signals, nil)
+            try #require(unmaskResult == 0)
+
             let session = try await Runtime(options: [.subprocesses]).session()
             defer { await session.close() }
 
             let execution = try await session.evaluate(
                 """
+                import os
                 import subprocess
 
-                with subprocess.Popen(["/usr/bin/true"], stdin=subprocess.PIPE, bufsize=0) as child:
+                with subprocess.Popen(["/bin/sh", "-c", ":"], stdin=subprocess.PIPE, bufsize=0) as child:
                     assert child.wait() == 0
-                    try:
-                        child.stdin.write(b"data")
-                    except BrokenPipeError:
-                        pass
-                    else:
-                        raise AssertionError("Expected a broken stdin pipe")
+                    for write in (child.stdin.write, lambda data: os.write(child.stdin.fileno(), data)):
+                        try:
+                            write(b"data")
+                        except BrokenPipeError:
+                            pass
+                        else:
+                            raise AssertionError("Expected a broken stdin pipe")
                 """,
             )
 
             try #require(execution.end == .finished)
-            let previousHandler = Darwin.signal(SIGPIPE, SIG_DFL)
+            let previousHandler = signal(SIGPIPE, SIG_DFL)
             try #require(previousHandler == nil)
         }
     }

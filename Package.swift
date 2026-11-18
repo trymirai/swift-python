@@ -237,6 +237,7 @@ private extension Target {
                 "src/Python/asm_trampoline_riscv64.S",
                 "src/Python/asm_trampoline_x86_64.S",
                 "src/Python/dynload_shlib.c",
+                "src/Python/fileutils.c",
                 "src/Python/frozen.c",
                 "src/Python/getplatform.c",
                 "src/Python/import.c",

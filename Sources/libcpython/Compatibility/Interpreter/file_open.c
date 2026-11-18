@@ -5,6 +5,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#ifdef __linux__
+#include <pthread.h>
+#include <signal.h>
+#endif
+
 typedef struct {
     int fd;
 
@@ -187,6 +192,46 @@ CPython_PipeIdentity(int fd)
     Descriptor *entry = require_descriptor(fd);
     return entry == NULL ? 0 : entry->pipe;
 }
+
+#ifdef __linux__
+ssize_t
+CPython_WriteFileDescriptor(int fd, const void *data, size_t size)
+{
+    int error = errno;
+    if (CPython_PipeIdentity(fd) == 0) {
+        errno = error;
+        return write(fd, data, size);
+    }
+
+    sigset_t blocked, previous;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    error = pthread_sigmask(SIG_BLOCK, &blocked, &previous);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+
+    sigset_t pending;
+    int pending_status = sigpending(&pending);
+    ssize_t written = pending_status == 0 ? write(fd, data, size) : -1;
+    error = errno;
+
+    // Linux can signal even after a partial write. Preserve a signal that was already pending.
+    bool may_have_sigpipe = written < 0 ? error == EPIPE : (size_t)written < size;
+    if (pending_status == 0 && may_have_sigpipe && sigismember(&pending, SIGPIPE) == 0) {
+        const struct timespec no_wait = {0};
+        int received;
+        do {
+            received = sigtimedwait(&blocked, NULL, &no_wait);
+        } while (received < 0 && errno == EINTR);
+    }
+
+    (void)pthread_sigmask(SIG_SETMASK, &previous, NULL);
+    errno = error;
+    return written;
+}
+#endif
 
 bool
 CPython_HasOpenPipe(const CPython_Files *state, uint64_t identity)
