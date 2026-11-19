@@ -172,6 +172,28 @@ help(counters.Counter)
 print(inspect.signature(counters.Counter.increment))
 ```
 
+### Discover exported classes
+
+Use `context.exports.classes()` inside `Session.enqueue` or an active Swift export to obtain
+references to the Swift-exported Python classes installed in that interpreter. The array has
+unspecified order and includes exported base classes. It is empty when no classes are installed.
+The references belong to that interpreter generation and become invalid after reset or close.
+
+```swift
+let discovery = try await runtime.session(modules: [Counters.self])
+let names = try await discovery.enqueue { context in
+    try context.exports.classes().map { reference in
+        try context.object(reference).attribute("__name__").decode(as: String.self)
+    }
+}
+print(names) // ["Counter"]
+await discovery.close()
+```
+
+This Swift API does not add attributes to the Python classes or change their `help()` and
+`inspect` output. Python consumers can discover their standard `property` descriptors without
+invoking the getters.
+
 ### Generate type stubs
 
 ```swift

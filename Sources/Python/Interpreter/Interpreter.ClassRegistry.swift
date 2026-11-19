@@ -36,6 +36,10 @@ extension Interpreter {
             classBindings[classKey]
         }
 
+        func classes() -> [Reference] {
+            Array(typesByKey.values)
+        }
+
         func register(
             _ type: borrowing Object,
             forKey key: String,
