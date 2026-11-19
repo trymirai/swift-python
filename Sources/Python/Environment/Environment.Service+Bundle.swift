@@ -22,17 +22,18 @@ extension Environment.Service {
         let files = FileSystem.shared
         let destination = output.file
         let parent = destination.removingLastComponent()
-        let archive = parent.appending(".bundle-" + Environment.identifier())
+        let archive = Runtime.Paths.bundleStagingFile(
+            for: destination,
+            identifier: Environment.identifier(),
+        )
         defer { try? Environment.unlinkIfPresent(archive) }
 
         @Sendable
         func stageArchive(in directory: FilePath) async throws {
-            let sitePackages = directory.appending("site-packages")
-            try await Environment.stageFiles(
-                resolution,
-                into: sitePackages,
-                execution: execution,
-            )
+            let paths = Runtime.Paths.Environment(directory: directory)
+            let sitePackages = paths.temporaryPackagesDirectory
+            try await Environment.stageFiles(resolution, into: sitePackages, execution: execution)
+
             if let module {
                 let name = try await request(.moduleName(module), execution: execution)
                 try await Self.includeModule(
@@ -50,7 +51,7 @@ extension Environment.Service {
             )
         }
 
-        try await files.withTemporaryDirectory(prefix: configuration.scratchDirectory) {
+        try await files.withTemporaryDirectory(prefix: configuration.paths.temporaryDirectory) {
             _, directory in
             try await stageArchive(in: directory)
         }
@@ -85,15 +86,15 @@ extension Environment.Service {
         at destination: FilePath,
         execution: Session.Control,
     ) async throws {
-        let isUnchanged: Bool
+        let matchesExisting: Bool
         do {
-            isUnchanged = try await Self.archiveMatches(archive, at: destination)
+            matchesExisting = try await Self.archiveMatches(archive, at: destination)
         } catch is FileSystemError {
-            isUnchanged = false
+            matchesExisting = false
         }
 
         try execution.finishCheckingInterruption()
-        if !isUnchanged {
+        if !matchesExisting {
             try Environment.replace(archive, with: destination)
         }
     }
@@ -135,21 +136,22 @@ extension Environment.Service {
         execution: Session.Control,
     ) async throws {
         let files = FileSystem.shared
-        let name = entry.name.string
-        let target = destination.appending(entry.name)
-        guard let info = try await files.info(forFileAt: entry.path) else {
-            throw Exception(name: "FileNotFoundError", message: entry.path.string)
+        let source = entry.path
+        guard let info = try await files.info(forFileAt: source) else {
+            throw Exception(name: "FileNotFoundError", message: source.string)
         }
 
+        let name = entry.name.string
+        let target = destination.appending(entry.name)
         if info.type == .directory {
             // A directory link can escape the project tree or form a cycle.
-            let link = try await files.info(forFileAt: entry.path, infoAboutSymbolicLink: true)
+            let link = try await files.info(forFileAt: source, infoAboutSymbolicLink: true)
             guard link?.type != .symlink else {
                 return
             }
-            try await copyDirectory(entry.path, to: target, execution: execution)
+            try await copyDirectory(source, to: target, execution: execution)
         } else if !name.hasSuffix(".pyc") && !name.hasSuffix(".pyo") {
-            try await copyProjectFile(entry.path, to: target)
+            try await copyProjectFile(source, to: target)
         }
     }
 
@@ -212,14 +214,16 @@ extension Environment.Service {
         while offset < size {
             let length = ByteCount.bytes(min(64 * 1024, size - offset))
             let bytes = try await source.readChunk(fromAbsoluteOffset: offset, length: length)
-            guard bytes.readableBytes > 0 else {
+            let count = bytes.readableBytes
+            guard count > 0 else {
                 return false
             }
+
             let existing = try await target.readChunk(fromAbsoluteOffset: offset, length: length)
             guard bytes == existing else {
                 return false
             }
-            offset += Int64(bytes.readableBytes)
+            offset += Int64(count)
         }
         return true
     }

@@ -1,11 +1,10 @@
-"""Immutable interpreter facts and a session's supplied package base."""
+"""Interpreter compatibility, cache settings, and supplied package sources."""
 
 import email.parser
 import importlib.metadata
 import sys
-import tempfile
 import urllib.parse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from sysconfig import get_path
 
@@ -27,9 +26,63 @@ ABI = [sys.implementation.cache_tag, sys.platform, getattr(sys.implementation, "
 @dataclass(frozen=True)
 class Configuration:
     cache: Path
+    wheels: Path
+    installed: Path
+
+    site_packages: str
+    installation_prefix: str
+    download_suffix: str
+
     index: str
 
     base: dict
+
+
+def load(options: dict) -> Configuration:
+    cache = absolute_path(options["cache"])
+    index = _normalize_index(options["index"])
+
+    return Configuration(
+        cache=cache,
+        wheels=absolute_path(options["wheels"]),
+        installed=absolute_path(options["installed"]),
+        site_packages=options["site_packages"],
+        installation_prefix=options["installation_prefix"],
+        download_suffix=options["download_suffix"],
+        index=index,
+        base={},
+    )
+
+
+def _normalize_index(index: str) -> str:
+    index = index.rstrip("/") + "/"
+    if urllib.parse.urlsplit(index).scheme not in ("https", "file"):
+        raise ValueError("Package indexes must use HTTPS or a local file URL")
+
+    return index
+
+
+def describe(configuration: Configuration, sources: list[dict], read) -> dict:
+    _check_source_paths(sources)
+    selected, _ = select_distributions(load_sources(sources, read))
+    base = {
+        name: _describe_distribution(distribution) for name, (_, distribution) in selected.items()
+    }
+
+    return {
+        "cache": str(configuration.cache),
+        "abi": ABI,
+        "base": base,
+    }
+
+
+def _check_source_paths(sources: list[dict]) -> None:
+    for source in sources:
+        if "directory" in source and not absolute_path(source["directory"]).is_dir():
+            raise FileNotFoundError(source["directory"])
+
+        if "archive" in source:
+            absolute_path(source["archive"])
 
 
 def supports_python(specifier: str | None) -> bool:
@@ -47,7 +100,7 @@ def _check_wheel_tags(distribution: importlib.metadata.Distribution, name: str) 
         raise ValueError(f"Package {name} has incompatible wheel tags")
 
 
-def _distribution(distribution: importlib.metadata.Distribution) -> dict:
+def _describe_distribution(distribution: importlib.metadata.Distribution) -> dict:
     metadata = distribution.metadata
     name = metadata["Name"]
     version = metadata["Version"] if name else None
@@ -66,56 +119,14 @@ def _distribution(distribution: importlib.metadata.Distribution) -> dict:
     }
 
 
-def _read_options(configuration: dict) -> tuple[Path, str]:
-    cache = configuration.get("cache")
-    if cache is None:
-        cache = str(Path(tempfile.gettempdir()) / "swift-python-packages" / ABI[0])
-    cache = absolute_path(cache)
-
-    index = configuration["index"].rstrip("/") + "/"
-    if urllib.parse.urlsplit(index).scheme not in ("https", "file"):
-        raise ValueError("Package indexes must use HTTPS or a local file URL")
-
-    return cache, index
-
-
-def _check_source_paths(sources: list[dict]) -> None:
-    for source in sources:
-        if "directory" in source and not absolute_path(source["directory"]).is_dir():
-            raise FileNotFoundError(source["directory"])
-
-        if "archive" in source:
-            absolute_path(source["archive"])
-
-
 def project_package_source(directory: str) -> str | None:
     project = absolute_path(directory).resolve()
     venv = str(project / ".venv")
     venv_packages = Path(get_path("purelib", scheme="venv", vars={"base": venv, "platbase": venv}))
 
     for candidate in (project / "site-packages", venv_packages):
-        # A symlink can point outside the project even when the candidate path is under it.
+        # Resolve symlinks before checking containment within the project.
         path = candidate.resolve()
         if path.is_relative_to(project) and path.is_dir():
             return str(path)
     return None
-
-
-def with_sources(configuration: Configuration, sources: list[dict], read) -> Configuration:
-    _check_source_paths(sources)
-    selected, _ = select_distributions(load_sources(sources, read))
-    base = {name: _distribution(distribution) for name, (_, distribution) in selected.items()}
-    return replace(configuration, base=base)
-
-
-def load(options: dict) -> Configuration:
-    cache, index = _read_options(options)
-    return Configuration(cache, index, {})
-
-
-def describe(configuration: Configuration) -> dict:
-    return {
-        "cache": str(configuration.cache),
-        "abi": ABI,
-        "base": configuration.base,
-    }

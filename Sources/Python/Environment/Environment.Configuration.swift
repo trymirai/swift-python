@@ -2,20 +2,14 @@
 //  Created by Anton Spivak
 //
 
-internal import SystemPackage
-
 // MARK: - Environment.Configuration
 
 extension Environment {
     struct Configuration: Sendable {
-        let cacheDirectory: Runtime.Path
+        let paths: Runtime.Paths
         let abi: [String]
 
         let base: [String: BasePackage]
-
-        var scratchDirectory: FilePath {
-            cacheDirectory.file.appending("tmp")
-        }
     }
 }
 
@@ -33,7 +27,8 @@ extension Environment {
 
 extension Environment.Configuration: Decodable {
     init(from decoder: borrowing Decoder) throws {
-        cacheDirectory = try Runtime.Path(decoder.decode(String.self, forKey: "cache"))
+        let cache = try Runtime.Path(decoder.decode(String.self, forKey: "cache"))
+        paths = Runtime.Paths(cacheDirectory: cache.file)
         abi = try decoder.decode([String].self, forKey: "abi")
 
         base = try decoder.decode([String: Environment.BasePackage].self, forKey: "base")

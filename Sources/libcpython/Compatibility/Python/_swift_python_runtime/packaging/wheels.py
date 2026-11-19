@@ -20,6 +20,7 @@ from packaging.version import Version
 
 from ..packages.archive import distribution_metadata_paths
 from .candidate import Wheel
+from .configuration import Configuration
 from .paths import absolute_path, walk_files
 
 
@@ -57,9 +58,9 @@ def _validate_archive(wheel_path: Path, wheel: Wheel) -> None:
                 raise ValueError(f"Invalid wheel member: {info.filename!r}")
 
 
-def _install_archive(wheel_path: Path, stage: Path) -> None:
+def _install_archive(wheel_path: Path, stage: Path, site_packages: str) -> None:
     scheme = {
-        key: str(stage / ("site-packages" if key in ("purelib", "platlib") else key))
+        key: str(stage / (site_packages if key in ("purelib", "platlib") else key))
         for key in ("purelib", "platlib", "scripts", "headers", "data")
     }
     destination = SchemeDictionaryDestination(
@@ -87,33 +88,36 @@ def _publish_install(stage: Path, target: Path) -> None:
 
 
 class WheelCache:
-    def __init__(self, directory: Path) -> None:
-        self.directory = directory
+    def __init__(self, configuration: Configuration) -> None:
+        self._configuration = configuration
 
     def download(self, wheel: Wheel) -> Path:
-        cache = self.directory / "wheels" / wheel.digest
-        cache.mkdir(parents=True, exist_ok=True)
+        destination = self._configuration.wheels / wheel.digest / wheel.filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
 
-        destination = cache / wheel.filename
         if destination.is_file():
             with destination.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
-
             if digest != wheel.digest:
                 raise ValueError(f"Cached wheel checksum mismatch: {wheel.name}")
-            return destination
+        else:
+            self._publish_download(wheel, destination)
 
-        temporary = cache / (uuid.uuid4().hex + ".download")
+        return destination
+
+    def _publish_download(self, wheel: Wheel, destination: Path) -> None:
+        temporary = destination.with_name(uuid.uuid4().hex + self._configuration.download_suffix)
         try:
             _download(wheel, temporary)
             os.replace(temporary, destination)
-            return destination
         finally:
             temporary.unlink(missing_ok=True)
 
     def metadata(self, wheel: Wheel):
         with zipfile.ZipFile(self.download(wheel)) as archive:
-            paths = list(distribution_metadata_paths(archive.namelist()))
+            paths = list(
+                distribution_metadata_paths(entry.filename for entry in archive.infolist())
+            )
             if len(paths) != 1:
                 raise ValueError(
                     f"Wheel must have one distribution metadata directory: {wheel.name}"
@@ -129,22 +133,23 @@ class WheelCache:
             return metadata
 
     def unpack(self, wheel: Wheel) -> Path:
-        parent = self.directory / "installed"
-        parent.mkdir(parents=True, exist_ok=True)
+        target = self._configuration.installed / wheel.digest
+        target.parent.mkdir(parents=True, exist_ok=True)
 
-        target = parent / wheel.digest
-        if target.is_dir():
-            return target
+        if not target.is_dir():
+            self._install(wheel, target)
+        return target / self._configuration.site_packages
 
-        # Stage beside the digest directory so publication is a single rename.
-        stage = Path(tempfile.mkdtemp(prefix=".install-", dir=parent))
+    def _install(self, wheel: Wheel, target: Path) -> None:
+        configuration = self._configuration
+
+        # Stage on the same filesystem so readers only see a complete installation.
+        stage = Path(tempfile.mkdtemp(prefix=configuration.installation_prefix, dir=target.parent))
         try:
             wheel_path = self.download(wheel)
             _validate_archive(wheel_path, wheel)
-            _install_archive(wheel_path, stage)
-
+            _install_archive(wheel_path, stage, configuration.site_packages)
             _publish_install(stage, target)
-            return target
         finally:
             if stage.exists():
                 shutil.rmtree(stage)

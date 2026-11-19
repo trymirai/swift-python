@@ -15,22 +15,19 @@ internal import Musl
 
 // MARK: - Environment
 
-// After preparation, access is serialized by the owning session's operation queue.
-// The lease survives interpreter resets.
+// The owning session serializes access after preparation. The lease survives interpreter resets.
 final class Environment {
     private let directory: Runtime.Path?
     let projectDirectory: Runtime.Path?
-
     let requirements: [String]
 
     private let packaging: Service.Lazy
-
-    private var sessionPackages: [Runtime.PackageSource.Resolved]
+    private(set) var sessionPackages: [Runtime.PackageSource.Resolved]
     private var sessionConfiguration: Configuration?
 
-    private(set) var manifest: Manifest?
     private var storage: Storage?
     private var temporary: FilePath?
+    private(set) var manifest: Manifest?
 
     var needsPreparation: Bool {
         directory != nil || projectDirectory != nil || !requirements.isEmpty
@@ -41,14 +38,20 @@ final class Environment {
         sessionPackages.isEmpty ? packaging.packages : sessionPackages + packaging.packages
     }
 
-    var sitePackagesPath: String? {
+    var paths: Runtime.Paths.Environment? {
+        storage?.paths
+            ?? (directory?.file ?? temporary).map { Runtime.Paths.Environment(directory: $0) }
+    }
+
+    var sitePackagesDirectory: FilePath? {
         guard manifest?.packages.isEmpty == false else {
             return nil
         }
         if let storage {
-            return storage.active?.packages(in: storage.root).string
+            return storage.active.map { storage.paths.packagesDirectory(for: $0) }
         }
-        return temporary?.appending("site-packages").string
+        return temporary
+            .map { Runtime.Paths.Environment(directory: $0).temporaryPackagesDirectory }
     }
 
     init(
@@ -69,7 +72,7 @@ final class Environment {
     deinit {
         try? storage?.lease.close()
         if let temporary {
-            Task { _ = try? await FileSystem.shared.removeItem(at: temporary) }
+            _ = Self.startDiscarding(temporary)
         }
     }
 
@@ -78,13 +81,13 @@ final class Environment {
         let configuration = try await resolveConfiguration(using: service, application: application)
 
         if let root = directory?.file, storage == nil {
-            let opened = try await Self.openStorage(
+            let (storage, manifest) = try await Self.openStorage(
                 at: root,
                 using: service,
                 expectedABI: configuration.abi,
             )
-            manifest = opened.manifest
-            storage = opened.storage
+            self.manifest = manifest
+            self.storage = storage
         }
         return (service, configuration)
     }
@@ -170,53 +173,54 @@ extension Environment {
         using service: Service,
         execution: Session.Control,
     ) async throws {
-        let active: Slot? = if resolution != nil {
-            next.packages.isEmpty ? nil : storage.active?.other ?? .a
+        let previousSlot = storage.active
+        let nextSlot: Slot? = if resolution == nil {
+            previousSlot
+        } else if next.packages.isEmpty {
+            nil
         } else {
-            storage.active
+            previousSlot?.other ?? .a
         }
 
-        let hasSlot = active != nil || storage.active != nil
+        let hasSlot = nextSlot != nil || previousSlot != nil
         let hasLocalRequirements = !next.local.isEmpty || manifest?.local.isEmpty == false
+        // A removal still has to publish if it clears the last slot or local requirement.
         guard hasSlot || hasLocalRequirements else {
             try saveManifestInMemory(next, execution: execution)
             return
         }
 
-        let staged = resolution == nil ? nil : active?.packages(in: storage.root)
-        let stagedManifest = storage.stagedManifestPath
+        let paths = storage.paths
+        let stagedPackages: FilePath? = if resolution != nil, let nextSlot {
+            paths.packagesDirectory(for: nextSlot)
+        } else {
+            nil
+        }
+        let stagedManifest = paths.stagedManifestFile
         defer { try? Self.unlinkIfPresent(stagedManifest) }
 
-        func stagePackages() async throws {
-            if let staged, let resolution {
-                try await FileSystem.shared.removeItem(at: staged)
-                try await Self.stageFiles(
-                    resolution,
-                    into: staged,
-                    execution: execution,
-                )
+        func stageAndPublish() async throws {
+            if let stagedPackages, let resolution {
+                try await FileSystem.shared.removeItem(at: stagedPackages)
+                try await Self.stageFiles(resolution, into: stagedPackages, execution: execution)
             }
+
+            try await Self.publishManifest(
+                Publication(active: nextSlot, manifest: next),
+                stagingAt: stagedManifest,
+                to: paths.manifestFile,
+                using: service,
+                execution: execution,
+            )
         }
 
-        func publishManifest() async throws {
-            let publication = Publication(active: active, manifest: next)
-            try await Self.writePublication(publication, to: stagedManifest, using: service)
-
-            // Publishing the manifest switches both the active slot and its package records.
-            try execution.finishCheckingInterruption()
-            try Self.replace(stagedManifest, with: storage.manifestPath)
-        }
-
-        try await Self.discardOnFailure(staged) {
-            try await stagePackages()
-            try await publishManifest()
-        }
+        try await Self.discardOnFailure(stagedPackages, stageAndPublish)
 
         self.manifest = next
-        self.storage?.active = active
+        self.storage?.active = nextSlot
 
-        if let previous = storage.active, previous != active {
-            await Self.discard(previous.packages(in: storage.root))
+        if let previousSlot, previousSlot != nextSlot {
+            await Self.discard(paths.packagesDirectory(for: previousSlot))
         }
     }
 
@@ -235,15 +239,16 @@ extension Environment {
             nil
         } else {
             try await FileSystem.shared.createTemporaryDirectory(
-                template: configuration.scratchDirectory.appending("XXXXXXXX"),
+                template: configuration.paths.temporaryDirectoryTemplate,
             )
         }
 
         try await Self.discardOnFailure(staged) {
             if let staged {
+                let paths = Runtime.Paths.Environment(directory: staged)
                 try await Self.stageFiles(
                     resolution,
-                    into: staged.appending("site-packages"),
+                    into: paths.temporaryPackagesDirectory,
                     execution: execution,
                 )
             }
@@ -311,45 +316,37 @@ extension Environment {
 
 private extension Environment {
     struct Storage {
-        let root: FilePath
+        let paths: Runtime.Paths.Environment
         let lease: FileDescriptor
 
         var active: Slot?
-
-        var manifestPath: FilePath {
-            root.appending("environment.json")
-        }
-
-        var stagedManifestPath: FilePath {
-            root.appending(".environment.json.tmp")
-        }
     }
 }
 
 // MARK: Environment + Persistent storage
 
-private extension Environment {
-    static func openStorage(
+extension Environment {
+    private static func openStorage(
         at root: FilePath,
         using service: Service,
         expectedABI: [String],
     ) async throws -> (storage: Storage, manifest: Manifest?) {
         try await createStorageDirectory(at: root)
 
-        var opened = Storage(root: root, lease: try acquireLease(at: root))
+        let paths = Runtime.Paths.Environment(directory: root)
+        var opened = Storage(paths: paths, lease: try acquireLease(at: paths.lockFile, for: root))
         do {
             let claimed = try isClaimed(opened.lease)
             let publication = try await readPublication(
-                in: opened,
+                in: paths,
                 using: service,
                 expectedABI: expectedABI,
             )
             opened.active = publication?.active
-
             try await prepareSlots(in: opened, claimed: claimed)
 
-            // Mark ownership only after checking the reserved paths.
             if !claimed {
+                // Claim the root only after confirming the reserved paths are available.
                 _ = try opened.lease.writeAll(toAbsoluteOffset: 0, [leaseMarker])
             }
             return (opened, publication?.manifest)
@@ -368,12 +365,26 @@ private extension Environment {
         }
     }
 
-    static func writePublication(
-        _ publication: Publication,
+    static func publishManifest(
+        _ manifest: some Encodable & Sendable,
+        stagingAt staged: FilePath,
+        to target: FilePath,
+        using service: Service,
+        execution: Session.Control,
+    ) async throws {
+        try await writeManifest(manifest, to: staged, using: service)
+
+        // Finish interruption checks before the rename makes the new state visible.
+        try execution.finishCheckingInterruption()
+        try replace(staged, with: target)
+    }
+
+    private static func writeManifest(
+        _ manifest: some Encodable & Sendable,
         to path: FilePath,
         using service: Service,
     ) async throws {
-        let json = try await service.encodePublication(publication)
+        let json = try await service.encodeManifest(manifest)
         try await FileSystem.shared.withFileHandle(
             forWritingAt: path,
             options: .newFile(replaceExisting: false, permissions: .ownerReadWrite),
@@ -383,56 +394,74 @@ private extension Environment {
         }
     }
 
-    static func readPublication(
-        in storage: Storage,
+    private static func readPublication(
+        in paths: Runtime.Paths.Environment,
         using service: Service,
         expectedABI: [String],
     ) async throws -> Publication? {
-        let files = FileSystem.shared
-        let path = storage.manifestPath
-        guard let info = try await files.info(forFileAt: path, infoAboutSymbolicLink: true) else {
+        guard
+            let publication = try await readManifest(
+                at: paths.manifestFile,
+                using: service,
+                as: Publication.self,
+            )
+        else {
+            return nil
+        }
+        try await validatePublication(publication, in: paths, expectedABI: expectedABI)
+        return publication
+    }
+
+    static func readManifest<Value: Decodable & Sendable>(
+        at path: FilePath,
+        using service: Service,
+        as type: Value.Type,
+    ) async throws -> Value? {
+        guard
+            let info = try await FileSystem.shared.info(
+                forFileAt: path,
+                infoAboutSymbolicLink: true,
+            )
+        else {
             return nil
         }
         guard info.type == .regular else {
             throw invalid("Expected a regular package environment manifest: \(path)")
         }
-
         let bytes = try await [UInt8](contentsOf: path, maximumSizeAllowed: .unlimited)
-        let publication = try await service.decodePublication(bytes)
-        try await validatePublication(publication, in: storage.root, expectedABI: expectedABI)
-        return publication
+        return try await service.decodeManifest(bytes, as: type)
     }
 
-    static func validatePublication(
+    private static func validatePublication(
         _ publication: Publication,
-        in root: FilePath,
+        in paths: Runtime.Paths.Environment,
         expectedABI: [String],
     ) async throws {
         guard publication.manifest.abi == expectedABI else {
             throw invalid("The environment was prepared for a different Python runtime")
         }
 
-        if let active = publication.active {
-            let packages = active.packages(in: root)
-            let info = try await FileSystem.shared.info(
-                forFileAt: packages,
-                infoAboutSymbolicLink: true,
-            )
-            guard info?.type == .directory else {
-                throw invalid("The active package directory is missing or invalid")
-            }
+        guard let active = publication.active else {
+            return
+        }
+        let packages = paths.packagesDirectory(for: active)
+        let info = try await FileSystem.shared.info(
+            forFileAt: packages,
+            infoAboutSymbolicLink: true,
+        )
+        guard info?.type == .directory else {
+            throw invalid("The active package directory is missing or invalid")
         }
     }
 
-    static func prepareSlots(in storage: Storage, claimed: Bool) async throws {
+    private static func prepareSlots(in storage: Storage, claimed: Bool) async throws {
         let files = FileSystem.shared
-        var stagingPaths = Slot.allCases
+        let inactivePackages = Slot.allCases
             .filter { $0 != storage.active }
-            .map { $0.packages(in: storage.root) }
-        stagingPaths.append(storage.stagedManifestPath)
+            .map { storage.paths.packagesDirectory(for: $0) }
 
-        // Only a marked root owns the inactive slot and temporary manifest.
-        for path in stagingPaths {
+        // The lease marker allows cleanup of files left by a previous writer.
+        for path in inactivePackages + [storage.paths.stagedManifestFile] {
             if claimed {
                 _ = try? await files.removeItem(at: path)
             } else if try await files.info(forFileAt: path, infoAboutSymbolicLink: true) != nil {
@@ -444,10 +473,14 @@ private extension Environment {
 
 // MARK: Environment + Staging cleanup
 
-private extension Environment {
+extension Environment {
     static func discard(_ path: FilePath) async {
-        // A separate task lets cleanup finish after the operation is cancelled.
-        _ = await Task { try? await FileSystem.shared.removeItem(at: path) }.value
+        await startDiscarding(path).value
+    }
+
+    private static func startDiscarding(_ path: FilePath) -> Task<Void, Never> {
+        // Cleanup can outlive a cancelled operation or the environment's deinit.
+        Task { _ = try? await FileSystem.shared.removeItem(at: path) }
     }
 
     static func discardOnFailure(
@@ -485,9 +518,9 @@ private extension Environment {
         return true
     }
 
-    static func acquireLease(at root: FilePath) throws -> FileDescriptor {
+    static func acquireLease(at lock: FilePath, for root: FilePath) throws -> FileDescriptor {
         let descriptor = try FileDescriptor.open(
-            root.appending("environment.lock"),
+            lock,
             .readWrite,
             options: [.create, .closeOnExec, .noFollow],
             permissions: .ownerReadWrite,
@@ -507,22 +540,14 @@ private extension Environment {
     }
 }
 
-private extension Environment.Slot {
-    func packages(in root: FilePath) -> FilePath {
-        root.appending("site-packages-" + rawValue)
-    }
-}
-
 // MARK: - Cache and file staging
 
 extension Environment {
     static func clearCache(at root: FilePath) async throws {
-        for name in ["wheels", "installed"] {
-            try await clearCacheArtifacts(
-                in: root.appending(name),
-                removesPartialInstalls: name == "installed",
-            )
-        }
+        let paths = Runtime.Paths(cacheDirectory: root)
+        try await clearCacheArtifacts(in: paths.wheelsDirectory, removesPartialInstalls: false)
+        try await clearCacheArtifacts(in: paths.installedDirectory, removesPartialInstalls: true)
+        try await clearCacheArtifacts(in: paths.preparedDirectory, removesPartialInstalls: true)
     }
 
     private static func clearCacheArtifacts(
@@ -538,16 +563,21 @@ extension Environment {
         try await files.withDirectoryHandle(atPath: directory) { handle in
             for try await entry in handle.listContents() where entry.type == .directory {
                 let artifact = entry.name.string
-                let partial = removesPartialInstalls && artifact.utf8.count == 17
-                    && artifact.hasPrefix(".install-")
-                if isWheelDigest(artifact) || partial {
+                let partial = removesPartialInstalls && isPartialInstallation(artifact)
+                if isCacheDigest(artifact) || partial {
                     try await files.removeItem(at: entry.path)
                 }
             }
         }
     }
 
-    private static func isWheelDigest(_ name: String) -> Bool {
+    private static func isPartialInstallation(_ name: String) -> Bool {
+        // The wheel installer stages in a directory with an eight-character mkdtemp suffix.
+        let prefix = Runtime.Paths.installationPrefix
+        return name.hasPrefix(prefix) && name.utf8.count == prefix.utf8.count + 8
+    }
+
+    private static func isCacheDigest(_ name: String) -> Bool {
         name.utf8.count == 64 && name.utf8
             .allSatisfy { (48 ... 57).contains($0) || (97 ... 102).contains($0) }
     }
@@ -574,7 +604,8 @@ extension Environment {
             try await linkOrCopyMember(source, to: target, relative: relative)
         }
 
-        for (_, distribution) in resolution.distributions.sorted(by: { $0.key < $1.key }) {
+        let distributions = resolution.distributions.sorted { left, right in left.key < right.key }
+        for (_, distribution) in distributions {
             let origin = distribution.directory.file
             for member in distribution.files {
                 try await stageMember(member.path, from: origin)

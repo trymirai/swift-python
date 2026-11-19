@@ -17,15 +17,17 @@ public actor Session {
 
     private let startup: Startup
     private let modules: [Module]
-
     private let allowsSubprocesses: Bool
-
     nonisolated let history: History.Store?
 
+    private var state: State = .idle
     private(set) var environment: Environment?
     private var delegate: (any Delegate)?
 
-    private var state: State = .idle
+    /// The current persistent or temporary package environment, when one exists.
+    public var paths: Runtime.Paths.Environment? {
+        environment?.paths
+    }
 
     /// Output from startup. Reset clears it, and close preserves the last captured value.
     public var startupOutput: Output? {
@@ -59,10 +61,10 @@ public actor Session {
         self.directory = directory
         self.importPaths = importPaths
 
-        self.modules = modules
         self.startup = startup
-        self.history = history
+        self.modules = modules
         self.allowsSubprocesses = allowsSubprocesses
+        self.history = history
 
         self.environment = environment
         self.delegate = delegate
@@ -123,10 +125,15 @@ public actor Session {
     }
 
     private func resolvedPackageSources() throws -> [Runtime.PackageSource.Resolved] {
-        var packages = environment?.packageSources ?? []
-        if let sitePackagesPath = environment?.sitePackagesPath {
-            packages.insert(.directory(try Runtime.Path(sitePackagesPath)), at: 0)
+        guard let environment else {
+            return []
         }
+
+        var packages = environment.packageSources
+        if let local = environment.sitePackagesDirectory {
+            packages.insert(.directory(try Runtime.Path(local)), at: 0)
+        }
+
         return packages
     }
 

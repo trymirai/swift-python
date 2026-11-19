@@ -20,6 +20,30 @@ from .requirements import _requirements
 from .wheels import WheelCache
 
 
+def fingerprint(request: dict, configuration: Configuration) -> str:
+    return _resolution_fingerprint(request["requirements"], configuration, set())
+
+
+def prepare(request: dict, configuration: Configuration) -> dict:
+    overrides, pinned = _select_overrides(request, configuration.base)
+    requirements = request["requirements"] + request["local"]
+    fingerprint = _resolution_fingerprint(requirements, configuration, overrides)
+    if request.get("fingerprint") == fingerprint and not request["update"]:
+        return {"status": "unchanged"}
+
+    roots = _requirements(requirements + list(configuration.base))
+    base = {name: package for name, package in configuration.base.items() if name not in overrides}
+    installed = request["installed"]
+    provider = Provider(replace(configuration, base=base), installed, request["update"], pinned)
+    wheels = _resolve_wheels(provider, roots)
+    if not request["replace_files"] and _changes_installed_wheels(wheels, installed):
+        return {"status": "requires_reset"}
+
+    distributions = _prepare_distributions(provider.wheels, wheels)
+    _check_base_collisions(distributions, base)
+    return {"status": "resolved", "fingerprint": fingerprint, "distributions": distributions}
+
+
 def _has_exact_pin(version: Version, requirements: list[Requirement]) -> bool:
     return any(
         spec.operator in ("==", "===")
@@ -54,12 +78,11 @@ class Provider(AbstractProvider):
         self, configuration: Configuration, installed: dict, update: bool, pinned: set[str]
     ) -> None:
         self.configuration = configuration
+        self.wheels = WheelCache(configuration)
 
         self.installed = installed
         self.update = update
         self.pinned = pinned
-
-        self.wheels = WheelCache(configuration.cache)
 
         self._index_cache = {}
         self._wheel_metadata = {}
@@ -204,12 +227,6 @@ class Provider(AbstractProvider):
         return metadata
 
 
-def _prepare_distribution(cache: WheelCache, wheel: Wheel) -> dict:
-    site = cache.unpack(wheel) / "site-packages"
-    files = sorted(str(path.relative_to(site)) for path in walk_files(site))
-    return {"record": wheel.record(), "directory": str(site), "files": files}
-
-
 def _describe_conflict(provider: Provider, cause) -> str:
     requirement = cause.requirement
     message = str(requirement)
@@ -254,6 +271,11 @@ def _resolution_fingerprint(
 
 
 def _select_overrides(request: dict, base: dict) -> tuple[set[str], set[str]]:
+    def excludes_version(requirement: Requirement, record: dict | None) -> bool:
+        return bool(record) and not requirement.specifier.contains(
+            record["version"], prereleases=None
+        )
+
     local = request["local"]
     installed = request["installed"]
     overrides = set(installed).difference(request["removed"])
@@ -262,13 +284,9 @@ def _select_overrides(request: dict, base: dict) -> tuple[set[str], set[str]]:
     pinned = set() if request["update"] else set(overrides)
     for requirement in _requirements(local):
         name = canonicalize_name(requirement.name)
-        if (previous := installed.get(name)) and not requirement.specifier.contains(
-            previous["version"], prereleases=None
-        ):
+        if excludes_version(requirement, installed.get(name)):
             pinned.discard(name)
-        if (source := base.get(name)) and not requirement.specifier.contains(
-            source["version"], prereleases=None
-        ):
+        if excludes_version(requirement, base.get(name)):
             overrides.add(name)
 
     overrides.intersection_update(base)
@@ -293,31 +311,11 @@ def _changes_installed_wheels(wheels: dict[str, Wheel], installed: dict) -> bool
     )
 
 
-def prepare(request: dict, configuration: Configuration) -> dict:
-    overrides, pinned = _select_overrides(request, configuration.base)
+def _prepare_distributions(cache: WheelCache, wheels: dict[str, Wheel]) -> dict:
+    distributions = {}
+    for name, wheel in sorted(wheels.items()):
+        site = cache.unpack(wheel)
+        files = sorted(str(path.relative_to(site)) for path in walk_files(site))
+        distributions[name] = {"record": wheel.record(), "directory": str(site), "files": files}
 
-    installed = request["installed"]
-    requirements = request["requirements"] + request["local"]
-    fingerprint = _resolution_fingerprint(requirements, configuration, overrides)
-    if request.get("fingerprint") == fingerprint and not request["update"]:
-        return {"status": "unchanged"}
-
-    roots = _requirements(requirements + list(configuration.base))
-    effective = replace(
-        configuration,
-        base={
-            name: package for name, package in configuration.base.items() if name not in overrides
-        },
-    )
-    provider = Provider(effective, installed, request["update"], pinned)
-    wheels = _resolve_wheels(provider, roots)
-
-    if not request["replace_files"] and _changes_installed_wheels(wheels, installed):
-        return {"status": "requires_reset"}
-
-    distributions = {
-        name: _prepare_distribution(provider.wheels, wheel)
-        for name, wheel in sorted(wheels.items())
-    }
-    _check_base_collisions(distributions, effective.base)
-    return {"status": "resolved", "fingerprint": fingerprint, "distributions": distributions}
+    return distributions

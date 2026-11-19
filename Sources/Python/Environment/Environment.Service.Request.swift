@@ -20,14 +20,23 @@ extension Environment.Service {
         func encode(to encoder: inout Encoder) throws {
             try encodeFields(&encoder)
         }
+
+        private static func encodeResolutionInputs(
+            _ requirements: [String],
+            base: [String: Environment.BasePackage],
+            to encoder: inout Encoder,
+        ) throws {
+            try encoder.encode(requirements, forKey: "requirements")
+            try encoder.encode(base, forKey: "base")
+        }
     }
 }
 
 extension Environment.Service.Request where Reply == [String] {
     static func project(pyproject: String?, requirements: String?) -> Self {
-        Self("project") {
-            try $0.encode(pyproject, forKey: "pyproject")
-            try $0.encode(requirements, forKey: "requirements")
+        Self("project") { encoder in
+            try encoder.encode(pyproject, forKey: "pyproject")
+            try encoder.encode(requirements, forKey: "requirements")
         }
     }
 
@@ -57,22 +66,37 @@ extension Environment.Service.Request where Reply == Environment.Preparation {
         update: Bool,
         replaceFiles: Bool = true,
     ) -> Self {
-        Self("prepare") {
-            try $0.encode(requirements, forKey: "requirements")
-            try $0.encode(base, forKey: "base")
+        Self("prepare") { encoder in
+            try encodeResolutionInputs(requirements, base: base, to: &encoder)
 
-            try $0.encode(local, forKey: "local")
-            try $0.encode(removed, forKey: "removed")
-            try $0.encode(installed, forKey: "installed")
-            try $0.encode(fingerprint, forKey: "fingerprint")
+            try encoder.encode(local, forKey: "local")
+            try encoder.encode(removed, forKey: "removed")
 
-            try $0.encode(update, forKey: "update")
-            try $0.encode(replaceFiles, forKey: "replace_files")
+            try encoder.encode(installed, forKey: "installed")
+            try encoder.encode(fingerprint, forKey: "fingerprint")
+
+            try encoder.encode(update, forKey: "update")
+            try encoder.encode(replaceFiles, forKey: "replace_files")
         }
     }
 }
 
 extension Environment.Service.Request where Reply == String {
+    static func resolutionFingerprint(
+        requirements: [String],
+        base: [String: Environment.BasePackage],
+    ) -> Self {
+        Self("fingerprint") { encoder in
+            try encodeResolutionInputs(requirements, base: base, to: &encoder)
+        }
+    }
+
+    static func packageFingerprint(_ packages: [String: Environment.InstalledPackage]) -> Self {
+        Self("package_fingerprint") {
+            try $0.encode(packages.mapValues(\.digest), forKey: "digests")
+        }
+    }
+
     static func moduleName(_ module: String) -> Self {
         Self("module_name") { try $0.encode(module, forKey: "module") }
     }
@@ -92,9 +116,9 @@ extension Environment.Service {
 
 extension Environment.Service.Request where Reply == Environment.Service.None {
     static func archive(directory: String, output: String) -> Self {
-        Self("archive") {
-            try $0.encode(directory, forKey: "directory")
-            try $0.encode(output, forKey: "output")
+        Self("archive") { encoder in
+            try encoder.encode(directory, forKey: "directory")
+            try encoder.encode(output, forKey: "output")
         }
     }
 }

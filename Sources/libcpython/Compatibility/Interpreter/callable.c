@@ -20,7 +20,7 @@ free_function(SwiftFunction *function)
 }
 
 static void
-destroy_function(PyObject *capsule)
+destroy_capsule(PyObject *capsule)
 {
     SwiftFunction *function = PyCapsule_GetPointer(capsule, capsule_name);
     if (function != NULL) {
@@ -40,10 +40,11 @@ call_function(PyObject *capsule, PyObject *arguments)
         PyErr_SetString(PyExc_RuntimeError, "A Swift callback belongs to another interpreter.");
         return NULL;
     }
+
     return function->call(function->context, arguments);
 }
 
-static PyMethodDef method = {
+static PyMethodDef function_method = {
     .ml_name = "_swift_call",
     .ml_meth = call_function,
     .ml_flags = METH_VARARGS,
@@ -53,11 +54,13 @@ PyObject *
 CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *arguments),
                     void (*destroy)(void *context))
 {
+    // The Swift caller transfers ownership before any allocation.
     SwiftFunction *function = malloc(sizeof(*function));
     if (function == NULL) {
         destroy(context);
         return PyErr_NoMemory();
     }
+
     *function = (SwiftFunction){
         .interpreter = CPython_InterpreterKey(NULL),
 
@@ -66,15 +69,16 @@ CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *ar
         .destroy = destroy,
     };
 
-    PyObject *capsule = PyCapsule_New(function, capsule_name, destroy_function);
+    PyObject *capsule = PyCapsule_New(function, capsule_name, destroy_capsule);
     if (capsule == NULL) {
         free_function(function);
         return NULL;
     }
 
-    PyObject *result = PyCFunction_NewEx(&method, capsule, NULL);
+    PyObject *callable = PyCFunction_NewEx(&function_method, capsule, NULL);
+    // The callable retains the capsule on success. On failure this releases the Swift context.
     Py_DECREF(capsule);
-    return result;
+    return callable;
 }
 
 PyObject *

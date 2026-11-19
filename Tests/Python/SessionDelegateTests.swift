@@ -135,6 +135,70 @@ func hostStreamsBypassPathOpenDelegate() async throws {
     }
 }
 
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func asyncContextCallsCaptureStreamsWithDelegate(_ fail: Bool) async throws {
+    let source = #"""
+    import asyncio
+    import sys
+
+    def remember_streams():
+        global original_streams
+        original_streams = (sys.stdin, sys.stdout, sys.stderr)
+
+    def check_streams():
+        assert (sys.stdin, sys.stdout, sys.stderr) == original_streams
+
+    async def noisy(fail):
+        print("native stdout", flush=True)
+        sys.stderr.buffer.write(b"native stderr\n")
+        sys.stderr.buffer.flush()
+        assert sys.stdin.read() == ""
+
+        await asyncio.sleep(0)
+        print("after await", flush=True)
+        if fail:
+            raise ValueError("native failure")
+        return 42
+    """#
+    let session = try await Python::Runtime().session(
+        .source(source),
+        delegate: RecordingFileAccessDelegate(),
+    )
+    defer { await session.close() }
+
+    func callStreamFunction(_ name: String) async throws {
+        try await session.enqueue { context in
+            try context.object(name).call().decode(as: Void.self)
+        }
+    }
+
+    func callNoisy() async throws -> Int {
+        try await session.enqueue { context in
+            let function = try await context.get("noisy", as: Python::Reference.self)
+            return try await context.call(function, arguments: [fail])
+        }
+    }
+
+    try await callStreamFunction("remember_streams")
+    if fail {
+        let exception = try await #require(throws: Python::Exception.self) { try await callNoisy() }
+        #expect(exception.name == "ValueError")
+        #expect(exception.message == "native failure")
+    } else {
+        #expect(try await callNoisy() == 42)
+    }
+
+    try await callStreamFunction("check_streams")
+
+    let execution = try await session.evaluate(#"""
+    print("repl stdout")
+    _ = sys.stderr.buffer.write(b"repl stderr\n")
+    sys.stderr.buffer.flush()
+    """#)
+    #expect(execution.output.stdout == "repl stdout\n")
+    #expect(execution.output.stderr == "repl stderr\n")
+}
+
 @Test(.timeLimit(.minutes(1)))
 func standaloneScriptUsesOneDelegateForSourceAndPythonFileAccess() async throws {
     try await withTemporaryDirectory { directory in
@@ -261,10 +325,8 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
         }
         defer { evaluation.cancel() }
 
-        if interruption != .timeout {
-            _ = try await #require(nextSignal(from: entered.stream))
-        }
         if interruption == .cancelParent {
+            _ = try await #require(nextSignal(from: entered.stream))
             evaluation.cancel()
         }
 

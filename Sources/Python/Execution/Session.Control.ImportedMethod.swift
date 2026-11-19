@@ -58,29 +58,39 @@ final class ImportedCall<Result: Sendable>: Sendable {
     func value(in context: Context) async throws -> Result {
         try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: Void.self) { group in
-                let result = try await withCheckedThrowingContinuation { continuation in
-                    guard state.withLock({ $0.install(continuation) }) else {
-                        continuation.resume(throwing: CancellationError())
-                        return
-                    }
-                    group.addTask {
-                        do {
-                            try await context.withSessionContext { _ in
-                                unsafe try PThread.withCallbackAttachment { attachment in
-                                    try self.run(in: attachment)
-                                }
-                            }
-                        } catch {
-                            self.finish(.failure(error))
-                            throw error
+                let outcome: Swift::Result<Result, any Swift::Error>
+                do {
+                    outcome = .success(try await withCheckedThrowingContinuation { continuation in
+                        guard install(continuation) else {
+                            return
                         }
-                    }
+                        group.addTask {
+                            try await self.run(in: context)
+                        }
+                    })
+                } catch {
+                    outcome = .failure(error)
                 }
+
+                // Wait for Python's event loop to finish cleanup before propagating an error.
                 try await group.waitForAll()
-                return result
+                return try outcome.get()
             }
         } onCancel: {
             self.cancel()
+        }
+    }
+
+    private func run(in context: Context) async throws {
+        do {
+            try await context.withSessionContext { _ in
+                unsafe try PThread.withCallbackAttachment { attachment in
+                    try run(in: attachment)
+                }
+            }
+        } catch {
+            finish(.failure(error))
+            throw error
         }
     }
 
@@ -88,12 +98,12 @@ final class ImportedCall<Result: Sendable>: Sendable {
         guard let execution = attachment.storage.execution else {
             throw Session.Error.closed
         }
+
         let request = try Object.makeFunction(self, in: attachment)
         let functions = try Object.import(
             module: "_swift_python_runtime.exports.functions",
             in: attachment,
         )
-        let coroutine = try functions.attribute("call_imported").call(request)
         let control = try Object.makeFunction(
             Session.Control.Callback(
                 execution: execution,
@@ -101,19 +111,25 @@ final class ImportedCall<Result: Sendable>: Sendable {
             ),
             in: attachment,
         )
-        let support = try Object.import(
+        let coroutine = try functions.attribute("call_imported").call(request, control)
+
+        let block = try Object.import(
             module: "_swift_python_runtime.async_support",
             in: attachment,
         )
-        let block = try support.attribute("await_block").call(coroutine, control)
-        let asyncio = try Object.import(module: "asyncio", in: attachment)
-        let run = try asyncio.attribute("run")
+        .attribute("await_block")
+        .call(coroutine, control)
+
+        let run = try Object.import(module: "asyncio", in: attachment).attribute("run")
         unsafe try run.callInterruptibly([block.pointer], using: execution).decode(as: Void.self)
+        // Let execution settlement handle failures after Python has finished cleaning up.
+        if let error = state.withLock({ $0.error }) {
+            throw error
+        }
     }
 
     private func submit(_ continuation: Continuation, to callback: Session.Control.ExportCall) {
-        guard state.withLock({ $0.install(continuation) }) else {
-            continuation.resume(throwing: CancellationError())
+        guard install(continuation) else {
             return
         }
 
@@ -124,8 +140,21 @@ final class ImportedCall<Result: Sendable>: Sendable {
         }
     }
 
+    private func install(_ continuation: Continuation) -> Bool {
+        guard state.withLock({ $0.install(continuation) }) else {
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        return true
+    }
+
     private func finish(_ outcome: Swift::Result<Result, any Swift::Error>) {
-        let continuation = state.withLock { $0.finish() }
+        let error: (any Swift::Error)? = if case let .failure(error) = outcome {
+            error
+        } else {
+            nil
+        }
+        let continuation = state.withLock { $0.finish(error) }
         continuation?.resume(with: outcome)
     }
 }
@@ -155,7 +184,15 @@ extension ImportedCall {
     private enum State {
         case initial
         case waiting(Continuation)
-        case finished
+        case finished((any Swift::Error)?)
+
+        var error: (any Swift::Error)? {
+            if case let .finished(error) = self {
+                error
+            } else {
+                nil
+            }
+        }
 
         var isWaiting: Bool {
             if case .waiting = self {
@@ -173,9 +210,12 @@ extension ImportedCall {
             return true
         }
 
-        mutating func finish() -> Continuation? {
+        mutating func finish(_ error: (any Swift::Error)?) -> Continuation? {
+            if case .finished = self {
+                return nil
+            }
             // Cancellation can finish the request before the continuation is installed.
-            let previous = exchange(&self, with: .finished)
+            let previous = exchange(&self, with: .finished(error))
             guard case let .waiting(continuation) = previous else {
                 return nil
             }

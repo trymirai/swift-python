@@ -20,6 +20,7 @@ extension Environment {
                 updated.fingerprint = resolution.fingerprint
                 updated.packages = resolution.distributions.mapValues(\.record)
             }
+
             return updated
         }
 
@@ -31,22 +32,39 @@ extension Environment {
     }
 }
 
-// MARK: - Environment.Slot
+// MARK: - Environment.Manifest + Encodable
 
-extension Environment {
-    enum Slot: String, CaseIterable, Sendable {
-        case a
-        case b
+extension Environment.Manifest: Encodable {
+    func encode(to encoder: inout Encoder) throws {
+        try encoder.encode(abi, forKey: "abi")
+        try encoder.encode(fingerprint, forKey: "fingerprint")
 
-        var other: Self {
-            self == .a ? .b : .a
-        }
+        try encoder.encode(local, forKey: "local")
+        try encoder.encode(packages, forKey: "packages")
+    }
+}
+
+// MARK: - Environment.Manifest + Decodable
+
+extension Environment.Manifest: Decodable {
+    init(from decoder: borrowing Decoder) throws {
+        abi = try decoder.decode([String].self, forKey: "abi")
+        fingerprint = try decoder.decode(String?.self, forKey: "fingerprint")
+
+        local = try decoder.decode([String: String].self, forKey: "local")
+        packages = try decoder.decode(
+            [String: Environment.InstalledPackage].self,
+            forKey: "packages",
+        )
     }
 }
 
 // MARK: - Environment.Publication
 
 extension Environment {
+    typealias Slot = Runtime.Paths.Environment.Slot
+
+    // A single rename publishes the active slot and its package records together.
     struct Publication: Sendable {
         let active: Slot?
         let manifest: Manifest
@@ -57,10 +75,7 @@ extension Environment {
 
 extension Environment.Publication: Encodable {
     func encode(to encoder: inout Encoder) throws {
-        try encoder.encode(manifest.abi, forKey: "abi")
-        try encoder.encode(manifest.fingerprint, forKey: "fingerprint")
-        try encoder.encode(manifest.local, forKey: "local")
-        try encoder.encode(manifest.packages, forKey: "packages")
+        try manifest.encode(to: &encoder)
         try encoder.encode(active?.rawValue, forKey: "active")
     }
 }
@@ -69,23 +84,17 @@ extension Environment.Publication: Encodable {
 
 extension Environment.Publication: Decodable {
     init(from decoder: borrowing Decoder) throws {
-        let manifest = try Environment.Manifest(
-            abi: decoder.decode([String].self, forKey: "abi"),
-            fingerprint: decoder.decode(String?.self, forKey: "fingerprint"),
-            local: decoder.decode([String: String].self, forKey: "local"),
-            packages: decoder.decode(
-                [String: Environment.InstalledPackage].self,
-                forKey: "packages",
-            ),
-        )
+        let manifest = try Environment.Manifest(from: decoder)
+        let name = try decoder.decode(String?.self, forKey: "active")
+        let active = name.flatMap(Environment.Slot.init(rawValue:))
 
-        let raw = try decoder.decode(String?.self, forKey: "active")
-        let active = raw.flatMap(Environment.Slot.init(rawValue:))
-        let hasActiveSlot = active != nil
-        let needsActiveSlot = !manifest.packages.isEmpty
-        guard raw == nil || hasActiveSlot, hasActiveSlot == needsActiveSlot else {
+        guard
+            name == nil || active != nil,
+            manifest.packages.isEmpty == (active == nil)
+        else {
             throw Exception(name: "ValueError", message: "Invalid active package directory.")
         }
+
         self.init(active: active, manifest: manifest)
     }
 }

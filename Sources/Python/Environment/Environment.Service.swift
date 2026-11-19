@@ -13,6 +13,9 @@ extension Environment {
 
         private nonisolated let executor: Interpreter.Executor
 
+        // A shared preparation holds its reservation from manifest read through publication.
+        nonisolated let preparations: Session.Operations = .init()
+
         private var pThread: PThread?
         private var configuration: Configuration?
 
@@ -38,22 +41,22 @@ extension Environment {
             }
 
             let pThread = try PThread()
-            let result = try pThread.withAttached { attachment in
+            let configuration = try pThread.withAttached { attachment in
                 try Object.installImporter(in: attachment)
+                let resolved = try options.resolved(in: attachment)
 
                 let module = try Object.import(module: Self.moduleName, in: attachment)
                 let configure = try module.attribute("configure")
-                let result = try configure.call(
-                    Object(encoding: options, in: attachment),
-                    Object(encoding: packages, in: attachment),
-                    Object.makeFunction(Runtime.PackageSource.Reader(packages), in: attachment),
-                )
-                return try result.decode(as: Environment.Configuration.self)
+                let options = try Object(encoding: resolved, in: attachment)
+                return try Self.withEncodedSources(packages, in: attachment) { sources, reader in
+                    try configure.call(options, sources, reader)
+                        .decode(as: Environment.Configuration.self)
+                }
             }
 
             self.pThread = consume pThread
-            configuration = result
-            return result
+            self.configuration = configuration
+            return configuration
         }
 
         func configuration(
@@ -61,12 +64,23 @@ extension Environment {
         ) throws -> Environment.Configuration {
             try withModule { module, attachment in
                 let describe = try module.attribute("describe_sources")
-                return try describe.call(
-                    Object(encoding: packages, in: attachment),
-                    Object.makeFunction(Runtime.PackageSource.Reader(packages), in: attachment),
-                )
-                .decode(as: Environment.Configuration.self)
+                return try Self.withEncodedSources(packages, in: attachment) { sources, reader in
+                    try describe.call(sources, reader).decode(as: Environment.Configuration.self)
+                }
             }
+        }
+
+        private static func withEncodedSources(
+            _ packages: [Runtime.PackageSource.Resolved],
+            in attachment: borrowing PThread.Attachment,
+            _ body: (borrowing Object, borrowing Object) throws -> Environment.Configuration,
+        ) throws -> Environment.Configuration {
+            let sources = try Object(encoding: packages, in: attachment)
+            let reader = try Object.makeFunction(
+                Runtime.PackageSource.Reader(packages),
+                in: attachment,
+            )
+            return try body(sources, reader)
         }
 
         func projectPackageSource(
@@ -88,7 +102,7 @@ extension Environment {
             return try await request(inputs, execution: execution)
         }
 
-        // The caller finishes the control after any environment publication.
+        // The caller keeps interruption active until the operation is ready to publish.
         func request<Reply: Decodable & Sendable>(
             _ request: Request<Reply>,
             execution: Session.Control,
@@ -106,18 +120,21 @@ extension Environment {
             }
         }
 
-        func encodePublication(_ publication: Publication) throws -> String {
+        func encodeManifest(_ manifest: some Encodable & Sendable) throws -> String {
             try withModule { module, attachment in
                 let encode = try module.attribute("encode_manifest")
-                return try encode.call(Object(encoding: publication, in: attachment)).string()
+                return try encode.call(Object(encoding: manifest, in: attachment)).string()
             }
         }
 
-        func decodePublication(_ bytes: [UInt8]) throws -> Publication {
+        func decodeManifest<Result: Decodable & Sendable>(
+            _ bytes: [UInt8],
+            as type: Result.Type,
+        ) throws -> Result {
             try withModule { module, attachment in
                 let decode = try module.attribute("decode_manifest")
                 return try decode.call(Object(bytes: bytes.span, in: attachment))
-                    .decode(as: Publication.self)
+                    .decode(as: type)
             }
         }
 

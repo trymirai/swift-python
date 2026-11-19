@@ -10,11 +10,10 @@ public extension Runtime {
         /// An existing site-packages directory, including distribution metadata.
         case directory(String)
 
-        /// A prepared site-packages ZIP, for example in application resources.
+        /// A ZIP file rooted at the contents of a site-packages directory.
         case archive(String)
 
-        /// A ZIP of an installed site-packages tree, including resources and metadata.
-        /// SwiftPM's embedInCode resource rule can supply these bytes.
+        /// Site-packages ZIP bytes, for example from SwiftPM's `embedInCode` resource rule.
         case embedded([UInt8])
     }
 }
@@ -35,20 +34,36 @@ extension Runtime.PackageSource {
 // MARK: - Runtime.PackageSource.Resolved
 
 extension Runtime.PackageSource {
-    enum Resolved: Sendable, Encodable {
+    enum Resolved: Sendable {
         case directory(Runtime.Path)
         case archive(Runtime.Path)
         case embedded([UInt8])
 
-        func encode(to encoder: inout Encoder) throws {
+        var source: Runtime.PackageSource {
             switch self {
             case let .directory(path):
-                try encoder.encode(path.string, forKey: "directory")
+                .directory(path.string)
             case let .archive(path):
-                try encoder.encode(path.string, forKey: "archive")
+                .archive(path.string)
             case let .embedded(bytes):
-                try encoder.encode(bytes.count, forKey: "size")
+                .embedded(bytes)
             }
+        }
+    }
+}
+
+// MARK: - Runtime.PackageSource.Resolved + Encodable
+
+extension Runtime.PackageSource.Resolved: Encodable {
+    func encode(to encoder: inout Encoder) throws {
+        switch self {
+        case let .directory(path):
+            try encoder.encode(path.string, forKey: "directory")
+        case let .archive(path):
+            try encoder.encode(path.string, forKey: "archive")
+        case let .embedded(bytes):
+            // The reader serves the archive bytes on demand.
+            try encoder.encode(bytes.count, forKey: "size")
         }
     }
 }

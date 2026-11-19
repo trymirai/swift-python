@@ -281,9 +281,9 @@ Use absolute paths for scripts, projects, and environments. For the project exam
 let script = try await runtime.run(script: "/path/to/version_label.py", arguments: ["v2.1rc1+ci"])
 print(script.output.stdout, terminator: "") // 2.1rc1
 
+let resources = try await runtime.prepare(project: "/path/to/project", in: "/path/to/preparations")
 let projectSession = try await runtime.session(
-    .project(directory: "/path/to/project", module: "reporting"),
-    environmentDirectory: "/path/to/environments/reporting",
+    resources, module: "reporting", environmentDirectory: "/path/to/environments/reporting",
 )
 print(try await projectSession.get("__name__", as: String.self)) // reporting
 await projectSession.close()
@@ -300,7 +300,7 @@ If both are present, `requirements.txt` takes precedence. Dependencies are insta
 startup. Package installation supports pure-Python wheels.
 
 Use `Runtime(packageIndex:)` to select a package index; the default is PyPI.
-Use `Runtime(cacheDirectory:)` to choose a directory for cached wheels.
+Use `Runtime(cacheDirectory:)` or `Runtime(paths:)` to choose the package cache root.
 
 Set `environmentDirectory:` to an absolute path to reuse installed packages between sessions.
 Only one session may use an environment directory at a time. Without this parameter, the
@@ -313,6 +313,11 @@ resolution error.
 
 Project sessions without explicit session sources also use the project's `site-packages` or
 `.venv`. These package directories must be inside the project.
+
+`runtime.prepare(project:in:)` returns shared `ProjectResources` for `runtime.session(resources, module:)`.
+Pass `update: true` to refresh dependencies; existing resources remain usable while the cache is available.
+`runtime.paths`, `resources.paths`, and `session.paths` expose runtime, preparation, and session paths
+using Swift System's `FilePath`.
 
 Use `session.packages` to inspect installed versions, install or uninstall requirements, and
 resolve dependencies. `resolve()` preserves compatible installed versions; `update()` selects

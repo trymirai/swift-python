@@ -43,8 +43,56 @@ public struct Runtime: Sendable {
         if !packages.isEmpty || packageIndex != "https://pypi.org/simple/" {
             _ = try await packaging.open()
         }
+
         self.packaging = packaging
         self.options = options
+    }
+
+    /// Creates a runtime using the host's explicit package-cache paths.
+    public init(
+        packages: [PackageSource] = [],
+        paths: Paths,
+        packageIndex: String = "https://pypi.org/simple/",
+        options: Options = [],
+    ) async throws {
+        try await self.init(
+            packages: packages,
+            cacheDirectory: paths.cacheDirectory.string,
+            packageIndex: packageIndex,
+            options: options,
+        )
+    }
+
+    /// The resolved cache layout, including the default root when none was supplied.
+    public var paths: Paths {
+        get async throws {
+            let (_, configuration) = try await packaging.open()
+            return configuration.paths
+        }
+    }
+
+    /// Resolves a project's dependencies into resources that live sessions can share.
+    ///
+    /// Compatible versions are reused until `update` is true or the requirements change.
+    /// Resolution manifests are published atomically under `preparationsDirectory`.
+    /// The installed files live in the runtime's `paths.preparedDirectory`.
+    public func prepare(
+        project directory: String,
+        in preparationsDirectory: String,
+        packages: [PackageSource] = [],
+        update: Bool = false,
+    ) async throws -> ProjectResources {
+        let project = try Path(directory)
+        let destination = try Path(preparationsDirectory)
+        let sources = try packages.map { try $0.resolved() }
+
+        return try await Environment.prepareShared(
+            project: project,
+            in: destination,
+            packages: sources,
+            using: packaging,
+            update: update,
+        )
     }
 
     /// Prepares dependencies and returns a session that starts Python on first use.
@@ -82,6 +130,31 @@ public struct Runtime: Sendable {
             importPaths: importPaths,
             modules: modules,
             moduleDefinitions: [],
+            history: history,
+            delegate: delegate,
+        )
+    }
+
+    /// Opens a project session with the package sources from a previous preparation.
+    ///
+    /// Each session has its own interpreter. A missing `module` selects the first project package.
+    public func session(
+        _ resources: ProjectResources,
+        module: String? = nil,
+        directory: String? = nil,
+        environmentDirectory: String? = nil,
+        importPaths: [String] = [],
+        modules: [any ModuleHost.Type] = [],
+        history: Session.History? = nil,
+        delegate: (any Session.Delegate)? = nil,
+    ) async throws -> Session {
+        try await session(
+            .project(directory: resources.project.string, module: module),
+            directory: directory,
+            environmentDirectory: environmentDirectory,
+            packages: resources.sources,
+            importPaths: importPaths,
+            modules: modules,
             history: history,
             delegate: delegate,
         )
@@ -154,7 +227,7 @@ public struct Runtime: Sendable {
     }
 
     /// Prepares a project's pure-Python dependencies as an embeddable site-packages ZIP.
-    /// Include module to put the flat-layout project's package in the same archive.
+    /// Pass `module` to include the flat-layout project package.
     public func bundle(
         project directory: String,
         module: String? = nil,
@@ -190,7 +263,8 @@ public struct Runtime: Sendable {
         }
     }
 
-    /// Clears cached wheels and unpacked packages after all users of the cache have stopped.
+    /// Clears cached wheel downloads, installations, and shared preparations.
+    /// Close all users of the cache before clearing it.
     /// Keep persistent environments and application packages in separate directories.
     public static func clearPackageCache(at directory: String) async throws {
         let cache = try Path(directory).file

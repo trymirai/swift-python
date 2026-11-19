@@ -1,5 +1,6 @@
 """Swift-facing package preparation; environment transactions stay in Swift."""
 
+import hashlib
 import json
 from dataclasses import replace
 
@@ -9,13 +10,14 @@ from ..packages import installation_tools
 installation_tools()
 
 from .candidate import Wheel
-from .configuration import describe, load, with_sources
+from .configuration import Configuration, describe, load
 from .configuration import project_package_source as project_package_source
 from .requirements import module_name as module_name
 from .requirements import names as names
 from .requirements import normalize as normalize
 from .requirements import project as project
 from .requirements import script as script
+from .resolver import fingerprint as resolution_fingerprint
 from .resolver import prepare as prepare_distributions
 from .wheels import archive as archive
 
@@ -28,17 +30,33 @@ def configure(configuration: dict, sources: list[dict], read) -> dict:
         raise RuntimeError("The package service is already configured")
 
     options = load(configuration)
-    description = describe(with_sources(options, sources, read))
+    description = describe(options, sources, read)
+
     _configuration = options
     return description
 
 
 def describe_sources(sources: list[dict], read) -> dict:
-    return describe(with_sources(_configuration, sources, read))
+    return describe(_configuration, sources, read)
 
 
 def prepare(request: dict) -> dict:
-    return prepare_distributions(request, replace(_configuration, base=request["base"]))
+    return prepare_distributions(request, _configuration_for(request))
+
+
+def fingerprint(request: dict) -> str:
+    return resolution_fingerprint(request, _configuration_for(request))
+
+
+def _configuration_for(request: dict) -> Configuration:
+    # Each request supplies its own base because sessions can select different sources.
+    return replace(_configuration, base=request["base"])
+
+
+def package_fingerprint(request: dict) -> str:
+    signature = sorted(request["digests"].items())
+    encoded = json.dumps(signature, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def encode_manifest(manifest: dict) -> str:

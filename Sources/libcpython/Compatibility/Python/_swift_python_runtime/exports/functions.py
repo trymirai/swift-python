@@ -2,25 +2,30 @@
 
 import keyword
 import linecache
+from contextlib import nullcontext
 from inspect import Parameter, Signature, isawaitable
 from types import ModuleType
 
 from ..async_support import wait_for_pipe
+from ..streams import capture
 
 
-async def call_imported(request):
+async def call_imported(request, control=None):
     import asyncio
 
-    try:
-        result = request("call")
-        if isawaitable(result):
-            result = await result
-        request("return", result)
-    except asyncio.CancelledError:
-        request("cancel")
-        raise
-    except BaseException as error:
-        request("raise", error)
+    # Standalone calls install capture. Calls dispatched by an export inherit its streams.
+    streams = capture(control, {}) if control is not None else nullcontext()
+    with streams:
+        try:
+            result = request("call")
+            if isawaitable(result):
+                result = await result
+            request("return", result)
+        except asyncio.CancelledError:
+            request("cancel")
+            raise
+        except BaseException as error:
+            request("raise", error)
 
 
 class _SwiftDefault:
@@ -104,9 +109,7 @@ def _bind_parameters(
         declaration = f"{parameter}: {expression}" if expression else parameter
         bound_default = _DEFAULT if native else default
 
-        # Swift permits a default before a required parameter. Bind with a
-        # sentinel and let the native binder check every required argument
-        # before evaluating any Swift default expression.
+        # Sentinels let the native binder check required arguments before evaluating Swift defaults.
         if native or has_default:
             declaration += f"=__swift_defaults[{len(defaults)}]"
             defaults.append(bound_default)
@@ -134,7 +137,6 @@ class FunctionFactory:
     def create(self, record, module: ModuleType, *, member: bool = False):
         name, documentation, returns, asynchronous, parameters, native, index = record
         name = identifier(name)
-
         if member and is_reserved_member(name):
             raise ValueError("Native classes do not export Python special methods")
 
@@ -144,7 +146,7 @@ class FunctionFactory:
         )
         return_annotation, return_expression = _annotation(returns, imports, name)
 
-        def function_source() -> str:
+        def render_source() -> str:
             call = (
                 f"await __swift_call({index}, ({arguments}))"
                 if asynchronous
@@ -152,16 +154,13 @@ class FunctionFactory:
             )
             prefix = "async " if asynchronous else ""
             return_clause = f" -> {return_expression}" if return_expression else ""
-            source = (
+            definition = (
                 f"{prefix}def {name}({declarations}){return_clause}:\n"
                 f"    {documentation!r}\n    return {call}\n"
             )
-            if imports:
-                source = f"{import_source(imports)}\n\n{source}"
+            return f"{import_source(imports)}\n\n{definition}" if imports else definition
 
-            return source
-
-        source = function_source()
+        source = render_source()
         if imports:
             self.imports.setdefault(module.__name__, set()).update(imports)
 
@@ -178,7 +177,7 @@ class FunctionFactory:
         result = scope.pop(name)
         del scope["__swift_defaults"]
 
-        # The generated defaults accept any Swift parameter order. Show the original signature.
+        # Swift allows required parameters after defaults. Keep that order in introspection.
         result.__signature__ = Signature(
             visible,
             return_annotation=return_annotation or Signature.empty,
@@ -204,10 +203,12 @@ class FunctionFactory:
                     task.add_done_callback(lambda _, request=request: tasks.pop(request, None))
 
         async def cancel_methods():
-            if tasks:
-                for task in tasks.values():
-                    task.cancel()
-                await asyncio.gather(*tasks.values(), return_exceptions=True)
+            if not tasks:
+                return
+
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
 
         descriptor, ticket = self._invoke("start", index, arguments)
         try:

@@ -233,7 +233,10 @@ private func startTLSServer(
         raw.settimeout(10)
         connection = context.wrap_socket(raw, server_side=True)
         while True:
-            data = connection.recv(4)
+            try:
+                data = connection.recv(4)
+            except ConnectionResetError:
+                break
             if not data:
                 break
             connection.sendall(data.upper())

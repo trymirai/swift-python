@@ -60,26 +60,34 @@ struct ProjectFixture {
         delegate: (any Python::Session.Delegate)? = nil,
         _ test: (Python::Session) async throws -> Void,
     ) async throws {
-        let session = try await runtime.session(
-            projectStartup,
-            environmentDirectory: environmentDirectory ?? environment,
-            delegate: delegate,
+        try await withSession(
+            runtime.session(
+                projectStartup,
+                environmentDirectory: environmentDirectory ?? environment,
+                delegate: delegate,
+            ),
+            test,
         )
-        try await withSession(session, test)
-    }
-
-    // MARK: Package artifacts
-
-    func readManifest() async throws -> [UInt8] {
-        try await [UInt8](contentsOf: manifest, maximumSizeAllowed: .unlimited)
     }
 
     func rebuildRuntime() async throws -> Python::Runtime {
         try await Self.makeRuntime(at: root, using: builder)
     }
 
+    // MARK: Package artifacts
+
+    func readManifest(at path: FilePath? = nil) async throws -> [UInt8] {
+        try await [UInt8](contentsOf: path ?? manifest, maximumSizeAllowed: .unlimited)
+    }
+
     func addDependencyUpdate() async throws {
         _ = try await builder.evaluate(#"wheel('sampledep', '2.0', 'VALUE = 2\n')"#)
+    }
+
+    func addConflictingDependency() async throws {
+        _ = try await builder.evaluate(#"""
+        wheel("sampleconflict", "1.0", "VALUE = 9\n", path="sampledep/__init__.py")
+        """#)
     }
 
     func addSharedPackageWheels() async throws {
@@ -87,6 +95,13 @@ struct ProjectFixture {
         wheel('sharedbase', '2.0', 'VALUE = 22\n')
         wheel('sharedbase', '3.0', 'VALUE = 33\n')
         """#)
+    }
+
+    func takeIndexOffline() async throws {
+        try await FileSystem.shared.moveItem(
+            at: root.appending("simple"),
+            to: root.appending("offline"),
+        )
     }
 
     func prepareProjectVirtualEnvironment() async throws {
@@ -112,13 +127,6 @@ struct ProjectFixture {
         _ = try await builder
             .evaluate("write_base(Path(source_path), source_version, source_value)")
         return archived ? .archive(path) : .directory(path)
-    }
-
-    func takeIndexOffline() async throws {
-        try await FileSystem.shared.moveItem(
-            at: root.appending("simple"),
-            to: root.appending("offline"),
-        )
     }
 
     @discardableResult
@@ -177,6 +185,11 @@ struct ProjectFixture {
 
     root = Path(root_path)
 
+    def distribution_metadata(name, version, requires=()):
+        headers = f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n"
+        dependencies = "".join(f"Requires-Dist: {requirement}\n" for requirement in requires)
+        return (headers + dependencies).encode()
+
     def write_record(files, metadata):
         records = io.StringIO()
         writer = csv.writer(records)
@@ -211,10 +224,7 @@ struct ProjectFixture {
         metadata = f"{name}-{version}.dist-info"
         files = {
             path or f"{name}/__init__.py": source.encode(),
-            f"{metadata}/METADATA": (
-                f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n"
-                + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires)
-            ).encode(),
+            f"{metadata}/METADATA": distribution_metadata(name, version, requires),
             f"{metadata}/WHEEL": (
                 b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
             ),
@@ -244,9 +254,7 @@ struct ProjectFixture {
         metadata = f"sharedbase-{version}.dist-info"
         files = {
             "sharedbase/__init__.py": f"VALUE = {value}\n".encode(),
-            f"{metadata}/METADATA": (
-                f"Metadata-Version: 2.4\nName: sharedbase\nVersion: {version}\n"
-            ).encode(),
+            f"{metadata}/METADATA": distribution_metadata("sharedbase", version),
         }
         if legacy:
             files["sharedbase_old.py"] = b"VALUE = 17\n"
