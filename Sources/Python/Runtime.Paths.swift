@@ -31,36 +31,28 @@ public extension Runtime {
             wheelDirectory(digest: digest).appending(identifier + Self.downloadSuffix)
         }
 
-        public var installedDirectory: FilePath {
-            cacheDirectory.appending("installed")
+        public func wheelPackagesDirectory(digest: String) -> FilePath {
+            wheelDirectory(digest: digest).appending(Self.sitePackagesName)
         }
 
-        public func installationDirectory(digest: String) -> FilePath {
-            installedDirectory.appending(digest)
+        public func wheelStagingDirectory(digest: String, identifier: String) -> FilePath {
+            wheelDirectory(digest: digest).appending(Self.installationPrefix + identifier)
         }
 
-        public func installedPackagesDirectory(digest: String) -> FilePath {
-            installationDirectory(digest: digest).appending(Self.sitePackagesName)
+        public var environmentsDirectory: FilePath {
+            cacheDirectory.appending("environments")
         }
 
-        public func installationStagingDirectory(identifier: String) -> FilePath {
-            installedDirectory.appending(Self.installationPrefix + identifier)
+        public func environmentDirectory(digest: String) -> FilePath {
+            environmentsDirectory.appending(digest)
         }
 
-        public var preparedDirectory: FilePath {
-            cacheDirectory.appending("prepared")
+        public func environmentPackagesDirectory(digest: String) -> FilePath {
+            environmentDirectory(digest: digest).appending(Self.sitePackagesName)
         }
 
-        public func preparedInstallationDirectory(digest: String) -> FilePath {
-            preparedDirectory.appending(digest)
-        }
-
-        public func preparedPackagesDirectory(digest: String) -> FilePath {
-            preparedInstallationDirectory(digest: digest).appending(Self.sitePackagesName)
-        }
-
-        public func preparedStagingDirectory(identifier: String) -> FilePath {
-            preparedDirectory.appending(Self.installationPrefix + identifier)
+        public func environmentStagingDirectory(identifier: String) -> FilePath {
+            environmentsDirectory.appending(Self.installationPrefix + identifier)
         }
 
         public var temporaryDirectory: FilePath {

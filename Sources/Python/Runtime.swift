@@ -75,7 +75,7 @@ public struct Runtime: Sendable {
     ///
     /// Compatible versions are reused until `update` is true or the requirements change.
     /// Resolution manifests are published atomically under `preparationsDirectory`.
-    /// The installed files live in the runtime's `paths.preparedDirectory`.
+    /// The installed files live in the runtime's `paths.environmentsDirectory`.
     public func prepare(
         project directory: String,
         in preparationsDirectory: String,

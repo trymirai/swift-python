@@ -546,8 +546,7 @@ extension Environment {
     static func clearCache(at root: FilePath) async throws {
         let paths = Runtime.Paths(cacheDirectory: root)
         try await clearCacheArtifacts(in: paths.wheelsDirectory, removesPartialInstalls: false)
-        try await clearCacheArtifacts(in: paths.installedDirectory, removesPartialInstalls: true)
-        try await clearCacheArtifacts(in: paths.preparedDirectory, removesPartialInstalls: true)
+        try await clearCacheArtifacts(in: paths.environmentsDirectory, removesPartialInstalls: true)
     }
 
     private static func clearCacheArtifacts(
@@ -572,9 +571,10 @@ extension Environment {
     }
 
     private static func isPartialInstallation(_ name: String) -> Bool {
-        // The wheel installer stages in a directory with an eight-character mkdtemp suffix.
         let prefix = Runtime.Paths.installationPrefix
-        return name.hasPrefix(prefix) && name.utf8.count == prefix.utf8.count + 8
+        let suffix = name.dropFirst(prefix.count)
+        return name.hasPrefix(prefix) && suffix.utf8.count == 32
+            && suffix.utf8.allSatisfy { (48 ... 57).contains($0) || (97 ... 102).contains($0) }
     }
 
     private static func isCacheDigest(_ name: String) -> Bool {

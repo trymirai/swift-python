@@ -221,8 +221,8 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments(asynchronous: Bool) a
                 try await expectScratchIsEmpty()
                 #expect(try await ProjectFixture.directoryNames(at: cache.appending("wheels"))
                     .count == 2)
-                #expect(try await ProjectFixture.directoryNames(at: cache.appending("installed"))
-                    .count == 2)
+                #expect(try await FileSystem.shared
+                    .info(forFileAt: cache.appending("installed")) == nil)
             }
         }
 

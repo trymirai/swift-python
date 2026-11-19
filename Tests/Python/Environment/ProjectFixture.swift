@@ -219,7 +219,7 @@ struct ProjectFixture {
             for member, data in files.items():
                 archive.writestr(member, data)
 
-    def wheel(name, version, source, requires=(), path=None):
+    def wheel(name, version, source, requires=(), path=None, extra_files=None):
         filename = f"{name}-{version}-py3-none-any.whl"
         metadata = f"{name}-{version}.dist-info"
         files = {
@@ -229,6 +229,8 @@ struct ProjectFixture {
                 b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
             ),
         }
+        if extra_files:
+            files.update(extra_files)
         write_record(files, metadata)
 
         target = root / filename
@@ -270,7 +272,10 @@ struct ProjectFixture {
             file.write_bytes(data)
 
     wheel("sampleleaf", "1.0", "VALUE = 1\n")
-    wheel("sampledep", "1.0", "from sampleleaf import VALUE\n", ("sampleleaf>=1",))
+    wheel(
+        "sampledep", "1.0", "from sampleleaf import VALUE\n", ("sampleleaf>=1",),
+        extra_files={"sampledep-1.0.data/data/share/sampledep.txt": b"embedded asset"},
+    )
     wheel("sampleextra", "1.0", "VALUE = 9\n")
     wheel("sampleplugin", "1.0", "VALUE = 10\n", ("sampledep>=1",), path="sampledep/plugin.py")
 

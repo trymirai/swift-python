@@ -133,12 +133,12 @@ class WheelCache:
             return metadata
 
     def unpack(self, wheel: Wheel) -> Path:
-        target = self._configuration.installed / wheel.digest
+        target = self._configuration.wheels / wheel.digest / self._configuration.site_packages
         target.parent.mkdir(parents=True, exist_ok=True)
 
         if not target.is_dir():
             self._install(wheel, target)
-        return target / self._configuration.site_packages
+        return target
 
     def _install(self, wheel: Wheel, target: Path) -> None:
         configuration = self._configuration
@@ -149,7 +149,12 @@ class WheelCache:
             wheel_path = self.download(wheel)
             _validate_archive(wheel_path, wheel)
             _install_archive(wheel_path, stage, configuration.site_packages)
-            _publish_install(stage, target)
+
+            # Publish auxiliary wheel data first; site-packages marks a complete unpack.
+            for entry in stage.iterdir():
+                if entry.name != configuration.site_packages:
+                    _publish_install(entry, target.parent / entry.name)
+            _publish_install(stage / configuration.site_packages, target)
         finally:
             if stage.exists():
                 shutil.rmtree(stage)

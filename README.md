@@ -281,7 +281,7 @@ Use absolute paths for scripts, projects, and environments. For the project exam
 let script = try await runtime.run(script: "/path/to/version_label.py", arguments: ["v2.1rc1+ci"])
 print(script.output.stdout, terminator: "") // 2.1rc1
 
-let resources = try await runtime.prepare(project: "/path/to/project", in: "/path/to/preparations")
+let resources = try await runtime.prepare(project: "/path/to/project", in: "/path/to/resolutions")
 let projectSession = try await runtime.session(
     resources, module: "reporting", environmentDirectory: "/path/to/environments/reporting",
 )
@@ -302,6 +302,10 @@ startup. Package installation supports pure-Python wheels.
 Use `Runtime(packageIndex:)` to select a package index; the default is PyPI.
 Use `Runtime(cacheDirectory:)` or `Runtime(paths:)` to choose the package cache root.
 
+Each wheel archive and its unpacked `site-packages` share `wheels/<wheel-digest>/`.
+Shared dependency sets live in `environments/<set-digest>/site-packages/` and reuse the
+unpacked wheel files through hard links, with copying when the filesystem requires it.
+
 Set `environmentDirectory:` to an absolute path to reuse installed packages between sessions.
 Only one session may use an environment directory at a time. Without this parameter, the
 environment is temporary and is removed when the session closes.
@@ -316,7 +320,7 @@ Project sessions without explicit session sources also use the project's `site-p
 
 `runtime.prepare(project:in:)` returns shared `ProjectResources` for `runtime.session(resources, module:)`.
 Pass `update: true` to refresh dependencies; existing resources remain usable while the cache is available.
-`runtime.paths`, `resources.paths`, and `session.paths` expose runtime, preparation, and session paths
+`runtime.paths`, `resources.paths`, and `session.paths` expose runtime, resolution, and session paths
 using Swift System's `FilePath`.
 
 Use `session.packages` to inspect installed versions, install or uninstall requirements, and

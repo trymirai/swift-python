@@ -37,7 +37,6 @@ extension Environment.Service.ResolvedOptions: Encodable {
     func encode(to encoder: inout Encoder) throws {
         try encoder.encode(paths.cacheDirectory.string, forKey: "cache")
         try encoder.encode(paths.wheelsDirectory.string, forKey: "wheels")
-        try encoder.encode(paths.installedDirectory.string, forKey: "installed")
 
         try encoder.encode(Runtime.Paths.sitePackagesName, forKey: "site_packages")
         try encoder.encode(Runtime.Paths.installationPrefix, forKey: "installation_prefix")

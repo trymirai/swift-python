@@ -27,7 +27,6 @@ ABI = [sys.implementation.cache_tag, sys.platform, getattr(sys.implementation, "
 class Configuration:
     cache: Path
     wheels: Path
-    installed: Path
 
     site_packages: str
     installation_prefix: str
@@ -45,7 +44,6 @@ def load(options: dict) -> Configuration:
     return Configuration(
         cache=cache,
         wheels=absolute_path(options["wheels"]),
-        installed=absolute_path(options["installed"]),
         site_packages=options["site_packages"],
         installation_prefix=options["installation_prefix"],
         download_suffix=options["download_suffix"],

@@ -12,14 +12,14 @@ func sharedPreparationKeepsSourcesAndSessionStateIndependent() async throws {
     try await ProjectFixture.withFixture { fixture in
         let resources = try await fixture.prepareResources()
         let cache = try await fixture.runtime.paths
-        let installed = try installedDirectory(in: resources)
+        let packages = try environmentPackagesDirectory(in: resources)
 
         #expect(resources.paths.directory == fixture.preparations.appending(resources.fingerprint))
         #expect(try await FileSystem.shared
             .info(forFileAt: resources.paths.manifestFile)?
             .type == .regular)
         #expect(try await FileSystem.shared.info(forFileAt: resources.paths.lockFile) == nil)
-        #expect(installed.starts(with: cache.preparedDirectory))
+        #expect(packages.starts(with: cache.environmentsDirectory))
 
         let first = try await fixture.runtime.session(
             resources,
@@ -38,7 +38,7 @@ func sharedPreparationKeepsSourcesAndSessionStateIndependent() async throws {
         await first.close()
 
         try await expectAnswer(41, in: second)
-        #expect(try await FileSystem.shared.info(forFileAt: installed)?.type == .directory)
+        #expect(try await FileSystem.shared.info(forFileAt: packages)?.type == .directory)
     }
 }
 
@@ -70,8 +70,10 @@ func concurrentSharedPreparationsPublishCompleteSources(_ separateRuntimes: Bool
     }
 }
 
-@Test(.timeLimit(.minutes(1)))
-func sharedPreparationReopensOfflineAndRepairsRemovedAssembly() async throws {
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func sharedPreparationReopensOfflineAndRepairsEnvironment(
+    removeUnpackedWheel: Bool,
+) async throws {
     try await ProjectFixture.withFixture { fixture in
         let first = try await fixture.prepareResources()
         let initial = try await FileSystem.shared.info(forFileAt: first.paths.manifestFile)
@@ -84,8 +86,17 @@ func sharedPreparationReopensOfflineAndRepairsRemovedAssembly() async throws {
         #expect(first.fingerprint == cached.fingerprint)
         #expect(initial?.lastDataModificationTime == repeated?.lastDataModificationTime)
 
-        let installed = try installedDirectory(in: cached)
-        try await FileSystem.shared.removeItem(at: installed.removingLastComponent())
+        let packages = try environmentPackagesDirectory(in: cached)
+        try await FileSystem.shared.removeItem(at: packages.removingLastComponent())
+        if removeUnpackedWheel {
+            let paths = try await runtime.paths
+            let digest = try #require(
+                try await ProjectFixture.directoryNames(at: paths.wheelsDirectory).first,
+            )
+            try await FileSystem.shared.removeItem(
+                at: paths.wheelPackagesDirectory(digest: digest.string),
+            )
+        }
         let repaired = try await fixture.prepareResources(using: runtime)
 
         try await withSession(runtime.session(repaired)) { session in
@@ -258,6 +269,107 @@ func sharedPackageCollisionsDoNotPublishIncompleteSources() async throws {
     }
 }
 
+@Test(.timeLimit(.minutes(1)))
+func sharedEnvironmentsReuseWheelUnpacks() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        let original = try await fixture.prepareResources()
+        let paths = try await fixture.runtime.paths
+        let digests = try await ProjectFixture.directoryNames(at: paths.wheelsDirectory)
+        #expect(digests.count == 2)
+        var dependency: FilePath?
+        for digest in digests {
+            let directory = paths.wheelDirectory(digest: digest.string)
+            let entries = try await ProjectFixture.directoryNames(at: directory)
+            let archives = entries.filter { $0.string.hasSuffix(".whl") }
+            let archive = try #require(archives.first)
+            #expect(archives.count == 1)
+            let expected: Set<String> = if archive.string.hasPrefix("sampledep-") {
+                [archive.string, "site-packages", "data"]
+            } else {
+                [archive.string, "site-packages"]
+            }
+            #expect(Set(entries.map(\.string)) == expected)
+            let packages = paths.wheelPackagesDirectory(digest: digest.string)
+            #expect(try await FileSystem.shared.info(forFileAt: packages)?.type == .directory)
+            if archive.string.hasPrefix("sampledep-") {
+                dependency = packages.appending("sampledep/__init__.py")
+                let data = try await [UInt8](
+                    contentsOf: directory.appending("data/share/sampledep.txt"),
+                    maximumSizeAllowed: .unlimited,
+                )
+                #expect(data == Array("embedded asset".utf8))
+            }
+        }
+        let cachedFile = try #require(dependency)
+        #expect(try await FileSystem.shared
+            .info(forFileAt: paths.cacheDirectory.appending("installed")) == nil)
+        #expect(try await FileSystem.shared
+            .info(forFileAt: paths.cacheDirectory.appending("prepared")) == nil)
+
+        let delegate = FileAccessDelegate { $0.path.starts(with: fixture.root) }
+        let first = try await fixture.runtime.session(original, delegate: delegate)
+        defer { await first.close() }
+        try await first.set(cachedFile.string, forKey: "cached_file")
+        _ = try await first.evaluate("""
+        from pathlib import Path
+        assert Path(sampledep.__file__).samefile(cached_file)
+        assert not Path(sampledep.__file__).is_symlink()
+        """)
+
+        try await fixture.write(
+            "sampledep>=1\nsampleextra==1\n",
+            to: "project/requirements.txt",
+        )
+        let expanded = try await fixture.prepareResources()
+        let originalPackages = try environmentPackagesDirectory(in: original)
+        let expandedPackages = try environmentPackagesDirectory(in: expanded)
+        #expect(originalPackages != expandedPackages)
+
+        let second = try await fixture.runtime.session(expanded, delegate: delegate)
+        defer { await second.close() }
+        try await second.set(cachedFile.string, forKey: "cached_file")
+        try await second.set(
+            originalPackages.appending("sampledep/__init__.py").string,
+            forKey: "original_file",
+        )
+        _ = try await second.evaluate("""
+        from pathlib import Path
+        assert Path(sampledep.__file__).samefile(cached_file)
+        assert Path(sampledep.__file__).samefile(original_file)
+        assert not Path(sampledep.__file__).is_symlink()
+        """)
+    }
+}
+
+@Test(.timeLimit(.minutes(1)))
+func packageCacheClearsWheelArtifactsAndSharedEnvironments() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        let resources = try await fixture.prepareResources()
+        let manifest = try await fixture.readManifest(at: resources.paths.manifestFile)
+        let paths = try await fixture.runtime.paths
+        let files = FileSystem.shared
+        let wheelStaging = paths.wheelStagingDirectory(
+            digest: String(repeating: "a", count: 64),
+            identifier: "abcdefgh",
+        )
+        let environmentStaging = paths.environmentStagingDirectory(
+            identifier: String(repeating: "b", count: 32),
+        )
+        for directory in [wheelStaging, environmentStaging] {
+            try await files.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        for directory in [paths.wheelsDirectory, paths.environmentsDirectory] {
+            try await "keep".write(toFileAt: directory.appending("keep.txt"))
+        }
+
+        try await Python::Runtime.clearPackageCache(at: paths.cacheDirectory.string)
+        #expect(try await ProjectFixture.directoryNames(at: paths.wheelsDirectory) == ["keep.txt"])
+        #expect(try await ProjectFixture
+            .directoryNames(at: paths.environmentsDirectory) == ["keep.txt"])
+        #expect(try await fixture.readManifest(at: resources.paths.manifestFile) == manifest)
+    }
+}
+
 private extension ProjectFixture {
     var preparations: FilePath {
         root.appending("shared")
@@ -277,7 +389,7 @@ private extension ProjectFixture {
     }
 }
 
-private func installedDirectory(
+private func environmentPackagesDirectory(
     in resources: Python::Runtime.ProjectResources,
     sourceLocation: SourceLocation = #_sourceLocation,
 ) throws -> FilePath {

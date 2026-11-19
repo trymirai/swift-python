@@ -105,7 +105,7 @@ extension Environment {
             using: service,
             execution: execution,
         )
-        let fingerprint: String? = if let cached, try await !hasPreparedDirectory(at: cached) {
+        let fingerprint: String? = if let cached, try await !hasEnvironmentDirectory(at: cached) {
             nil
         } else {
             previous?.fingerprint
@@ -177,7 +177,7 @@ extension Environment {
             return nil
         }
         let digest = try await service.request(.packageFingerprint(packages), execution: execution)
-        return cache.preparedPackagesDirectory(digest: digest)
+        return cache.environmentPackagesDirectory(digest: digest)
     }
 
     private static func stageSharedFiles(
@@ -186,12 +186,12 @@ extension Environment {
         in cache: Runtime.Paths,
         execution: Session.Control,
     ) async throws {
-        guard try await !hasPreparedDirectory(at: sitePackages) else {
+        guard try await !hasEnvironmentDirectory(at: sitePackages) else {
             return
         }
 
         let target = sitePackages.removingLastComponent()
-        let staged = cache.preparedStagingDirectory(identifier: identifier())
+        let staged = cache.environmentStagingDirectory(identifier: identifier())
         defer { await discard(staged) }
 
         let paths = Runtime.Paths.Environment(directory: staged)
@@ -206,13 +206,13 @@ extension Environment {
             try await FileSystem.shared.moveItem(at: staged, to: target)
         } catch let error as FileSystemError {
             // Another runtime may have published the same immutable wheel set.
-            guard try await hasPreparedDirectory(at: sitePackages) else {
+            guard try await hasEnvironmentDirectory(at: sitePackages) else {
                 throw error
             }
         }
     }
 
-    private static func hasPreparedDirectory(at path: FilePath) async throws -> Bool {
+    private static func hasEnvironmentDirectory(at path: FilePath) async throws -> Bool {
         try await FileSystem.shared.info(forFileAt: path)?.type == .directory
     }
 

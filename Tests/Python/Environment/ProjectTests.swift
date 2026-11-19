@@ -213,13 +213,24 @@ func packageChangesRequireResetAndPublishOneSlot() async throws {
     try await ProjectFixture.withFixture { fixture in
         try await fixture.withProject { session in
             let root = fixture.environmentRoot
-            let cache = fixture.root.appending("cache/installed")
+            let cache = try await fixture.runtime.paths
             let alternateSlot = root.appending("site-packages-b")
             let files = FileSystem.shared
             let packages = session.packages
 
+            func unpackedWheels() async throws -> Set<FilePath.Component> {
+                var unpacked = Set<FilePath.Component>()
+                for digest in try await ProjectFixture.directoryNames(at: cache.wheelsDirectory) {
+                    let directory = cache.wheelPackagesDirectory(digest: digest.string)
+                    if try await files.info(forFileAt: directory)?.type == .directory {
+                        unpacked.insert(digest)
+                    }
+                }
+                return unpacked
+            }
+
             let installed = try await packages.installed()
-            let unpacked = try await ProjectFixture.directoryNames(at: cache)
+            let unpacked = try await unpackedWheels()
             #expect(installed == ["sampledep": "1.0", "sampleleaf": "1.0", "sharedbase": "1.0"])
             #expect(try await session.evaluate("counter = 41; answer()").output.stdout == "42\n")
             let previous = try await fixture.readManifest()
@@ -227,7 +238,7 @@ func packageChangesRequireResetAndPublishOneSlot() async throws {
             #expect(try await packages.install(requirements: ["sampleextra"]) == .requiresReset)
             try await fixture.addDependencyUpdate()
             #expect(try await packages.update() == .requiresReset)
-            #expect(try await ProjectFixture.directoryNames(at: cache) == unpacked)
+            #expect(try await unpackedWheels() == unpacked)
             #expect(try await packages.installed() == installed)
             #expect(try await fixture.readManifest() == previous)
             #expect(try await files.info(forFileAt: alternateSlot) == nil)
@@ -307,7 +318,7 @@ func savedProjectEnvironmentReopensOffline() async throws {
         try await Python::Runtime.clearPackageCache(at: cache.string)
         #expect(try await ProjectFixture
             .directoryNames(at: cache.appending("wheels")) == ["keep.txt"])
-        #expect(try await ProjectFixture.directoryNames(at: cache.appending("installed")).isEmpty)
+        #expect(try await FileSystem.shared.info(forFileAt: cache.appending("installed")) == nil)
         try await fixture.takeIndexOffline()
 
         try await fixture.withProject { session in
