@@ -52,13 +52,21 @@ and `Python::Decodable`.
 ### Python objects and live output
 
 Use `enqueue` to import Python modules, access objects, and call Python functions.
-Decode results to Swift values before returning them from the closure.
+`Object.call` returns a Python object; async `Context.call` accepts a `Reference`, awaits
+async results, and decodes a Swift value. Decode or retain objects before leaving the closure.
 
 ```swift
 let console = try await runtime.session()
 let settings: [String: Int] = try await console.enqueue { context in
     let json = try context.import(module: "json")
     return try json.attribute("loads").call(#"{"retries":3}"#).decode()
+}
+
+let sleep: Python::Reference = try await console.enqueue { context in
+    try context.import(module: "asyncio").attribute("sleep").decode()
+}
+let answer: Int = try await console.enqueue { context in
+    try await context.call(sleep, arguments: [0], keywords: [("result", 42)])
 }
 
 let job = try await console.evaluate("""

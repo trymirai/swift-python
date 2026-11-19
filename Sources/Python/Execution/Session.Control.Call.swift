@@ -109,7 +109,7 @@ extension Session.Control {
             withExtendedLifetime(streams) {}
         }
 
-        func submit(_ method: any ImportedMethodRequest) throws {
+        func submit(_ method: any ImportedCallRequest) throws {
             try state.withLock { state in
                 guard state.phase.isPending else {
                     throw CancellationError()
@@ -129,7 +129,7 @@ extension Session.Control {
             }
         }
 
-        func poll() throws -> [any ImportedMethodRequest]? {
+        func poll() throws -> [any ImportedCallRequest]? {
             try state.withLock { state in
                 if state.notified {
                     try pipe.consumeNotification()
@@ -177,7 +177,7 @@ extension Session.Control.Call {
     private struct State {
         var phase: Phase = .pending
 
-        var methods: [any ImportedMethodRequest] = []
+        var methods: [any ImportedCallRequest] = []
         var notified: Bool = false
 
         var completion: CheckedContinuation<Void, Never>?
@@ -199,7 +199,7 @@ extension Session.Control.Call {
             return outcome
         }
 
-        mutating func finish(_ outcome: Outcome) -> [any ImportedMethodRequest]? {
+        mutating func finish(_ outcome: Outcome) -> [any ImportedCallRequest]? {
             guard phase.isPending else {
                 return nil
             }

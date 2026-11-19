@@ -15,6 +15,7 @@ public struct Context: Sendable {
     private weak var session: Session?
 
     private weak var execution: Session.Control?
+    private var queuedScope: (any Sendable)?
 
     private(set) weak var streams: Session.Stream.Descriptors?
 
@@ -29,10 +30,18 @@ public struct Context: Sendable {
         self.init(storage: try Interpreter.Storage.requireCurrent())
     }
 
-    /// Swift data for the execution that supplied this context.
-    /// The value becomes nil when that execution finishes its callbacks.
+    /// Swift data for the active execution or this context's queued operations.
+    /// A callback context loses its scope when the execution finishes its callbacks.
     public var scope: (any Sendable)? {
-        execution?.scope
+        execution?.scope ?? queuedScope
+    }
+
+    func queued(scope: (any Sendable)?) -> Context {
+        var context = self
+        context.execution = nil
+        context.streams = nil
+        context.queuedScope = scope
+        return context
     }
 
     public borrowing func get<T: Decodable & ~Copyable>(
@@ -152,13 +161,41 @@ public extension Context {
         try await withSessionContext { try $0.remove(name) }
     }
 
-    private func withSessionContext<Result: Sendable & ~Copyable>(
+    /// Calls Python and awaits its result through the existing async import bridge.
+    /// Ordinary values return directly; awaitables are resolved on Python's event loop.
+    /// Queued contexts take one turn for this call. Active Swift exports use their
+    /// current execution. Only owned Swift values cross suspension points.
+    func call<Result: Decodable & Sendable & ~Copyable>(
+        _ function: Reference,
+        arguments: [any Encodable & Sendable] = [],
+        keywords: [(String, any Encodable & Sendable)] = [],
+        as type: Result.Type = Result.self,
+    ) async throws -> Result {
+        try Task.checkCancellation()
+        let call = ImportedCall<Session.Transfer<Result>>(
+            .instance(function),
+            name: nil,
+            arguments: arguments,
+            keywords: keywords,
+            decode: { try Session.Transfer($0.decode(as: type)) },
+        )
+        let result: Session.Transfer<Result>
+        if execution != nil {
+            try checkExecution()
+            result = try await call.value()
+        } else {
+            result = try await call.value(in: self)
+        }
+        return result.take()
+    }
+
+    internal func withSessionContext<Result: Sendable & ~Copyable>(
         _ body: @Sendable (borrowing Context) throws -> Result,
     ) async throws -> Result {
         if execution != nil {
             return try withAccess(body)
         }
-        return try await requireSession().enqueue(generation: references, body)
+        return try await requireSession().enqueue(generation: references, scope: queuedScope, body)
     }
 }
 

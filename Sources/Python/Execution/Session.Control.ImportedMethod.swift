@@ -5,19 +5,19 @@
 internal import libcpython
 import Synchronization
 
-// MARK: - ImportedMethodRequest
+// MARK: - ImportedCallRequest
 
-protocol ImportedMethodRequest: Object.Callable, Sendable {
+protocol ImportedCallRequest: Object.Callable, Sendable {
     func cancel()
 }
 
-// MARK: - ImportedMethod
+// MARK: - ImportedCall
 
-private final class ImportedMethod<Result: Sendable> {
+final class ImportedCall<Result: Sendable>: Sendable {
     private typealias Continuation = CheckedContinuation<Result, any Swift::Error>
 
     private let receiver: Receiver
-    private let name: String
+    private let name: String?
 
     private let arguments: [any Encodable & Sendable]
     private let keywords: [(String, any Encodable & Sendable)]
@@ -28,7 +28,7 @@ private final class ImportedMethod<Result: Sendable> {
 
     init(
         _ receiver: Receiver,
-        name: String,
+        name: String?,
         arguments: [any Encodable & Sendable],
         keywords: [(String, any Encodable & Sendable)],
         decode: @escaping @Sendable (borrowing Object) throws -> Result,
@@ -55,6 +55,62 @@ private final class ImportedMethod<Result: Sendable> {
         }
     }
 
+    func value(in context: Context) async throws -> Result {
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                let result = try await withCheckedThrowingContinuation { continuation in
+                    guard state.withLock({ $0.install(continuation) }) else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    group.addTask {
+                        do {
+                            try await context.withSessionContext { _ in
+                                unsafe try PThread.withCallbackAttachment { attachment in
+                                    try self.run(in: attachment)
+                                }
+                            }
+                        } catch {
+                            self.finish(.failure(error))
+                            throw error
+                        }
+                    }
+                }
+                try await group.waitForAll()
+                return result
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    private func run(in attachment: borrowing PThread.Attachment) throws {
+        guard let execution = attachment.storage.execution else {
+            throw Session.Error.closed
+        }
+        let request = try Object.makeFunction(self, in: attachment)
+        let functions = try Object.import(
+            module: "_swift_python_runtime.exports.functions",
+            in: attachment,
+        )
+        let coroutine = try functions.attribute("call_imported").call(request)
+        let control = try Object.makeFunction(
+            Session.Control.Callback(
+                execution: execution,
+                streamsOutput: execution.hasOutputHandler,
+            ),
+            in: attachment,
+        )
+        let support = try Object.import(
+            module: "_swift_python_runtime.async_support",
+            in: attachment,
+        )
+        let block = try support.attribute("await_block").call(coroutine, control)
+        let asyncio = try Object.import(module: "asyncio", in: attachment)
+        let run = try asyncio.attribute("run")
+        unsafe try run.callInterruptibly([block.pointer], using: execution).decode(as: Void.self)
+    }
+
     private func submit(_ continuation: Continuation, to callback: Session.Control.ExportCall) {
         guard state.withLock({ $0.install(continuation) }) else {
             continuation.resume(throwing: CancellationError())
@@ -74,9 +130,9 @@ private final class ImportedMethod<Result: Sendable> {
     }
 }
 
-// MARK: ImportedMethod.Receiver
+// MARK: ImportedCall.Receiver
 
-extension ImportedMethod {
+extension ImportedCall {
     enum Receiver: Sendable {
         case instance(Reference)
         case type(module: String, name: String)
@@ -93,9 +149,9 @@ extension ImportedMethod {
     }
 }
 
-// MARK: ImportedMethod.State
+// MARK: ImportedCall.State
 
-extension ImportedMethod {
+extension ImportedCall {
     private enum State {
         case initial
         case waiting(Continuation)
@@ -128,9 +184,9 @@ extension ImportedMethod {
     }
 }
 
-// MARK: ImportedMethodRequest
+// MARK: ImportedCallRequest
 
-extension ImportedMethod: ImportedMethodRequest {
+extension ImportedCall: ImportedCallRequest {
     func cancel() {
         finish(.failure(CancellationError()))
     }
@@ -166,8 +222,12 @@ extension ImportedMethod: ImportedMethodRequest {
         }
 
         let object = try receiver.object(in: attachment)
-        let method = try object.attribute(name)
-        let value = try method.call(arguments: arguments, keywords: keywords)
+        let function = if let name {
+            try object.attribute(name)
+        } else {
+            object.retained()
+        }
+        let value = try function.call(arguments: arguments, keywords: keywords)
 
         return unsafe _overrideLifetime(consume value, borrowing: attachment)
     }
@@ -189,7 +249,7 @@ public extension Reference {
         keywords: [(String, any Encodable & Sendable)],
         decode: @escaping @Sendable (borrowing Object) throws -> Result,
     ) async throws -> Result {
-        try await ImportedMethod(
+        try await ImportedCall(
             .instance(self),
             name: name,
             arguments: arguments,
@@ -208,7 +268,7 @@ public extension _PImported {
         keywords: [(String, any Encodable & Sendable)],
         decode: @escaping @Sendable (borrowing Object) throws -> Result,
     ) async throws -> Result {
-        try await ImportedMethod(
+        try await ImportedCall(
             .type(module: _pImport.module, name: _pImport.name),
             name: name,
             arguments: arguments,

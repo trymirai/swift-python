@@ -118,7 +118,7 @@ extension Interpreter.ExportDispatcher: Object.Callable {
 
     @_lifetime(borrow attachment)
     private func makeRequests(
-        for methods: [any ImportedMethodRequest],
+        for methods: [any ImportedCallRequest],
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
         let list = unsafe try Object.take(PyList_New(methods.count), in: attachment)

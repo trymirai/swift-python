@@ -105,12 +105,15 @@ public extension Session {
     }
 
     /// Runs asynchronous Swift work with a context bound to the current generation.
-    /// Each asynchronous context operation takes its own turn in the session queue.
+    /// Each asynchronous context operation takes its own turn in the session queue
+    /// and inherits the supplied scope. Other operations, including reset, can run
+    /// while the Swift body is suspended between context operations.
     nonisolated func enqueue<R: Sendable & ~Copyable>(
         in parent: Context? = nil,
+        scope: (any Sendable)? = nil,
         _ body: @Sendable (borrowing Context) async throws -> R,
     ) async throws -> R {
-        let context = try await enqueue(in: parent) { $0 }
+        let context = try await enqueue(in: parent, scope: scope) { $0.queued(scope: scope) }
         return try await body(context)
     }
 }

@@ -2,10 +2,25 @@
 
 import keyword
 import linecache
-from inspect import Parameter, Signature
+from inspect import Parameter, Signature, isawaitable
 from types import ModuleType
 
 from ..async_support import wait_for_pipe
+
+
+async def call_imported(request):
+    import asyncio
+
+    try:
+        result = request("call")
+        if isawaitable(result):
+            result = await result
+        request("return", result)
+    except asyncio.CancelledError:
+        request("cancel")
+        raise
+    except BaseException as error:
+        request("raise", error)
 
 
 class _SwiftDefault:
@@ -177,16 +192,6 @@ class FunctionFactory:
 
         tasks = {}
 
-        async def call_method(request):
-            try:
-                result = await request("call")
-                request("return", result)
-            except asyncio.CancelledError:
-                request("cancel")
-                raise
-            except BaseException as error:
-                request("raise", error)
-
         def dispatch_methods(requests):
             for request, task in tuple(tasks.items()):
                 if not request("pending"):
@@ -194,7 +199,7 @@ class FunctionFactory:
 
             for request in requests:
                 if request("pending"):
-                    task = asyncio.create_task(call_method(request))
+                    task = asyncio.create_task(call_imported(request))
                     tasks[request] = task
                     task.add_done_callback(lambda _, request=request: tasks.pop(request, None))
 
