@@ -22,15 +22,10 @@ extension CPythonBuildPlugin: BuildToolPlugin {
         let packageDirectory = context.package.directoryURL
         let tool = try context.tool(named: "CPythonBuild").url
 
-        // Xcode supplies a symbolic tool path and can plan several platforms for one target.
+        // Swift Build and Xcode can plan host and destination variants for one target.
         // Give each variant its own generated sources inside the plugin work directory.
-        let outputDirectory = if tool.path.hasPrefix("/${BUILD_DIR}/") {
-            context
-                .pluginWorkDirectoryURL
-                .appending(path: "$(PLATFORM_NAME)$(EFFECTIVE_PLATFORM_NAME)")
-        } else {
-            context.pluginWorkDirectoryURL
-        }
+        let outputDirectory = context.pluginWorkDirectoryURL
+            .appending(path: "$(PLATFORM_NAME)$(EFFECTIVE_PLATFORM_NAME)")
 
         let inputs = try InputFiles(packageDirectory: packageDirectory.path).collect()
         return [.buildCommand(
