@@ -1,7 +1,64 @@
 #include "../interpreter.h"
 #include "internal/pycore_ceval.h"
 
+typedef struct {
+    PyThreadState *thread;
+    void *execution;
+
+    PyObject *handler;
+    bool deferred;
+} LoopInterruption;
+
 static _Thread_local CPython_Evaluation *current_evaluation;
+static _Thread_local LoopInterruption *current_loop;
+
+static LoopInterruption *
+active_loop(void)
+{
+    if (current_loop != NULL && current_evaluation != NULL &&
+        current_loop->execution == current_evaluation->context &&
+        current_loop->thread == PyThreadState_Get()) {
+        return current_loop;
+    }
+    return NULL;
+}
+
+PyObject *
+CPython_DriveEventLoop(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "Expected an interrupt handler and a loop driver.");
+        return NULL;
+    }
+
+    LoopInterruption loop = {
+        .thread = PyThreadState_Get(),
+        .execution = current_evaluation != NULL ? current_evaluation->context : NULL,
+        .handler = args[0],
+    };
+
+    LoopInterruption *previous = current_loop;
+    current_loop = &loop;
+
+    PyObject *result = PyObject_Vectorcall(args[1], args + 2, nargs - 2, NULL);
+
+    current_loop = previous;
+    return result;
+}
+
+void
+CPython_ResumeDeferredInterruption(void)
+{
+    if (current_loop == NULL || !current_loop->deferred) {
+        return;
+    }
+
+    // A ready handle is about to run in its own context and may never yield to the loop.
+    LoopInterruption *loop = active_loop();
+    if (loop != NULL) {
+        CPython_RequestEvaluationInterrupt(loop->thread->interp);
+    }
+}
 
 CPython_Evaluation *
 CPython_SetEvaluation(CPython_Evaluation *evaluation)
@@ -11,16 +68,45 @@ CPython_SetEvaluation(CPython_Evaluation *evaluation)
     return previous;
 }
 
+static inline int
+loop_should_interrupt(LoopInterruption *loop)
+{
+    loop->deferred = false;
+    PyObject *decision = PyObject_CallNoArgs(loop->handler);
+    if (decision == NULL) {
+        return -1;
+    }
+
+    // False defers until a context switch. None leaves cancellation to the event loop.
+    loop->deferred = decision == Py_False;
+    bool interrupt = decision == Py_True;
+    Py_DECREF(decision);
+    return interrupt;
+}
+
 int
 CPython_CheckEvaluation(void)
 {
     CPython_Evaluation *evaluation = current_evaluation;
-    if (evaluation != NULL && evaluation->context != NULL &&
-        evaluation->interrupt(evaluation->context)) {
-        CPython_RaiseKeyboardInterrupt();
-        return -1;
+    if (evaluation == NULL || evaluation->context == NULL) {
+        return 0;
     }
-    return 0;
+
+    LoopInterruption *loop = active_loop();
+    bool deferred = loop != NULL && loop->deferred;
+    if (!deferred && !evaluation->interrupt(evaluation->context)) {
+        return 0;
+    }
+
+    if (loop != NULL) {
+        int interrupt = loop_should_interrupt(loop);
+        if (interrupt <= 0) {
+            return interrupt;
+        }
+    }
+
+    CPython_RaiseKeyboardInterrupt();
+    return -1;
 }
 
 static int
@@ -55,31 +141,4 @@ CPython_CallInterruptibly(PyObject *function, PyObject *const *arguments, size_t
 
     CPython_SetEvaluation(previous);
     return result;
-}
-
-void
-CPython_InterruptThreadState(PyThreadState *state)
-{
-    // The caller holds the interpreter's GIL. A successful exchange transfers the reference.
-    PyObject *expected = NULL;
-    Py_INCREF(PyExc_KeyboardInterrupt);
-    if (_Py_atomic_compare_exchange_ptr(&state->async_exc, &expected, PyExc_KeyboardInterrupt)) {
-        _Py_set_eval_breaker_bit(state, _PY_ASYNC_EXCEPTION_BIT);
-    } else {
-        Py_DECREF(PyExc_KeyboardInterrupt);
-    }
-}
-
-bool
-CPython_TakeThreadInterruption(void)
-{
-    PyThreadState *state = PyThreadState_Get();
-    PyObject *expected = PyExc_KeyboardInterrupt;
-    if (!_Py_atomic_compare_exchange_ptr(&state->async_exc, &expected, NULL)) {
-        return false;
-    }
-
-    _Py_unset_eval_breaker_bit(state, _PY_ASYNC_EXCEPTION_BIT);
-    Py_DECREF(PyExc_KeyboardInterrupt);
-    return true;
 }

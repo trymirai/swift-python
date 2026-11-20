@@ -22,6 +22,10 @@ struct ProjectFixture {
         .project(directory: project, module: Self.projectModule)
     }
 
+    var cacheDirectory: FilePath {
+        root.appending("cache")
+    }
+
     var environmentRoot: FilePath {
         root.appending("environment")
     }
@@ -41,8 +45,8 @@ struct ProjectFixture {
             let builderRuntime = try await Python::Runtime(
                 cacheDirectory: root.appending("fixture-cache").string,
             )
-            let builder = try await builderRuntime
-                .session(delegate: FileAccessDelegate { $0.path.starts(with: root) })
+            let delegate = FileAccessDelegate { $0.path.starts(with: root) }
+            let builder = try await builderRuntime.session(delegate: delegate)
 
             // Keep fixture creation in its own interpreter while sessions consume the artifacts.
             try await withSession(builder) { builder in
@@ -80,6 +84,12 @@ struct ProjectFixture {
         try await [UInt8](contentsOf: path ?? manifest, maximumSizeAllowed: .unlimited)
     }
 
+    func addConditionalDependency() async throws {
+        _ = try await builder.evaluate("""
+        wheel("conditional", "1.0", "pass", ("sampleleaf; sys_platform == 'ios'",))
+        """)
+    }
+
     func addDependencyUpdate() async throws {
         _ = try await builder.evaluate(#"wheel('sampledep', '2.0', 'VALUE = 2\n')"#)
     }
@@ -104,6 +114,14 @@ struct ProjectFixture {
         )
     }
 
+    func enableAsyncProjectStartup() async throws {
+        let source = FilePath(project).appending("\(Self.projectModule)/__init__.py")
+        let prefix = "import asyncio\nawait asyncio.sleep(0)\n"
+        let startup = prefix + (try await readText(at: source))
+
+        try await startup.write(toFileAt: source, options: .newFile(replaceExisting: true))
+    }
+
     func prepareProjectVirtualEnvironment() async throws {
         _ = try await builder.evaluate(#"""
         import sys
@@ -124,8 +142,9 @@ struct ProjectFixture {
         try await builder.set(path, forKey: "source_path")
         try await builder.set(version, forKey: "source_version")
         try await builder.set(value, forKey: "source_value")
-        _ = try await builder
-            .evaluate("write_base(Path(source_path), source_version, source_value)")
+        _ = try await builder.evaluate(
+            "write_base(Path(source_path), source_version, source_value)",
+        )
         return archived ? .archive(path) : .directory(path)
     }
 
@@ -150,14 +169,27 @@ struct ProjectFixture {
         }
     }
 
+    static func unpackedWheels(
+        in cache: Python::Runtime.Paths,
+    ) async throws -> Set<FilePath.Component> {
+        var unpacked = Set<FilePath.Component>()
+        for digest in try await directoryNames(at: cache.wheelsDirectory) {
+            let packages = cache.wheelPackagesDirectory(digest: digest.string)
+            if try await FileSystem.shared.info(forFileAt: packages)?.type == .directory {
+                unpacked.insert(digest)
+            }
+        }
+        return unpacked
+    }
+
     private static func fileURL(
         for path: FilePath,
         using builder: Python::Session,
     ) async throws -> String {
         try await builder.enqueue { context in
             let pathlib = try context.import(module: "pathlib")
-            let url = try pathlib.attribute("Path").call(path.string).attribute("as_uri").call()
-            return try url.decode(as: String.self)
+            let file = try pathlib(methodNamed: "Path")(path.string)
+            return try file(methodNamed: "as_uri")().decode(as: String.self)
         }
     }
 

@@ -10,50 +10,50 @@ extension Environment.Service {
         project: Runtime.Path,
         module: String?,
         output: Runtime.Path,
+        targetEnvironment: [String: String],
         configuration: Environment.Configuration,
         execution: Session.Control,
     ) async throws {
         let resolution = try await resolveBundleDependencies(
             for: project,
+            targetEnvironment: targetEnvironment,
             configuration: configuration,
             execution: execution,
         )
 
         let files = FileSystem.shared
         let destination = output.file
-        let parent = destination.removingLastComponent()
         let archive = Runtime.Paths.bundleStagingFile(
             for: destination,
             identifier: Environment.identifier(),
         )
         defer { try? Environment.unlinkIfPresent(archive) }
 
-        @Sendable
-        func stageArchive(in directory: FilePath) async throws {
+        try await files.withTemporaryDirectory(
+            prefix: configuration.paths.temporaryDirectory,
+        ) { _, directory in
             let paths = Runtime.Paths.Environment(directory: directory)
             let sitePackages = paths.temporaryPackagesDirectory
+
             try await Environment.stageFiles(resolution, into: sitePackages, execution: execution)
 
             if let module {
-                let name = try await request(.moduleName(module), execution: execution)
-                try await Self.includeModule(
-                    name,
+                try await includeModule(
+                    module,
                     project: project.file,
                     destination: sitePackages,
                     execution: execution,
                 )
             }
 
-            try await files.createDirectory(at: parent, withIntermediateDirectories: true)
+            try await files.createDirectory(
+                at: destination.removingLastComponent(),
+                withIntermediateDirectories: true,
+            )
             _ = try await request(
                 .archive(directory: sitePackages.string, output: archive.string),
                 execution: execution,
             )
-        }
-
-        try await files.withTemporaryDirectory(prefix: configuration.paths.temporaryDirectory) {
-            _, directory in
-            try await stageArchive(in: directory)
         }
 
         try await Self.publishBundle(archive, at: destination, execution: execution)
@@ -61,14 +61,21 @@ extension Environment.Service {
 
     private nonisolated func resolveBundleDependencies(
         for project: Runtime.Path,
+        targetEnvironment: [String: String],
         configuration: Environment.Configuration,
         execution: Session.Control,
     ) async throws -> Environment.Preparation.Resolution {
-        let requirements = try await projectRequirements(at: project, execution: execution)
+        let requirements = try await projectRequirements(
+            at: project,
+            target: targetEnvironment,
+            execution: execution,
+        )
+
         let preparation = try await request(
             .prepare(
                 requirements: requirements,
                 base: configuration.base,
+                target: targetEnvironment,
                 installed: [:],
                 fingerprint: nil,
                 update: false,
@@ -76,8 +83,9 @@ extension Environment.Service {
             execution: execution,
         )
         guard case let .resolved(resolution) = preparation else {
-            throw Runtime.Failure("Expected package files for a new bundle.")
+            throw Failure("Expected package files for a new bundle.")
         }
+
         return resolution
     }
 
@@ -94,28 +102,34 @@ extension Environment.Service {
         }
 
         try execution.finishCheckingInterruption()
+
         if !matchesExisting {
             try Environment.replace(archive, with: destination)
         }
     }
 
-    private static func includeModule(
-        _ name: String,
+    private nonisolated func includeModule(
+        _ module: String,
         project: FilePath,
         destination: FilePath,
         execution: Session.Control,
     ) async throws {
-        let files = FileSystem.shared
+        let name = try await request(.moduleName(module), execution: execution)
         let package = project.appending(name)
         let filename = name + ".py"
         let source = project.appending(filename)
 
+        let files = FileSystem.shared
         if try await files.info(forFileAt: package)?.type == .directory {
-            try await copyDirectory(package, to: destination.appending(name), execution: execution)
+            try await Self.copyDirectory(
+                package,
+                to: destination.appending(name),
+                execution: execution,
+            )
         } else if try await files.info(forFileAt: source) != nil {
-            try await copyProjectFile(source, to: destination.appending(filename))
+            try await Self.copyProjectFile(source, to: destination.appending(filename))
         } else {
-            throw Exception(name: "ModuleNotFoundError", message: name)
+            throw Failure(.moduleNotFoundError, message: name)
         }
     }
 
@@ -138,11 +152,12 @@ extension Environment.Service {
         let files = FileSystem.shared
         let source = entry.path
         guard let info = try await files.info(forFileAt: source) else {
-            throw Exception(name: "FileNotFoundError", message: source.string)
+            throw Failure(.fileNotFoundError, message: source.string)
         }
 
         let name = entry.name.string
         let target = destination.appending(entry.name)
+
         if info.type == .directory {
             // A directory link can escape the project tree or form a cycle.
             let link = try await files.info(forFileAt: source, infoAboutSymbolicLink: true)
@@ -164,7 +179,7 @@ extension Environment.Service {
                     entries.append(entry)
                 }
             }
-            entries.sort { $0.name.string < $1.name.string }
+            entries.sort { left, right in left.name.string < right.name.string }
             return entries
         }
     }
@@ -178,8 +193,8 @@ extension Environment.Service {
         do {
             try await files.copyItem(at: Environment.resolvedPath(source), to: target)
         } catch let error as FileSystemError where error.code == .fileAlreadyExists {
-            throw Exception(
-                name: "ValueError",
+            throw Failure(
+                .valueError,
                 message: "Project module collides with a dependency: \(target)",
             )
         }
@@ -198,6 +213,7 @@ extension Environment.Service {
         else {
             return false
         }
+
         return try await files.withFileHandle(forReadingAt: archive) { source in
             try await files.withFileHandle(forReadingAt: destination) { target in
                 try await Self.contentsMatch(source, target, size: existing.size)
@@ -223,6 +239,7 @@ extension Environment.Service {
             guard bytes == existing else {
                 return false
             }
+
             offset += Int64(count)
         }
         return true

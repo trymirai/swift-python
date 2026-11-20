@@ -29,7 +29,7 @@ extension Environment.Preparation.Distribution {
         init(from decoder: borrowing Decoder) throws {
             let string = try decoder.string()
             guard Self.isValidPath(string) else {
-                throw Exception(name: "ValueError", message: "Invalid wheel member: \(string)")
+                throw Failure(.valueError, message: "Invalid wheel member: \(string)")
             }
             path = FilePath(string)
         }
@@ -38,6 +38,7 @@ extension Environment.Preparation.Distribution {
             guard !path.isEmpty, !path.hasPrefix("/"), !path.utf8.contains(0) else {
                 return false
             }
+
             let components = path.split(separator: "/", omittingEmptySubsequences: false)
             return components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
         }

@@ -27,6 +27,12 @@ public struct Encoder: ~Copyable, ~Escapable {
         try value.encode(to: &self)
     }
 
+    public mutating func encode(_ value: consuming Object) throws {
+        _ = try Interpreter.Storage.requireCurrent()
+        let pointer = unsafe value.release()
+        unsafe assign(Output(pointer))
+    }
+
     // MARK: Scalar values
 
     public mutating func encodeNil() throws {
@@ -36,12 +42,6 @@ public struct Encoder: ~Copyable, ~Escapable {
 
     public mutating func encode(_ value: ()) throws {
         try encodeNil()
-    }
-
-    public mutating func encode(_ value: consuming Object) throws {
-        _ = try Interpreter.Storage.requireCurrent()
-        let pointer = unsafe value.release()
-        unsafe assign(Output(pointer))
     }
 
     public mutating func encode(_ value: Bool) throws {
@@ -86,7 +86,7 @@ public struct Encoder: ~Copyable, ~Escapable {
 
         for index in values.indices {
             let value = try Object(encoding: values[index], in: self)
-            unsafe try Self.setListItem(value, at: index, in: result.pointer)
+            unsafe try Object.setListItem(value, at: index, in: result.pointer)
         }
 
         unsafe assign(.list(result.release()))
@@ -137,7 +137,7 @@ public struct Encoder: ~Copyable, ~Escapable {
             throw Object.failure("Unable to read the Python list size.")
         }
         guard index >= 0, index <= count else {
-            throw Exception(name: "IndexError", message: "Encode positional fields in order.")
+            throw Failure(.indexError, message: "Encode positional fields in order.")
         }
 
         let object = try Object(encoding: value, in: self)
@@ -147,7 +147,7 @@ public struct Encoder: ~Copyable, ~Escapable {
                 "Unable to append a positional field.",
             )
         } else {
-            unsafe try Self.setListItem(object, at: index, in: list)
+            unsafe try Object.setListItem(object, at: index, in: list)
         }
     }
 
@@ -164,8 +164,8 @@ public struct Encoder: ~Copyable, ~Escapable {
             unsafe assign(.dictionary(dictionary))
             return unsafe dictionary
         default:
-            throw Exception(
-                name: "TypeError",
+            throw Failure(
+                .typeError,
                 message: "The encoder already contains a non-dictionary value.",
             )
         }
@@ -181,8 +181,8 @@ public struct Encoder: ~Copyable, ~Escapable {
             unsafe assign(.list(list))
             return unsafe list
         default:
-            throw Exception(
-                name: "TypeError",
+            throw Failure(
+                .typeError,
                 message: "The encoder already contains a non-list value.",
             )
         }
@@ -200,18 +200,6 @@ public struct Encoder: ~Copyable, ~Escapable {
         try Object.check(
             unsafe PyDict_SetItem(dictionary, key.pointer, value.pointer),
             errorMessage,
-        )
-    }
-
-    @unsafe
-    private static func setListItem(
-        _ value: consuming Object,
-        at index: Int,
-        in list: UnsafeMutablePointer<PyObject>,
-    ) throws {
-        try Object.check(
-            unsafe PyList_SetItem(list, index, value.release()),
-            "Unable to set a Python list item.",
         )
     }
 
@@ -237,8 +225,8 @@ public struct Encoder: ~Copyable, ~Escapable {
     @unsafe
     mutating func take() throws -> UnsafeMutablePointer<PyObject> {
         guard let value = unsafe output else {
-            throw Exception(
-                name: "ValueError",
+            throw Failure(
+                .valueError,
                 message: "The encoder did not produce a value.",
             )
         }

@@ -1,31 +1,12 @@
-"""Generate Python callables with Swift argument defaults and async bridging."""
+"""Generate Python signatures and callables for Swift exports."""
 
 import keyword
 import linecache
-from contextlib import nullcontext
-from inspect import Parameter, Signature, isawaitable
+from functools import partial
+from inspect import Parameter, Signature
 from types import ModuleType
 
-from ..async_support import wait_for_pipe
-from ..streams import capture
-
-
-async def call_imported(request, control=None):
-    import asyncio
-
-    # Standalone calls install capture. Calls dispatched by an export inherit its streams.
-    streams = capture(control, {}) if control is not None else nullcontext()
-    with streams:
-        try:
-            result = request("call")
-            if isawaitable(result):
-                result = await result
-            request("return", result)
-        except asyncio.CancelledError:
-            request("cancel")
-            raise
-        except BaseException as error:
-            request("raise", error)
+from ..async_support import call_export
 
 
 class _SwiftDefault:
@@ -82,7 +63,7 @@ def _annotation(
         identifier(name)
         root = module_parts(module)[0]
 
-        # These names already have a meaning in the generated function's globals.
+        # Aliases protect names used by the generated signature and function globals.
         needs_alias = root in (function_name, "__name__", "list", "dict")
         alias = f"__swift_import_{len(imports)}" if needs_alias else None
         alias = imports.setdefault(module, alias)
@@ -131,6 +112,7 @@ def _bind_parameters(
 class FunctionFactory:
     def __init__(self, invoke) -> None:
         self._invoke = invoke
+        self._call_async = partial(call_export, invoke)
 
         self.imports: dict[str, set[str]] = {}
 
@@ -167,7 +149,7 @@ class FunctionFactory:
         scope = {
             "__name__": module.__name__,
             "__swift_defaults": defaults,
-            "__swift_call": self.call,
+            "__swift_call": self._call_async,
             "__swift_invoke": self._invoke,
         }
 
@@ -185,40 +167,3 @@ class FunctionFactory:
         )
 
         return result
-
-    async def call(self, index: int, arguments: tuple):
-        import asyncio
-
-        tasks = {}
-
-        def dispatch_methods(requests):
-            for request, task in tuple(tasks.items()):
-                if not request("pending"):
-                    task.cancel()
-
-            for request in requests:
-                if request("pending"):
-                    task = asyncio.create_task(call_imported(request))
-                    tasks[request] = task
-                    task.add_done_callback(lambda _, request=request: tasks.pop(request, None))
-
-        async def cancel_methods():
-            if not tasks:
-                return
-
-            for task in tasks.values():
-                task.cancel()
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
-
-        descriptor, ticket = self._invoke("start", index, arguments)
-        try:
-            while True:
-                await wait_for_pipe(descriptor)
-                requests = self._invoke("poll", ticket)
-                if requests is None:
-                    return self._invoke("take", ticket)
-
-                dispatch_methods(requests)
-        finally:
-            self._invoke("cancel", ticket)
-            await cancel_methods()

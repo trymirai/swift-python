@@ -143,33 +143,36 @@ private enum UnselectedModule {
 
 @Test
 func automaticModuleDiscovery() async throws {
-    try await evaluateInFreshSession("""
-    import automatic, inspect, sys
+    try await evaluateInFreshSession(
+        """
+        import automatic, inspect, sys
 
-    assert automatic.sum(40) == 42
-    assert automatic.selfDefault() == 42
-    assert automatic.middle(right=41) == 42
-    assert automatic.middle(20, 22) == 42
-    try:
-        automatic.middle(42)
-    except TypeError:
-        pass
-    else:
-        raise AssertionError("Expected the required 'right' argument to be rejected")
+        assert automatic.sum(40) == 42
+        assert automatic.selfDefault() == 42
+        assert automatic.middle(right=41) == 42
+        assert automatic.middle(20, 22) == 42
+        try:
+            automatic.middle(42)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("Expected the required 'right' argument to be rejected")
 
-    assert automatic.multiply(6, 7) == 42
-    assert automatic.extended(41) == 42
-    assert automatic.integer(42) == 'int:42'
-    assert automatic.floating(1.5) == 'float:1.5'
+        assert automatic.multiply(6, 7) == 42
+        assert automatic.extended(41) == 42
+        assert automatic.integer(42) == 'int:42'
+        assert automatic.floating(1.5) == 'float:1.5'
 
-    assert automatic.next() + 1 == automatic.next()
-    assert automatic.next(99) == 99
-    assert automatic.optional() == 42
-    assert automatic.optional(None) is None
+        assert automatic.next() + 1 == automatic.next()
+        assert automatic.next(99) == 99
+        assert automatic.optional() == 42
+        assert automatic.optional(None) is None
 
-    assert 'def sum(' in inspect.getsource(automatic.sum)
-    assert 'unselected' not in sys.modules
-    """, modules: [AutomaticModule.self])
+        assert 'def sum(' in inspect.getsource(automatic.sum)
+        assert 'unselected' not in sys.modules
+        """,
+        modules: [AutomaticModule.self],
+    )
 }
 
 @Test
@@ -206,6 +209,7 @@ func staticModuleDoesNotRequireAnInstance() async throws {
         "assert await configured.greeting('x', prefix='first') == 'second:x'",
         scope: "second",
     )
+
     let retained = try await session.enqueue(scope: 42) { context in
         #expect(context.scope as? Int == 42)
         return context
@@ -217,7 +221,7 @@ func staticModuleDoesNotRequireAnInstance() async throws {
         LabeledContextModule.self,
     ]
     for module in invalidModules {
-        let error = try await #require(throws: Python::Exception.self) {
+        let error = try await #require(throws: Python::Failure.self) {
             try await runtime.session(modules: [module])
         }
         #expect(error.message.contains("first unlabeled parameter"))

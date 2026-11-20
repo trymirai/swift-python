@@ -2,8 +2,6 @@
 //  Created by Anton Spivak
 //
 
-internal import libcpython
-
 // MARK: - _PImported
 
 @_documentation(visibility: internal)
@@ -11,70 +9,44 @@ public protocol _PImported {
     static var _pImport: (module: String, name: String) { get }
 }
 
-public extension Context {
-    /// Constructs an imported Python type in this context.
-    func construct<Value: _PImported & Decodable>(
-        _ type: Value.Type,
-        arguments: [any Encodable] = [],
-        keywords: [(String, any Encodable)] = [],
-    ) throws -> Value {
-        try withAccess { context in
-            try type.pythonClass(in: context)
-                .call(arguments: arguments, keywords: keywords)
-                .decode()
-        }
-    }
-
-    /// Calls an imported class method in this context.
-    func call<Type: _PImported, Result: Decodable & ~Copyable>(
-        _ type: Type.Type,
-        method name: String,
-        arguments: [any Encodable] = [],
-        keywords: [(String, any Encodable)] = [],
-        as result: Result.Type = Result.self,
-    ) throws -> Result {
-        try withAccess { context in
-            try type.pythonClass(in: context)
-                .attribute(name)
-                .call(arguments: arguments, keywords: keywords)
-                .decode(as: result)
-        }
-    }
-
-    /// Calls a Python instance method in this context.
-    func call<Instance: Encodable & ~Copyable, Result: Decodable & ~Copyable>(
-        _ instance: borrowing Instance,
-        method name: String,
-        arguments: [any Encodable] = [],
-        keywords: [(String, any Encodable)] = [],
-        as result: Result.Type = Result.self,
-    ) throws -> Result {
-        try withAccess { context in
-            try context.encode(instance)
-                .attribute(name)
-                .call(arguments: arguments, keywords: keywords)
-                .decode(as: result)
-        }
+public extension _PImported where Self: Encodable {
+    /// Opens this binding as a local Python object in the supplied context.
+    @_lifetime(borrow context)
+    borrowing func object(in context: borrowing Context) throws -> Object {
+        try context.encode(self)
     }
 }
 
-extension Context {
-    func construct(
-        module: String,
-        name: String,
-        arguments: [any Encodable] = [],
-        keywords: [(String, any Encodable)] = [],
-    ) throws -> Reference {
-        try withAccess { context in
-            try Object.importClass(module: module, name: name, in: context)
-                .call(arguments: arguments, keywords: keywords)
-                .decode()
+public extension _PImported where Self: Decodable {
+    @_documentation(visibility: internal)
+    static func _pConstruct(
+        inContext context: Context,
+        arguments: [any Encodable],
+        keywords: [(String, any Encodable)],
+    ) throws -> Self {
+        try context.withAccess { context in
+            let constructor = try pythonClass(in: context)
+            return try constructor(arguments: arguments, keywords: keywords).decode(as: Self.self)
         }
+    }
+
+    @_documentation(visibility: internal)
+    static func _pConstruct(
+        inSession session: Session,
+        arguments: [any Encodable & Sendable],
+        keywords: [(String, any Encodable & Sendable)],
+    ) async throws -> Self where Self: Sendable {
+        let call = ImportedCall<Session.Transfer<Self>>(
+            .imported(Self.self),
+            arguments: arguments,
+            keywords: keywords,
+            as: Self.self,
+        )
+        return try await call.value(in: session).take()
     }
 }
 
 public extension _PImported {
-    /// Compiler support for a synchronous imported class method.
     @_documentation(visibility: internal)
     static func _pCallMethod<Result: ~Copyable>(
         _ name: String,
@@ -83,34 +55,32 @@ public extension _PImported {
         decode: (borrowing Object) throws -> Result,
     ) throws -> Result {
         try CurrentContext.run { context in
-            let method = try pythonClass(in: context).attribute(name)
-            return try decode(method.call(arguments: arguments, keywords: keywords))
+            let type = try pythonClass(in: context)
+            return try decode(type(methodNamed: name)(arguments: arguments, keywords: keywords))
         }
     }
 
-    /// Compiler support for an imported class property's getter.
     @_documentation(visibility: internal)
     static func _pGetClassProperty<Value: Decodable & ~Copyable>(
         _ name: String,
         as type: Value.Type = Value.self,
     ) throws -> Value {
         try CurrentContext.run { context in
-            try pythonClass(in: context).attribute(name).decode(as: type)
+            try pythonClass(in: context).value(forAttribute: name).decode(as: type)
         }
     }
 
-    /// Compiler support for an imported class property's setter.
     @_documentation(visibility: internal)
     static func _pSetClassProperty<Value: Encodable & ~Copyable>(
         _ value: borrowing Value,
         forKey name: String,
     ) throws {
         try CurrentContext.run { context in
-            try pythonClass(in: context).setAttribute(name, to: value)
+            try pythonClass(in: context).set(value, forAttribute: name)
         }
     }
 
-    /// Compiler support for the reference codec generated by PythonImportedClass.
+    /// Verifies the imported class before retaining the decoded instance.
     @_documentation(visibility: internal)
     static func _pDecodeReference(from decoder: borrowing Decoder) throws -> Reference {
         let object = try decoder.object()
@@ -120,49 +90,19 @@ public extension _PImported {
     }
 
     @_lifetime(borrow owner)
-    internal static func pythonClass<Owner: ~Copyable &
-        ~Escapable>(in owner: borrowing Owner) throws
-        -> Object
-    {
+    internal static func pythonClass<Owner: ~Copyable & ~Escapable>(
+        in owner: borrowing Owner,
+    ) throws -> Object {
         try Object.importClass(module: _pImport.module, name: _pImport.name, in: owner)
     }
 
     internal static func requireInstance(_ object: borrowing Object) throws {
         guard try object.isInstance(of: pythonClass(in: object)) else {
             let (module, name) = _pImport
-            throw Exception(
-                name: "TypeError",
+            throw Failure(
+                .typeError,
                 message: "Expected an instance of \(module).\(name).",
             )
         }
-    }
-}
-
-extension Object {
-    @_lifetime(borrow owner)
-    static func importClass<Owner: ~Copyable & ~Escapable>(
-        module: String,
-        name: String,
-        in owner: borrowing Owner,
-    ) throws -> Object {
-        let type = try Object.import(module: module, in: owner).attribute(name)
-
-        guard unsafe PyType_Check(type.pointer) != 0 else {
-            throw Exception(
-                name: "TypeError",
-                message: "Expected \(module).\(name) to be a class.",
-            )
-        }
-
-        return type
-    }
-
-    borrowing func isInstance(of type: borrowing Object) throws -> Bool {
-        let result = unsafe PyObject_IsInstance(pointer, type.pointer)
-        guard result >= 0 else {
-            throw Self.failure("Unable to check the Python object's type.")
-        }
-
-        return result != 0
     }
 }

@@ -29,12 +29,14 @@ public struct Decoder: ~Copyable, ~Escapable {
 
     public borrowing func decode<T: Decodable & ~Copyable>(_ type: T.Type = T.self) throws -> T {
         _ = try Interpreter.Storage.requireCurrent()
+
         guard depth < 64 else {
-            throw Exception(
-                name: "ValueError",
+            throw Failure(
+                .valueError,
                 message: "Python value nesting exceeds 64 levels.",
             )
         }
+
         return try T(from: self)
     }
 
@@ -53,15 +55,12 @@ public struct Decoder: ~Copyable, ~Escapable {
         try requireValueType(CPython_ValueInteger, expected: "int")
 
         if T.bitWidth > 64 {
-            let text = unsafe try Object.take(PyObject_Str(pointer), in: self)
-            guard let value = T(try text.string(), radix: 10) else {
-                throw overflow(type)
-            }
-            return value
+            return try wideInteger(type)
         }
 
         func exactInteger(_ value: some BinaryInteger) throws -> T {
             try Object.checkError("Python integer is out of range.")
+
             guard let result = T(exactly: value) else {
                 throw overflow(type)
             }
@@ -71,16 +70,30 @@ public struct Decoder: ~Copyable, ~Escapable {
         if T.isSigned {
             return unsafe try exactInteger(PyLong_AsLongLong(pointer))
         }
+
         return unsafe try exactInteger(PyLong_AsUnsignedLongLong(pointer))
     }
 
+    private borrowing func wideInteger<T: FixedWidthInteger>(_ type: T.Type) throws -> T {
+        // An int subclass can override __str__. Format the underlying integer instead.
+        let integer = unsafe try Object.take(PyNumber_Index(pointer), in: self)
+        let text = unsafe try Object.take(PyObject_Str(integer.pointer), in: self)
+
+        guard let value = T(try text.string(), radix: 10) else {
+            throw overflow(type)
+        }
+        return value
+    }
+
     public borrowing func double() throws -> Double {
-        let kind = try checkedValueType()
-        guard kind == CPython_ValueFloat || kind == CPython_ValueInteger else {
+        let value: Double = switch try checkedValueType() {
+        case CPython_ValueInteger:
+            unsafe PyLong_AsDouble(pointer)
+        case CPython_ValueFloat:
+            unsafe PyFloat_AsDouble(pointer)
+        default:
             throw mismatch("float")
         }
-
-        let value = unsafe PyFloat_AsDouble(pointer)
         try Object.checkError("Unable to decode a Python float.")
         return value
     }
@@ -137,8 +150,8 @@ public struct Decoder: ~Copyable, ~Escapable {
         // Swift's canonical Unicode equality can merge distinct Python strings.
         for key in keys {
             guard result.index(forKey: key) == nil else {
-                throw Exception(
-                    name: "ValueError",
+                throw Failure(
+                    .valueError,
                     message: "Python dictionary keys collide in Swift: \(key.debugDescription).",
                 )
             }
@@ -163,11 +176,11 @@ public struct Decoder: ~Copyable, ~Escapable {
         }
     }
 
-    func mismatch(_ expected: String) -> Exception {
-        Exception(name: "TypeError", message: "Expected Python \(expected).")
+    func mismatch(_ expected: String) -> Failure {
+        Failure(.typeError, message: "Expected Python \(expected).")
     }
 
-    private func overflow<T>(_ type: T.Type) -> Exception {
-        Exception(name: "OverflowError", message: "Python integer does not fit \(type).")
+    private func overflow<T>(_ type: T.Type) -> Failure {
+        Failure(.overflowError, message: "Python integer does not fit \(type).")
     }
 }

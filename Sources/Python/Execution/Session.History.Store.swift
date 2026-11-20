@@ -37,9 +37,11 @@ extension Session.History {
                 input = .memory(source)
             }
 
+            // The source becomes visible in In only after the redirected file is written.
             let expired = state.withLock { state in
                 state.insert(input, number: number, limit: configuration.inputs.limit)
             }
+
             for file in expired {
                 try await FileSystem.shared.removeItem(at: file)
             }
@@ -55,34 +57,19 @@ extension Session.History {
         private func read(_ number: Int) throws -> String {
             let input = try state.withLock { state in
                 guard !state.isClosed else {
-                    throw Session.Error.closed
+                    throw Failure.closed
                 }
                 guard let input = state.inputs[number] else {
-                    throw Exception(name: "KeyError", message: String(number))
+                    throw Failure(.keyError, message: String(number))
                 }
                 return input
             }
-
-            let file: FilePath
-            switch input {
-            case let .memory(source):
-                return source
-            case let .file(path):
-                file = path
-            }
-            let descriptor = try FileDescriptor.open(
-                file,
-                .readOnly,
-                options: [.closeOnExec, .noFollow],
-            )
-            defer { try? descriptor.close() }
-
-            return try String(decoding: descriptor.readAllBytes(), as: UTF8.self)
+            return try input.read()
         }
     }
 }
 
-// MARK: - Session.History.Store.State
+// MARK: - Session.History.Store.Input
 
 private extension Session.History.Store {
     enum Input: Sendable {
@@ -96,8 +83,27 @@ private extension Session.History.Store {
                 nil
             }
         }
-    }
 
+        func read() throws -> String {
+            switch self {
+            case let .memory(source):
+                return source
+            case let .file(path):
+                let descriptor = try FileDescriptor.open(
+                    path,
+                    .readOnly,
+                    options: [.closeOnExec, .noFollow],
+                )
+                defer { try? descriptor.close() }
+                return try String(decoding: descriptor.readAllBytes(), as: UTF8.self)
+            }
+        }
+    }
+}
+
+// MARK: - Session.History.Store.State
+
+private extension Session.History.Store {
     struct State {
         var number: Int = 0
         var inputs: [Int: Input] = [:]
@@ -106,10 +112,10 @@ private extension Session.History.Store {
 
         mutating func reserveNumber() throws -> Int {
             guard !isClosed else {
-                throw Session.Error.closed
+                throw Failure.closed
             }
             guard number < Int.max else {
-                throw Runtime.Failure("The session exhausted its history numbers.")
+                throw Failure("The session exhausted its history numbers.")
             }
             number += 1
             return number
@@ -123,6 +129,7 @@ private extension Session.History.Store {
 
             let expired = inputs.keys.sorted().prefix(inputs.count - limit)
             let files = expired.compactMap { inputs.removeValue(forKey: $0)?.filePath }
+
             let retained = Set(inputs.values.compactMap(\.filePath))
             return files.filter { !retained.contains($0) }
         }
@@ -137,18 +144,18 @@ extension Session.History.Store: Object.Callable {
         _ arguments: borrowing Object,
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
-        switch try arguments.item(at: 0).string() {
+        switch try arguments.tupleItem(at: 0).string() {
         case "count":
             return try Object(encoding: state.withLock { $0.inputs.count }, in: attachment)
         case "keys":
             return try Object(encoding: state.withLock { $0.inputs.keys.sorted() }, in: attachment)
         case "get":
             return try Object(
-                encoding: read(arguments.item(at: 1).decode(as: Int.self)),
+                encoding: read(arguments.tupleItem(at: 1).decode(as: Int.self)),
                 in: attachment,
             )
         default:
-            throw Exception(name: "ValueError", message: "Unknown input history command.")
+            throw Failure(.valueError, message: "Unknown input history command.")
         }
     }
 }

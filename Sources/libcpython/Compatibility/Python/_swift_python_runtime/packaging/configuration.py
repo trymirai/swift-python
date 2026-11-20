@@ -13,14 +13,23 @@ from packaging.specifiers import SpecifierSet
 from packaging.tags import parse_tag, sys_tags
 from packaging.version import Version
 
-from ..packages import distribution_files, load_sources, select_distributions
+from ..packages import distribution_files, select_distributions
 from .paths import absolute_path
+from .sources import source_directories
 
 PYTHON_VERSION = Version(sys.version.split()[0])
 MARKER_ENVIRONMENT = default_environment()
 SUPPORTED_TAGS = frozenset(sys_tags())
-
 ABI = [sys.implementation.cache_tag, sys.platform, getattr(sys.implementation, "_multiarch", "")]
+
+_PLATFORM_MARKERS = {
+    "os_name",
+    "sys_platform",
+    "platform_system",
+    "platform_machine",
+    "platform_release",
+    "platform_version",
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +44,7 @@ class Configuration:
     index: str
 
     base: dict
+    markers: dict
 
 
 def load(options: dict) -> Configuration:
@@ -49,7 +59,22 @@ def load(options: dict) -> Configuration:
         download_suffix=options["download_suffix"],
         index=index,
         base={},
+        markers=MARKER_ENVIRONMENT,
     )
+
+
+def marker_environment(request: dict) -> dict:
+    target = request.get("target", {})
+    unknown = target.keys() - _PLATFORM_MARKERS
+    if unknown:
+        raise ValueError(f"Unsupported destination markers: {sorted(unknown)}")
+
+    # A different destination must not inherit missing platform details from the host.
+    cross_platform = target.get("sys_platform", sys.platform) != sys.platform
+    if cross_platform and not _PLATFORM_MARKERS.issubset(target):
+        raise ValueError("A cross-platform bundle requires all six destination platform markers")
+
+    return {**MARKER_ENVIRONMENT, **target}
 
 
 def _normalize_index(index: str) -> str:
@@ -61,8 +86,8 @@ def _normalize_index(index: str) -> str:
 
 
 def describe(configuration: Configuration, sources: list[dict], read) -> dict:
-    _check_source_paths(sources)
-    selected, _ = select_distributions(load_sources(sources, read))
+    paths = source_directories(configuration.cache, sources, read)
+    selected, _ = select_distributions(paths)
     base = {
         name: _describe_distribution(distribution) for name, (_, distribution) in selected.items()
     }
@@ -71,16 +96,8 @@ def describe(configuration: Configuration, sources: list[dict], read) -> dict:
         "cache": str(configuration.cache),
         "abi": ABI,
         "base": base,
+        "paths": paths,
     }
-
-
-def _check_source_paths(sources: list[dict]) -> None:
-    for source in sources:
-        if "directory" in source and not absolute_path(source["directory"]).is_dir():
-            raise FileNotFoundError(source["directory"])
-
-        if "archive" in source:
-            absolute_path(source["archive"])
 
 
 def supports_python(specifier: str | None) -> bool:
@@ -110,6 +127,7 @@ def _describe_distribution(distribution: importlib.metadata.Distribution) -> dic
         raise ValueError(f"Package {name} requires Python {requires_python}")
 
     _check_wheel_tags(distribution, name)
+
     return {
         "version": str(Version(version)),
         "requires": metadata.get_all("Requires-Dist", []),

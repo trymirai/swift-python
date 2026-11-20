@@ -20,8 +20,23 @@ uintptr_t CPython_InterpreterKey(PyThreadState *_Nullable state);
 void *_Nullable CPython_SetScope(void *_Nullable scope);
 void *_Nullable CPython_CurrentScope(void);
 
-PyObject *_Nullable CPython_Call3(PyObject *_Nonnull function, PyObject *_Nonnull first,
-                                  PyObject *_Nonnull second, PyObject *_Nonnull third);
+// Captured Python contexts carry a marker that is independent of the Swift execution.
+typedef struct CPython_OperationContext {
+    PyObject *_Nullable marker;
+    PyObject *_Nullable token;
+
+    struct CPython_OperationContext *_Nullable previous;
+    bool active;
+} CPython_OperationContext;
+
+int CPython_WatchOperationContexts(void);
+int CPython_EnterOperationContext(CPython_OperationContext *_Nonnull context,
+                                  PyObject *_Nullable marker);
+void CPython_LeaveOperationContext(CPython_OperationContext *_Nonnull context);
+
+// A different Python context can run on the same interpreter thread.
+bool CPython_HasOperationAccess(void);
+int CPython_ContextBelongsToOperation(PyObject *_Nonnull context);
 
 // Takes ownership of context even if creating the function fails.
 PyObject *_Nullable CPython_NewFunction(
@@ -29,10 +44,10 @@ PyObject *_Nullable CPython_NewFunction(
     PyObject *_Nullable (*_Nonnull call)(void *_Nullable context, PyObject *_Nullable arguments),
     void (*_Nonnull destroy)(void *_Nullable context));
 
-PyObject *_Nullable CPython_CallInterruptibly(PyObject *_Nonnull function,
-                                              PyObject *_Nonnull const *_Nullable arguments,
-                                              size_t argument_count, void *_Nullable context,
-                                              bool (*_Nonnull interrupt)(void *_Nullable context));
+PyObject *_Nullable CPython_Call2(PyObject *_Nonnull function, PyObject *_Nonnull first,
+                                  PyObject *_Nonnull second);
+PyObject *_Nullable CPython_Call3(PyObject *_Nonnull function, PyObject *_Nonnull first,
+                                  PyObject *_Nonnull second, PyObject *_Nonnull third);
 
 typedef struct {
     void *_Nullable context;
@@ -41,17 +56,23 @@ typedef struct {
 
 CPython_Evaluation *_Nullable CPython_SetEvaluation(CPython_Evaluation *_Nullable evaluation);
 int CPython_CheckEvaluation(void);
+PyObject *_Nullable CPython_CallInterruptibly(PyObject *_Nonnull function,
+                                              PyObject *_Nonnull const *_Nullable arguments,
+                                              size_t argument_count, void *_Nullable context,
+                                              bool (*_Nonnull interrupt)(void *_Nullable context));
 
-void CPython_InterruptThreadState(PyThreadState *_Nonnull state);
-bool CPython_TakeThreadInterruption(void);
 void CPython_RequestEvaluationInterrupt(PyInterpreterState *_Nonnull interpreter);
+PyObject *_Nullable CPython_DriveEventLoop(PyObject *_Nonnull self,
+                                          PyObject *_Nonnull const *_Nonnull args,
+                                          Py_ssize_t nargs);
+void CPython_ResumeDeferredInterruption(void);
 
-int CPython_WaitForSocket(int fd, bool writing, int64_t timeout);
-
-void CPython_RaiseSwiftError(const char *_Nonnull name, const char *_Nonnull message);
+void CPython_RaiseSwiftError(const char *_Nonnull name, const char *_Nonnull message,
+                             Py_ssize_t size);
 void CPython_RaiseKeyboardInterrupt(void);
 int CPython_IsKeyError(void);
-const char *_Nonnull CPython_ExceptionName(PyObject *_Nonnull exception);
+// Returns a new reference to the exception type's name.
+PyObject *_Nullable CPython_ExceptionName(PyObject *_Nonnull exception);
 
 typedef enum {
     CPython_ValueNone,
@@ -87,5 +108,6 @@ void CPython_DiscoverExports(void *_Nonnull collector, CPython_ExportConsumer _N
 
 int CPython_NewPipe(int *_Nonnull reader, int *_Nonnull writer);
 int CPython_WaitForCall(int reply_fd, int interruption_fd);
+int CPython_WaitForSocket(int fd, bool writing, int64_t timeout);
 
 #endif /* SWIFT_PYTHON_LIBCPYTHON_INTERPRETER_H */

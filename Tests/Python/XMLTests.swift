@@ -69,17 +69,15 @@ func xmlParserStateRemainsAfterFailure() async throws {
     raw.Parse('<root>', False)
     """)
 
-    _ = try await #require(throws: Python::ExecutionError.self) {
-        try await session.evaluate("""
-        element.set('value', 'changed')
-        tree.SubElement(element, 'discarded')
-        parser.feed('<discarded/></root>')
-        parsed = parser.close()
-        raw.Parse('<discarded/></root>', True)
-        gc.collect()
-        raise ValueError('XML state remains')
-        """)
-    }
+    try await session.requireFailure(evaluating: """
+    element.set('value', 'changed')
+    tree.SubElement(element, 'discarded')
+    parser.feed('<discarded/></root>')
+    parsed = parser.close()
+    raw.Parse('<discarded/></root>', True)
+    gc.collect()
+    raise ValueError('XML state remains')
+    """)
 
     let result = try await session.evaluate("""
     assert element is alias

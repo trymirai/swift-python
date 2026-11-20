@@ -36,17 +36,15 @@ public struct Reference: Sendable {
         in references: Reference.Store,
         scopedTo owner: borrowing Owner,
     ) throws -> Object {
-        guard references === storage.references else {
-            throw Self.wrongInterpreter()
-        }
+        try references.requireSameGeneration(as: storage.references)
 
         let pointer = unsafe try storage.pointer()
         return unsafe Object.retaining(pointer, in: owner)
     }
 
-    static func wrongInterpreter() -> Exception {
-        Exception(
-            name: "ReferenceError",
+    static func wrongInterpreter() -> Failure {
+        Failure(
+            .referenceError,
             message: "A Python reference cannot be used in a different interpreter.",
         )
     }
@@ -82,7 +80,9 @@ extension Reference {
             self.token = token
         }
 
-        deinit { references.release(token) }
+        deinit {
+            references.release(token)
+        }
 
         @unsafe
         func pointer() throws -> UnsafeMutablePointer<PyObject> {

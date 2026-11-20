@@ -12,16 +12,16 @@ public actor Session {
     private nonisolated let operations: Operations = .init()
     private nonisolated let activeExecution: Mutex<Control?> = .init(nil)
 
-    private let directory: Runtime.Path?
-    private var importPaths: [Runtime.Path]
-
     private let startup: Startup
     private let modules: [Module]
     private let allowsSubprocesses: Bool
     nonisolated let history: History.Store?
 
-    private var state: State = .idle
+    private let directory: Runtime.Path?
+    private var importPaths: [Runtime.Path]
     private(set) var environment: Environment?
+
+    private var state: State = .idle
     private var delegate: (any Delegate)?
 
     /// The current persistent or temporary package environment, when one exists.
@@ -58,15 +58,15 @@ public actor Session {
     ) {
         self.executor = executor
 
-        self.directory = directory
-        self.importPaths = importPaths
-
         self.startup = startup
         self.modules = modules
         self.allowsSubprocesses = allowsSubprocesses
         self.history = history
 
+        self.directory = directory
+        self.importPaths = importPaths
         self.environment = environment
+
         self.delegate = delegate
     }
 
@@ -124,14 +124,14 @@ public actor Session {
         state = .ready(consume opened, output)
     }
 
-    private func resolvedPackageSources() throws -> [Runtime.PackageSource.Resolved] {
+    private func resolvedPackageSources() throws -> [Runtime.Path] {
         guard let environment else {
             return []
         }
 
-        var packages = environment.packageSources
+        var packages = environment.packageDirectories
         if let local = environment.sitePackagesDirectory {
-            packages.insert(.directory(try Runtime.Path(local)), at: 0)
+            packages.insert(try Runtime.Path(local), at: 0)
         }
 
         return packages
@@ -149,16 +149,15 @@ public actor Session {
         if generation == nil {
             try openInterpreterIfNeeded(execution: execution)
         }
+
         switch state {
         case let .ready(interpreter, _):
-            if let generation, interpreter.references !== generation {
-                throw Reference.wrongInterpreter()
-            }
+            try generation?.requireSameGeneration(as: interpreter.references)
             return try body(interpreter)
         case .idle:
             throw Reference.wrongInterpreter()
         case .closed:
-            throw Session.Error.closed
+            throw Failure.closed
         }
     }
 
@@ -175,6 +174,7 @@ public actor Session {
     private func withOpenInterpreter<Result: ~Copyable>(
         _ body: (borrowing Interpreter) throws -> Result,
     ) rethrows -> Result? {
+        // Match in place to borrow the move-only interpreter for the callback.
         switch state {
         case let .ready(interpreter, _):
             try body(interpreter)
@@ -213,7 +213,7 @@ public actor Session {
         in context: Context? = nil,
     ) async throws {
         try await withOperation(in: context) { session in
-            let execution = try Control(timeout: nil)
+            let execution = try Control()
             try await execution.run(on: session) { session in
                 try session.changeImportPaths(
                     paths,
@@ -232,15 +232,17 @@ public actor Session {
         let replacement = try paths.map(Runtime.Path.init)
         let previous = importPaths
         importPaths = replacement
+
         do {
-            try withOpenInterpreter {
-                try $0.updateImports(
+            try withOpenInterpreter { interpreter in
+                try interpreter.updateImports(
                     paths: resolvedImportPaths,
                     invalidatingModules: modules,
                     execution: execution,
                 )
             }
         } catch {
+            // Native permissions update only after Python accepts the new search paths.
             importPaths = previous
             throw error
         }
@@ -250,9 +252,12 @@ public actor Session {
     /// Supply the callback's context to request closing after outstanding work finishes.
     public nonisolated func close(in context: Context? = nil) async {
         if let context {
+            guard let origin = try? context.checkExecution() else {
+                return
+            }
             // The callback must return before the current operation can release its reservation.
             if context.belongs(to: self) {
-                activeExecution.withLock { $0 }?.requestInterruption(.stopped)
+                origin.requestInterruption()
             }
             Task.detached { await self.close() }
             return
@@ -264,6 +269,7 @@ public actor Session {
         state = .closed(startupOutput)
         history?.close()
         delegate = nil
+
         await environment?.close()
         environment = nil
     }
@@ -272,7 +278,6 @@ public actor Session {
 
     nonisolated func withExecution<Result: Sendable>(
         in context: Context? = nil,
-        timeout: Duration? = nil,
         scope: (any Sendable)? = nil,
         output: Control.OutputHandler? = nil,
         onInterruption: Control.InterruptionHandler<Result>? = nil,
@@ -281,7 +286,6 @@ public actor Session {
     ) async throws -> Result {
         try await withOperation(in: context) { session in
             let execution = try Control(
-                timeout: timeout,
                 scope: scope,
                 output: output,
                 allowsSubprocesses: session.allowsSubprocesses,
@@ -316,7 +320,7 @@ public actor Session {
         _ operation: @Sendable (isolated Session) async throws -> Result,
     ) async throws -> Result {
         if state.isClosed {
-            throw Session.Error.closed
+            throw Failure.closed
         }
         try Task.checkCancellation()
         return try await operation(self)

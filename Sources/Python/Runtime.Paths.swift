@@ -79,13 +79,11 @@ extension Runtime.Paths {
     static let downloadSuffix = ".download"
 
     static func defaultPaths(in attachment: borrowing PThread.Attachment) throws -> Self {
-        let temporary = try Object.import(module: "tempfile", in: attachment)
-            .attribute("gettempdir")
-            .call()
-            .string()
+        let tempfile = try Object.import(module: "tempfile", in: attachment)
+        let temporary = try tempfile(methodNamed: "gettempdir")().string()
         let tag = try Object.import(module: "sys", in: attachment)
-            .attribute("implementation")
-            .attribute("cache_tag")
+            .value(forAttribute: "implementation")
+            .value(forAttribute: "cache_tag")
             .string()
 
         let cache = FilePath(temporary).appending("swift-python-packages").appending(tag)

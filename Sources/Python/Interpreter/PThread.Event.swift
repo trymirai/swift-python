@@ -14,7 +14,7 @@ extension PThread {
 
         init() throws {
             guard let pointer = unsafe CPython_ThreadEvent_New() else {
-                throw Runtime.Failure("Unable to allocate a Python thread event.")
+                throw Failure("Unable to allocate a Python thread event.")
             }
             unsafe self.pointer = pointer
         }

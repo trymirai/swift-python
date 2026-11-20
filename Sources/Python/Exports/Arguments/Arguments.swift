@@ -7,6 +7,7 @@ internal import libcpython
 // MARK: - Arguments
 
 /// Python arguments borrowed for one synchronous callback.
+@_documentation(visibility: internal)
 @safe
 public struct Arguments: ~Copyable, ~Escapable {
     let pointer: UnsafeMutablePointer<PyObject>
@@ -20,16 +21,17 @@ public struct Arguments: ~Copyable, ~Escapable {
         guard count >= 0 else {
             throw Object.failure("Expected a Python argument tuple.")
         }
+
         guard count == layout.count else {
-            throw Exception(name: "TypeError", message: "Invalid Swift callback arguments.")
+            throw Failure(.typeError, message: "Invalid Swift callback arguments.")
         }
 
         let marker = Interpreter.Storage.current()?.defaultArgumentMarker
         try Self.validateRequiredArguments(in: object, layout: layout, marker: marker)
 
+        unsafe self.pointer = object.pointer
         self.layout = layout
         self.defaultArgumentMarker = marker
-        unsafe self.pointer = object.pointer
     }
 
     private static func validateRequiredArguments(
@@ -37,17 +39,18 @@ public struct Arguments: ~Copyable, ~Escapable {
         layout: Layout,
         marker: UInt?,
     ) throws {
-        // Required arguments must be present before the generated binder evaluates defaults.
+        // Validate required arguments before Swift default expressions can run.
         for case let .argument(index, parameter) in layout.slots
             where parameter.defaultValue.isRequired
         {
-            let value = unsafe try Object.require(
-                PyTuple_GetItem(object.pointer, index),
-                "Unable to read Python arguments.",
+            let value = unsafe try Object.tupleItem(
+                object.pointer,
+                at: index,
+                failure: "Unable to read Python arguments.",
             )
             if UInt(bitPattern: value) == marker {
-                throw Exception(
-                    name: "TypeError",
+                throw Failure(
+                    .typeError,
                     message: "Missing argument '\(parameter.name)'.",
                 )
             }
@@ -101,29 +104,16 @@ public struct Arguments: ~Copyable, ~Escapable {
         try body(ownedArgument(at: parameter))
     }
 
-    public borrowing func withArgument<Result: ~Copyable>(
-        _ type: BorrowedObject.Type,
-        parameter: Int,
-        _ body: (BorrowedObject) throws -> Result,
-    ) throws -> Result {
-        try body(borrowedArgument(at: parameter))
-    }
-
     @_lifetime(borrow self)
     borrowing func ownedArgument(at parameter: Int) throws -> Object {
         let value = unsafe try element(position(parameter))
         return unsafe Object.retaining(value, in: self)
     }
 
-    @_lifetime(borrow self)
-    borrowing func borrowedArgument(at parameter: Int) throws -> BorrowedObject {
-        unsafe try BorrowedObject(element(position(parameter)), in: self)
-    }
-
     func position(_ parameter: Int) throws -> Int {
         guard case let .argument(index, _)? = slot(at: parameter) else {
-            throw Exception(
-                name: "TypeError",
+            throw Failure(
+                .typeError,
                 message: "Expected a Python argument at Swift parameter \(parameter).",
             )
         }
@@ -132,7 +122,7 @@ public struct Arguments: ~Copyable, ~Escapable {
 
     func context(at parameter: Int) throws -> Context {
         guard case .context? = slot(at: parameter) else {
-            throw Exception(name: "TypeError", message: "Expected an injected Python context.")
+            throw Failure(.typeError, message: "Expected an injected Python context.")
         }
         return try Context()
     }
@@ -144,11 +134,13 @@ public struct Arguments: ~Copyable, ~Escapable {
     @unsafe
     borrowing func element(_ index: Int) throws -> UnsafeMutablePointer<PyObject> {
         guard index >= 0, index < layout.count else {
-            throw Exception(name: "TypeError", message: "Invalid Python argument index.")
+            throw Failure(.typeError, message: "Invalid Python argument index.")
         }
-        return unsafe try Object.require(
-            PyTuple_GetItem(pointer, index),
-            "Unable to read a Python argument.",
+
+        return unsafe try Object.tupleItem(
+            pointer,
+            at: index,
+            failure: "Unable to read a Python argument.",
         )
     }
 }

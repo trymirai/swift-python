@@ -15,7 +15,5 @@ public struct Execution: Sendable {
 
         /// The execution was cancelled.
         case stopped
-
-        case timedOut
     }
 }

@@ -6,17 +6,15 @@ import SystemPackage
 
 extension StandardLibraryBuilder {
     func writeGetPath() async throws {
-        let source = workspace.sourceDirectory
-        let output = workspace.outputDirectory
+        let upstream = workspace.sourceDirectory.appending("Modules/getpath.c")
+        let source = try await workspace.read(textFrom: upstream)
 
-        let body = try await workspace
-            .read(textFrom: source.appending("Modules/getpath.c"))
-            .replacing(
-                "#include \"Python/frozen_modules/getpath.h\"",
-                with: "#include \"Bootstrap/Python/frozen_modules/getpath.h\"",
-            )
+        let body = source.replacing(
+            "#include \"Python/frozen_modules/getpath.h\"",
+            with: "#include \"Bootstrap/Python/frozen_modules/getpath.h\"",
+        )
 
-        try await workspace.write("""
+        let definitions = """
         /* Generated upstream getpath translation unit with private build macros. */
         #define PREFIX ""
         #define EXEC_PREFIX ""
@@ -25,6 +23,8 @@ extension StandardLibraryBuilder {
         #define PLATLIBDIR "lib"
         #define PYTHONPATH ""
 
-        """ + body, to: output.appending("GetPath.c"))
+        """
+        let destination = workspace.outputDirectory.appending("GetPath.c")
+        try await workspace.write(definitions + body, to: destination)
     }
 }

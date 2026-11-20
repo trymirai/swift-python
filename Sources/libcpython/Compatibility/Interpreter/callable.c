@@ -2,12 +2,16 @@
 
 #include <stdlib.h>
 
+typedef PyObject *(*SwiftFunctionCall)(void *context, PyObject *arguments);
+typedef void (*SwiftFunctionDestroy)(void *context);
+
 typedef struct {
     uintptr_t interpreter;
 
     void *context;
-    PyObject *(*call)(void *context, PyObject *arguments);
-    void (*destroy)(void *context);
+
+    SwiftFunctionCall call;
+    SwiftFunctionDestroy destroy;
 } SwiftFunction;
 
 static const char capsule_name[] = "swift-python.function";
@@ -50,11 +54,9 @@ static PyMethodDef function_method = {
     .ml_flags = METH_VARARGS,
 };
 
-PyObject *
-CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *arguments),
-                    void (*destroy)(void *context))
+static PyObject *
+new_function_capsule(void *context, SwiftFunctionCall call, SwiftFunctionDestroy destroy)
 {
-    // The Swift caller transfers ownership before any allocation.
     SwiftFunction *function = malloc(sizeof(*function));
     if (function == NULL) {
         destroy(context);
@@ -65,6 +67,7 @@ CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *ar
         .interpreter = CPython_InterpreterKey(NULL),
 
         .context = context,
+
         .call = call,
         .destroy = destroy,
     };
@@ -72,13 +75,29 @@ CPython_NewFunction(void *context, PyObject *(*call)(void *context, PyObject *ar
     PyObject *capsule = PyCapsule_New(function, capsule_name, destroy_capsule);
     if (capsule == NULL) {
         free_function(function);
+    }
+    return capsule;
+}
+
+PyObject *
+CPython_NewFunction(void *context, SwiftFunctionCall call, SwiftFunctionDestroy destroy)
+{
+    PyObject *capsule = new_function_capsule(context, call, destroy);
+    if (capsule == NULL) {
         return NULL;
     }
 
     PyObject *callable = PyCFunction_NewEx(&function_method, capsule, NULL);
-    // The callable retains the capsule on success. On failure this releases the Swift context.
+    // On success the callable keeps its own reference to the capsule.
     Py_DECREF(capsule);
     return callable;
+}
+
+PyObject *
+CPython_Call2(PyObject *function, PyObject *first, PyObject *second)
+{
+    PyObject *arguments[] = {first, second};
+    return PyObject_Vectorcall(function, arguments, 2, NULL);
 }
 
 PyObject *

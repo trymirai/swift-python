@@ -11,7 +11,6 @@ extension Session {
     final class Control: Sendable {
         typealias OutputHandler = @Sendable (Output.Stream, String) -> Void
         typealias InterruptionHandler<Result> = @Sendable (
-            Interruption,
             Swift::Result<Result, any Swift::Error>,
         ) -> Result
 
@@ -21,15 +20,8 @@ extension Session {
             Swift::Result<Result, any Swift::Error>,
         ) async -> Swift::Result<Result, any Swift::Error>
 
-        enum Interruption: Sendable {
-            case stopped
-            case timedOut
-        }
-
-        let hasOutputHandler: Bool
-        private let timeout: Duration?
-
         private let state: Mutex<State>
+        let hasOutputHandler: Bool
 
         let pipe: Pipe
         let subprocesses: Subprocesses?
@@ -38,18 +30,14 @@ extension Session {
         private let submissions: AsyncStream<Invocation>.Continuation
 
         init(
-            timeout: Duration?,
             scope: (any Sendable)? = nil,
             output: OutputHandler? = nil,
             allowsSubprocesses: Bool = false,
         ) throws {
-            try Self.validateTimeout(timeout)
             self.pipe = try Pipe()
             self.subprocesses = allowsSubprocesses ? try Subprocesses() : nil
 
             self.hasOutputHandler = output != nil
-            self.timeout = timeout
-
             self.state = .init(State(scope: scope, outputHandler: output))
 
             (self.incomingCalls, self.submissions) = AsyncStream.makeStream()
@@ -64,25 +52,22 @@ extension Session {
 // MARK: Session.Control + Execution lifetime
 
 extension Session.Control {
-    static func validateTimeout(_ timeout: Duration?) throws {
-        if let timeout, timeout <= .zero {
-            throw Runtime.Failure("Expected a positive Python execution timeout.")
-        }
-    }
-
     func withCancellation<Result>(
         _ operation: () async throws -> Result,
     ) async rethrows -> Result {
-        try await withTaskCancellationHandler {
-            do {
-                return try await operation()
-            } catch {
-                try checkInterruption()
-                throw error
-            }
-        } onCancel: {
-            self.requestInterruption(.stopped)
-        }
+        try await withTaskCancellationHandler(
+            operation: {
+                do {
+                    return try await operation()
+                } catch {
+                    try checkInterruption()
+                    throw error
+                }
+            },
+            onCancel: {
+                self.requestInterruption()
+            },
+        )
     }
 
     func run<Result: Sendable>(
@@ -93,28 +78,16 @@ extension Session.Control {
     ) async throws -> Result {
         defer { _ = state.withLock { exchange(&$0.scope, with: nil) } }
 
-        let deadline = timeout.map { ContinuousClock.now + $0 }
-        state.withLock { $0.start(until: deadline) }
+        state.withLock { $0.start() }
 
-        @Sendable
-        func perform(on session: isolated Session) async throws -> Result {
+        // Callbacks and delegates must be able to run while the interpreter thread is occupied.
+        return try await withTaskExecutorPreference(globalConcurrentExecutor, isolation: session) {
             try await runOperation(
                 on: session,
                 onInterruption: onInterruption,
                 settling: settling,
                 operation,
             )
-        }
-
-        // Keep callback dispatch, delegate calls and deadlines runnable while a Swift
-        // callback occupies its worker. Interpreter work stays on the session's executor.
-        return try await withTaskExecutorPreference(globalConcurrentExecutor, isolation: session) {
-            guard let deadline else {
-                return try await perform(on: session)
-            }
-            return try await withDeadline(deadline) {
-                try await perform(on: session)
-            }
         }
     }
 
@@ -125,37 +98,53 @@ extension Session.Control {
         _ operation: @Sendable (isolated Session) async throws -> Result,
     ) async throws -> Result {
         try await withCancellation {
-            async let callbacks: Void = runCalls()
+            // Control publishes interruption and wakes Python before cancelling its callbacks.
+            // Join the dispatcher here so implicit child cancellation cannot reorder those events.
+            let callbacks = Task { await self.runCalls() }
 
-            var result: Swift::Result<Result, any Swift::Error>
-            do {
-                try checkInterruption()
-                result = .success(try await operation(session))
-            } catch {
-                result = .failure(error)
-            }
+            var result = await operationResult(on: session, operation)
 
             // Every native access must detach before publication or close.
             await finishAccesses()
             if settling != nil || subprocesses != nil {
                 settleCallsAndSubprocesses(on: session, result: &result)
             }
+
             if let settling {
-                await callbacks
+                await callbacks.value
                 result = await settling(session, self, result)
             }
 
-            let interruption = finish()
+            let wasInterrupted = finish()
             // Python can return before interrupted Swift callbacks finish their cleanup.
-            await callbacks
+            await callbacks.value
+            return try completedResult(result, interrupted: wasInterrupted, using: onInterruption)
+        }
+    }
 
-            guard let interruption else {
-                return try result.get()
-            }
-            guard let onInterruption else {
-                throw CancellationError()
-            }
-            return onInterruption(interruption, result)
+    private func completedResult<Result>(
+        _ result: Swift::Result<Result, any Swift::Error>,
+        interrupted: Bool,
+        using onInterruption: InterruptionHandler<Result>?,
+    ) throws -> Result {
+        guard interrupted else {
+            return try result.get()
+        }
+        guard let onInterruption else {
+            throw CancellationError()
+        }
+        return onInterruption(result)
+    }
+
+    private func operationResult<Result: Sendable>(
+        on session: isolated Session,
+        _ operation: @Sendable (isolated Session) async throws -> Result,
+    ) async -> Swift::Result<Result, any Swift::Error> {
+        do {
+            try checkInterruption()
+            return .success(try await operation(session))
+        } catch {
+            return .failure(error)
         }
     }
 
@@ -164,10 +153,11 @@ extension Session.Control {
         result: inout Swift::Result<Result, any Swift::Error>,
     ) {
         if let subprocesses, case .success = result, session.hasOpenPipes(in: subprocesses) {
-            result = .failure(Runtime.Failure(
+            let failure = Failure(
                 "Python returned with a running subprocess and an open PIPE. "
                     + "Call communicate() or redirect the stream to a file.",
-            ))
+            )
+            result = .failure(failure)
         }
         if case .failure = result {
             subprocesses?.stop()
@@ -175,44 +165,12 @@ extension Session.Control {
 
         finishCalls(state.withLock { $0.settleCalls() })
 
-        // The executor owns the wait. Cancellation and the deadline can still signal children.
+        // The executor owns the wait. Cancellation can still signal children.
         do {
             try subprocesses?.join()
         } catch {
             if case .success = result {
                 result = .failure(error)
-            }
-        }
-    }
-
-    @concurrent
-    private func withDeadline<Result: Sendable>(
-        _ deadline: ContinuousClock.Instant,
-        _ operation: @Sendable () async throws -> Result,
-    ) async throws -> Result {
-        // The group joins both children before the borrowed operation returns.
-        try await withoutActuallyEscaping(operation) { operation in
-            try await withThrowingTaskGroup(of: Result?.self) { group in
-                group.addTask { .some(try await operation()) }
-                group.addTask {
-                    do {
-                        try await ContinuousClock().sleep(until: deadline)
-                        self.requestInterruption(.timedOut)
-                    } catch {}
-                    return nil
-                }
-                defer { group.cancelAll() }
-
-                for try await result in group {
-                    if let result {
-                        return result
-                    }
-                    // A sealed publication has already finished accepting cancellation.
-                    if interruption != nil {
-                        group.cancelAll()
-                    }
-                }
-                preconditionFailure("The Python execution completed without a result.")
             }
         }
     }
@@ -267,7 +225,7 @@ extension Session.Control {
         guard case .enqueued = submissions.yield(call) else {
             cancelCall(id)
             try checkInterruption()
-            throw Runtime.Failure("The Python execution has stopped accepting Swift calls.")
+            throw Failure("The Python execution has stopped accepting Swift calls.")
         }
     }
 
@@ -287,7 +245,7 @@ extension Session.Control {
 
     func export(_ id: CallID) throws -> ExportCall {
         guard case let .export(call)? = state.withLock({ $0.calls[id] }) else {
-            throw Runtime.Failure("Unknown Swift callback.")
+            throw Failure("Unknown Swift callback.")
         }
         return call
     }
@@ -295,7 +253,7 @@ extension Session.Control {
     func takeExport(_ id: CallID) throws -> any Encodable & Sendable {
         let call = try export(id)
         guard let outcome = call.take() else {
-            throw Runtime.Failure("The Swift callback has not completed.")
+            throw Failure("The Swift callback has not completed.")
         }
         defer { cancelCall(id) }
         return try outcome.get()
@@ -307,51 +265,29 @@ extension Session.Control {
 extension Session.Control {
     func beginEvaluation(in interpreter: UInt) {
         let thread = unsafe UInt(bitPattern: PyThreadState_Get())
-        state.withLock { $0.beginEvaluation(in: interpreter, on: thread) }
+        state.withLock { $0.evaluations.begin(in: interpreter, on: thread) }
     }
 
     func endEvaluation() {
         let thread = unsafe UInt(bitPattern: PyThreadState_Get())
-        state.withLock { $0.endEvaluation(on: thread) }
+        state.withLock { $0.evaluations.end(on: thread, interrupted: $0.phase.isInterrupted) }
     }
 
-    func requestInterruption(_ reason: Interruption) {
-        _ = interrupt(reason)
+    func requestInterruption() {
+        guard let calls = state.withLock({ $0.interrupt() }) else {
+            return
+        }
+
+        subprocesses?.stop()
+        pipe.signal()
+        finishCalls(calls)
     }
 
     func deliverInterruption() -> Bool {
-        _ = interrupt()
         let current = unsafe UInt(bitPattern: PyThreadState_Get())
-        let delivery = state.withLock { $0.markInterruptionDelivered(on: current) }
-        guard let (delivered, threads) = delivery else {
-            return false
+        return state.withLock { state in
+            state.phase.isInterrupted && state.evaluations.markInterrupted(on: current)
         }
-        // Registration and removal require this interpreter's GIL, so these states
-        // cannot disappear before the interruption is queued. No user code runs here.
-        for thread in threads {
-            if let pointer = unsafe UnsafeMutablePointer<PyThreadState>(bitPattern: thread) {
-                unsafe CPython_InterruptThreadState(pointer)
-            }
-        }
-        let queued = CPython_TakeThreadInterruption()
-        return delivered || queued
-    }
-
-    private func interrupt(_ requested: Interruption? = nil) -> Interruption? {
-        let (reason, calls) = state.withLock { state in
-            let transition = state.interrupt(requested)
-            if requested != nil, transition.calls != nil {
-                state.requestEvaluationInterrupt()
-            }
-            return transition
-        }
-
-        if let calls {
-            subprocesses?.stop()
-            pipe.signal()
-            finishCalls(calls)
-        }
-        return reason
     }
 
     private func finishCalls(_ calls: [CallID: Invocation]) {
@@ -361,27 +297,27 @@ extension Session.Control {
         }
     }
 
-    func finish() -> Interruption? {
-        let (interruption, calls) = state.withLock { $0.finish() }
+    func finish() -> Bool {
+        let (wasInterrupted, calls) = state.withLock { $0.finish() }
         if let calls {
             finishCalls(calls)
             pipe.close()
         }
-        return interruption
+        return wasInterrupted
     }
 
     func finishCheckingInterruption() throws {
-        if finish() != nil {
+        if finish() {
             throw CancellationError()
         }
     }
 
-    var interruption: Interruption? {
-        interrupt()
+    var isInterrupted: Bool {
+        state.withLock { $0.phase.isInterrupted }
     }
 
     func checkInterruption() throws {
-        if interruption != nil {
+        if isInterrupted {
             throw CancellationError()
         }
     }
@@ -396,13 +332,8 @@ extension Session.Control {
 
 private extension Session.Control {
     struct State {
-        // A call snapshot tells the caller to close admission for this transition.
-        typealias Transition = (reason: Interruption?, calls: [CallID: Invocation]?)
-
         var phase: Phase = .ready
-
-        var evaluatingInterpreter: UInt?
-        var evaluatingThreads: [UInt: Evaluation] = [:]
+        var evaluations: Evaluations = .init()
 
         var calls: [CallID: Invocation] = [:]
 
@@ -413,15 +344,15 @@ private extension Session.Control {
         var scope: (any Sendable)?
         var outputHandler: OutputHandler?
 
-        mutating func start(until deadline: ContinuousClock.Instant?) {
+        mutating func start() {
             if case .ready = phase {
-                phase = .running(deadline)
+                phase = .running
             }
         }
 
         mutating func beginAccess() throws {
             guard phase.isRunning, !accessesClosed else {
-                throw Session.Error.closed
+                throw Failure.closed
             }
             activeAccesses += 1
         }
@@ -441,100 +372,96 @@ private extension Session.Control {
         }
 
         mutating func admit(_ call: Invocation, id: CallID) throws {
-            if phase.interruption != nil {
+            if phase.isInterrupted {
                 throw CancellationError()
             }
             guard phase.isRunning else {
-                throw Runtime.Failure("Swift callbacks require an active Python execution.")
+                throw Failure("Swift callbacks require an active Python execution.")
             }
             calls[id] = call
         }
 
-        mutating func interrupt(_ requested: Interruption?) -> Transition {
+        mutating func interrupt() -> [CallID: Invocation]? {
             switch phase {
             case .ready, .running, .settling:
-                guard let reason = phase.expiration ?? requested else {
-                    return (nil, nil)
-                }
-                phase = .interrupted(reason)
-                return (reason, calls)
+                phase = .interrupted
+                evaluations.requestInterrupt()
+                return calls
             case .interrupted, .finished:
-                return (phase.interruption, nil)
-            }
-        }
-
-        mutating func beginEvaluation(in interpreter: UInt, on thread: UInt) {
-            precondition(evaluatingInterpreter == nil || evaluatingInterpreter == interpreter)
-            evaluatingInterpreter = interpreter
-            evaluatingThreads[thread, default: .init()].depth += 1
-        }
-
-        mutating func endEvaluation(on thread: UInt) {
-            evaluatingThreads[thread]!.depth -= 1
-            if evaluatingThreads[thread]!.depth == 0 {
-                evaluatingThreads.removeValue(forKey: thread)
-            }
-
-            if evaluatingThreads.isEmpty {
-                evaluatingInterpreter = nil
-            } else if phase.interruption != nil {
-                requestEvaluationInterrupt()
-            }
-        }
-
-        func requestEvaluationInterrupt() {
-            // The state lock keeps endEvaluation from clearing this pointer during the call.
-            if
-                let key = evaluatingInterpreter,
-                let interpreter = unsafe OpaquePointer(bitPattern: key)
-            {
-                unsafe CPython_RequestEvaluationInterrupt(interpreter)
-            }
-        }
-
-        mutating func markInterruptionDelivered(on current: UInt) -> (Bool, [UInt])? {
-            guard phase.interruption != nil else {
                 return nil
             }
-
-            var delivered = false
-            var threads = [UInt]()
-            for (thread, evaluation) in evaluatingThreads where !evaluation.interrupted {
-                evaluatingThreads[thread]!.interrupted = true
-                if thread == current {
-                    delivered = true
-                } else {
-                    threads.append(thread)
-                }
-            }
-            return (delivered, threads)
         }
 
         mutating func settleCalls() -> [CallID: Invocation] {
-            if case let .running(deadline) = phase {
-                phase = .settling(deadline)
+            if case .running = phase {
+                phase = .settling
             }
             return exchange(&calls, with: [:])
         }
 
-        mutating func finish() -> Transition {
-            if case let .finished(interruption) = phase {
-                return (interruption, nil)
+        // Only the first caller takes the calls and closes their pipe.
+        mutating func finish() -> (wasInterrupted: Bool, calls: [CallID: Invocation]?) {
+            if case let .finished(wasInterrupted) = phase {
+                return (wasInterrupted, nil)
             }
-            let interruption = phase.interruption ?? phase.expiration
-            phase = .finished(interruption)
+
+            let wasInterrupted = phase.isInterrupted
+            phase = .finished(wasInterrupted: wasInterrupted)
             outputHandler = nil
-            return (interruption, exchange(&calls, with: [:]))
+            return (wasInterrupted, exchange(&calls, with: [:]))
         }
     }
 }
 
-// MARK: - Session.Control.State.Evaluation
+// MARK: - Session.Control.Evaluations
 
-private extension Session.Control.State {
-    struct Evaluation {
-        var depth: Int = 0
-        var interrupted: Bool = false
+private extension Session.Control {
+    struct Evaluations {
+        private struct Thread {
+            var depth: Int = 0
+            var interrupted: Bool = false
+        }
+
+        private var interpreter: UInt?
+        private var threads: [UInt: Thread] = [:]
+
+        mutating func begin(in interpreter: UInt, on thread: UInt) {
+            precondition(self.interpreter == nil || self.interpreter == interpreter)
+            self.interpreter = interpreter
+            threads[thread, default: .init()].depth += 1
+        }
+
+        mutating func end(on thread: UInt, interrupted: Bool) {
+            threads[thread]!.depth -= 1
+            if threads[thread]!.depth == 0 {
+                threads.removeValue(forKey: thread)
+            }
+
+            if threads.isEmpty {
+                interpreter = nil
+            } else if interrupted {
+                requestInterrupt()
+            }
+        }
+
+        func requestInterrupt() {
+            // The state lock prevents the final evaluation from clearing the interpreter here.
+            if let interpreter, let pointer = unsafe OpaquePointer(bitPattern: interpreter) {
+                unsafe CPython_RequestEvaluationInterrupt(pointer)
+            }
+        }
+
+        mutating func markInterrupted(on thread: UInt) -> Bool {
+            let shouldDeliver = threads[thread]?.interrupted == false
+            if shouldDeliver {
+                threads[thread]?.interrupted = true
+            }
+            // Each attachment delivers on its own thread so its loop can unwind safely.
+            if threads.values.contains(where: { !$0.interrupted }) {
+                requestInterrupt()
+            }
+            return shouldDeliver
+        }
     }
 }
 
@@ -543,10 +470,10 @@ private extension Session.Control.State {
 private extension Session.Control {
     enum Phase {
         case ready
-        case running(ContinuousClock.Instant?)
-        case settling(ContinuousClock.Instant?)
-        case interrupted(Interruption)
-        case finished(Interruption?)
+        case running
+        case settling
+        case interrupted
+        case finished(wasInterrupted: Bool)
 
         var isRunning: Bool {
             if case .running = self {
@@ -556,23 +483,14 @@ private extension Session.Control {
             }
         }
 
-        var interruption: Interruption? {
+        var isInterrupted: Bool {
             switch self {
-            case let .interrupted(reason):
-                reason
-            case let .finished(reason):
-                reason
+            case .interrupted:
+                true
+            case let .finished(interrupted):
+                interrupted
             case .ready, .running, .settling:
-                nil
-            }
-        }
-
-        var expiration: Interruption? {
-            switch self {
-            case let .running(deadline?), let .settling(deadline?):
-                ContinuousClock.now >= deadline ? .timedOut : nil
-            default:
-                nil
+                false
             }
         }
     }

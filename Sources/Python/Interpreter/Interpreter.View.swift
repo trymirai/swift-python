@@ -14,7 +14,7 @@ extension Interpreter {
         @unsafe
         init(state: UnsafeMutablePointer<PyThreadState>) throws {
             guard let pointer = unsafe CPython_NewInterpreterView(state) else {
-                throw Runtime.Failure("Unable to retain the Python interpreter view.")
+                throw Failure("Unable to retain the Python interpreter view.")
             }
             unsafe self.pointer = pointer
             key = unsafe CPython_InterpreterKey(state)
@@ -32,8 +32,9 @@ extension Interpreter {
                 throw Reference.wrongInterpreter()
             }
             defer { unsafe PyInterpreterGuard_Close(guardPointer) }
+
             guard let storage = Storage.lookup(key) else {
-                throw Session.Error.closed
+                throw Failure.closed
             }
             return unsafe try body(storage, guardPointer)
         }

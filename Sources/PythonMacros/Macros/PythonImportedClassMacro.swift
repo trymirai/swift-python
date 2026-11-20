@@ -68,9 +68,11 @@ extension PythonImportedClassMacro: MemberAttributeMacro {
             return [AttributeSyntax(stringLiteral: "@Python::_PythonPropertyGetter")]
         }
 
+        let method = member.as(FunctionDeclSyntax.self)
+        let initializer = member.as(InitializerDeclSyntax.self)
         if
-            let method = member.as(FunctionDeclSyntax.self),
-            method.attributes.attribute(named: "PythonFunction") != nil
+            method?.attributes.attribute(named: "PythonFunction") != nil
+            || initializer?.attributes.attribute(named: "PythonInit") != nil
         {
             return [AttributeSyntax(stringLiteral: "@Python::_PythonImportedFunction")]
         }
@@ -94,17 +96,17 @@ extension PythonImportedClassMacro: ExtensionMacro {
         }
 
         let names = protocols.map(protocolName)
-        let conformances = names.map { name in
-            name == "Sendable" ? "Swift::Sendable" : "Python::\(name)"
-        }
-        .joined(separator: ", ")
+        let conformances = names
+            .map { name in name == "Sendable" ? "Swift::Sendable" : "Python::\(name)" }
+            .joined(separator: ", ")
         let codec = try usesReference(names) ? referenceCodec : ""
 
-        return [try ExtensionDeclSyntax("""
+        let declaration = try ExtensionDeclSyntax("""
         extension \(type): \(raw: conformances) {
             \(raw: codec)
         }
-        """)]
+        """)
+        return [declaration]
     }
 }
 
@@ -124,10 +126,6 @@ private extension PythonImportedClassMacro {
         try __p_reference(body)
     }
 
-    @_lifetime(borrow context)
-    public borrowing func object(in context: borrowing Python::Context) throws -> Python::Object {
-        try context.object(__p_reference)
-    }
     """
 
     static func protocolName(_ type: TypeSyntax) -> String {

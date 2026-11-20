@@ -10,23 +10,36 @@ import weakref
 from contextlib import suppress
 from types import CodeType
 
-from .async_support import await_block
+from .async_support import configure_restricted_loop, run
 from .history import History
 from .imports import import_module, import_project, update_imports
 from .streams import capture
 from .streams import install as install_streams
 
+type _ExceptionDetail = tuple[str, str, str]
+type _Reply = tuple[str, str, _ExceptionDetail | None]
 
-def _report_exception(exception: BaseException, stderr, control) -> str:
+
+def _utf8_text(text: str) -> str:
+    # Python exception text may contain lone surrogates that Swift strings cannot represent.
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _report_exception(exception: BaseException, stderr, control) -> _ExceptionDetail:
     # Skip the catching frame. Compilation and startup imports stay there so their
     # failures do not expose extra runtime helper frames.
-    text = "".join(
-        traceback.format_exception(type(exception), exception, exception.__traceback__.tb_next)
+    name = type(exception).__name__
+    report = traceback.TracebackException(
+        type(exception),
+        exception,
+        exception.__traceback__.tb_next,
     )
-    text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+    text = _utf8_text("".join(report.format()))
+    message = _utf8_text(str(report))
+    detail = (name, message, text)
 
     if control("interrupted"):
-        return text
+        return detail
 
     try:
         stderr.write(text)
@@ -34,7 +47,7 @@ def _report_exception(exception: BaseException, stderr, control) -> str:
         # Close here so a failed flush cannot mask the original exception during cleanup.
         with suppress(OSError, ValueError):
             stderr.close()
-    return text
+    return detail
 
 
 def _successful_script_exit(exception: BaseException) -> bool:
@@ -45,19 +58,26 @@ def _successful_script_exit(exception: BaseException) -> bool:
 
 
 def _configure_site(package_paths: list[str]) -> None:
-    # Directory package sources support site startup files. Embedded archives use a virtual path.
     for path in package_paths:
         if os.path.isabs(path):
             site.addsitedir(path)
+
     site.setquit()
     site.setcopyright()
     site.sethelper()
 
 
+def _code_objects(code: CodeType):
+    pending = [code]
+    while pending:
+        child = pending.pop()
+        pending.extend(value for value in child.co_consts if isinstance(value, CodeType))
+        yield child
+
+
 class _SourceCache:
     def __init__(self) -> None:
         self._sources = {}
-
         self._block = 0
 
     def block_filename(self, requested: str | None) -> str:
@@ -70,7 +90,6 @@ class _SourceCache:
     def remember(self, code: CodeType, source: str, filename: str) -> None:
         entry = (len(source), None, source.splitlines(keepends=True), filename)
 
-        references = []
         live = 0
 
         def released(_) -> None:
@@ -82,55 +101,52 @@ class _SourceCache:
                     linecache.cache.pop(filename, None)
 
         # A function defined by the block can outlive the outer code object.
-        pending = [code]
-        while pending:
-            child = pending.pop()
-            pending.extend(value for value in child.co_consts if isinstance(value, CodeType))
-            references.append(weakref.ref(child, released))
-            live += 1
+        references = [weakref.ref(child, released) for child in _code_objects(code)]
+        live = len(references)
 
         self._sources[filename] = references
         linecache.cache[filename] = entry
 
 
 def configure(
-    paths: list[str], package_paths: list[str], output_limit: int | None, read_inputs
+    paths: list[str],
+    package_paths: list[str],
+    output_limit: int | None,
+    read_inputs,
+    dns,
 ) -> None:
     global evaluate, initialize, run_script, current_namespace
 
-    from .async_support import configure_restricted_loop
-
     update_imports((paths, []))
     install_streams()
-    configure_restricted_loop()
+    configure_restricted_loop(dns)
     _configure_site(package_paths)
 
-    namespace = sys.modules["__main__"].__dict__
-    sources = _SourceCache()
-    history = History(output_limit, read_inputs) if output_limit is not None else None
+    execution = _Execution(output_limit, read_inputs)
+    current_namespace = execution.current_namespace
+    initialize = execution.initialize
+    evaluate = execution.evaluate
+    run_script = execution.run_script
 
-    def bind_namespace(replacement: dict) -> None:
-        nonlocal namespace
-        namespace = replacement
-        if history is not None:
-            history.bind(namespace)
 
-    bind_namespace(namespace)
+class _Execution:
+    def __init__(self, output_limit: int | None, read_inputs) -> None:
+        namespace = sys.modules["__main__"].__dict__
+        self.sources = _SourceCache()
+        self.history = History(output_limit, read_inputs) if output_limit is not None else None
+        self._bind_namespace(namespace)
 
-    def run_code(code: CodeType, source: str, filename: str, namespace: dict, control) -> None:
-        sources.remember(code, source, filename)
-        result = eval(code, namespace)
-        if result is not None:
-            import asyncio
+    def _bind_namespace(self, namespace: dict) -> None:
+        self.namespace = namespace
+        if self.history is not None:
+            self.history.bind(namespace)
 
-            asyncio.run(await_block(result, control))
+    def current_namespace(self) -> dict:
+        return self.namespace
 
-    def current_namespace() -> dict:
-        return namespace
-
-    def initialize(request: dict, unused, control, streams: dict[str, int]) -> tuple[str, str, str]:
+    def initialize(self, request: dict, unused, control, streams: dict[str, int]) -> _Reply:
         def run_source(source: str, filename: str, module_namespace: dict) -> None:
-            bind_namespace(module_namespace)
+            self._bind_namespace(module_namespace)
             code = compile(
                 source,
                 filename,
@@ -138,14 +154,14 @@ def configure(
                 flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
                 dont_inherit=True,
             )
-            run_code(code, source, filename, namespace, control)
+            self.run_code(code, source, filename, control)
 
         with capture(control, streams) as (stdout, stderr):
-            failure = ""
+            failure = None
 
             try:
                 if "source" in request:
-                    run_source(request["source"], "<startup>", namespace)
+                    run_source(request["source"], "<startup>", self.namespace)
                 else:
                     if "project" in request:
                         module = import_project(
@@ -158,37 +174,65 @@ def configure(
                         module = import_module(request["module"], run_source)
 
                     # Functions and later assignments share the startup module's globals.
-                    bind_namespace(module.__dict__)
+                    self._bind_namespace(module.__dict__)
             except BaseException as exception:
                 failure = _report_exception(exception, stderr, control)
 
             return stdout.result(), stderr.result(), failure
 
+    def evaluate(
+        self,
+        request: dict,
+        filename: str | None,
+        control,
+        streams: dict[str, int],
+    ) -> _Reply:
+        return self.execute(request["source"], filename, control, streams, number=request["number"])
+
+    def run_script(
+        self,
+        request: dict,
+        filename: str | None,
+        control,
+        streams: dict[str, int],
+    ) -> _Reply:
+        return self.execute(
+            request["source"],
+            filename,
+            control,
+            streams,
+            arguments=request["arguments"],
+        )
+
     def execute(
+        self,
         source: str,
         filename: str | None,
         control,
         streams: dict[str, int],
         arguments: list[str] | None = None,
         number: int | None = None,
-    ) -> tuple[str, str, str]:
-        filename = sources.block_filename(filename)
+    ) -> _Reply:
+        filename = self.sources.block_filename(filename)
 
         with capture(control, streams) as (stdout, stderr):
             # Restore argv even if interactive code rebinds it.
             previous_argv = sys.argv
 
-            failure = ""
-
+            failure = None
             captured_result = None
-            previous_displayhook = None
-            display_hook = None
+            display_hook = previous_displayhook = None
+
+            def owns_display_hook():
+                return (
+                    display_hook is not None and getattr(sys, "displayhook", None) is display_hook
+                )
 
             try:
                 if arguments is None:
                     tree = ast.parse(source, filename, "exec")
                     if (
-                        history is not None
+                        self.history is not None
                         and number is not None
                         and tree.body
                         and isinstance(tree.body[-1], ast.Expr)
@@ -205,8 +249,8 @@ def configure(
                     compiled_source = ast.Interactive(body=tree.body)
                     mode = "single"
                 else:
-                    namespace["__name__"] = "__main__"
-                    namespace["__file__"] = filename
+                    self.namespace["__name__"] = "__main__"
+                    self.namespace["__file__"] = filename
                     sys.argv = [filename, *arguments]
 
                     compiled_source = source
@@ -219,25 +263,24 @@ def configure(
                     flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
                     dont_inherit=True,
                 )
-                run_code(code, source, filename, namespace, control)
-                if display_hook is not None and getattr(sys, "displayhook", None) is display_hook:
-                    history.remember(number, captured_result)
+                self.run_code(code, source, filename, control)
+
+                if owns_display_hook():
+                    self.history.remember(number, captured_result)
             except BaseException as exception:
                 if arguments is None or not _successful_script_exit(exception):
                     failure = _report_exception(exception, stderr, control)
             finally:
-                if display_hook is not None and getattr(sys, "displayhook", None) is display_hook:
+                # Preserve a replacement installed by the block itself.
+                if owns_display_hook():
                     sys.displayhook = previous_displayhook
                 sys.argv = previous_argv
 
             return stdout.result(), stderr.result(), failure
 
-    def evaluate(
-        request: dict, filename: str | None, control, streams: dict[str, int]
-    ) -> tuple[str, str, str]:
-        return execute(request["source"], filename, control, streams, number=request["number"])
-
-    def run_script(
-        request: dict, filename: str | None, control, streams: dict[str, int]
-    ) -> tuple[str, str, str]:
-        return execute(request["source"], filename, control, streams, request["arguments"])
+    def run_code(self, code: CodeType, source: str, filename: str, control) -> None:
+        namespace = self.namespace
+        self.sources.remember(code, source, filename)
+        result = eval(code, namespace)
+        if result is not None:
+            run(result, control)

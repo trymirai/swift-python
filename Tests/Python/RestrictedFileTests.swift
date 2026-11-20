@@ -17,6 +17,7 @@ func defaultFileAccessUsesHostImportRootsForReadsOnly() async throws {
             withIntermediateDirectories: false,
         )
         try await FileSystem.shared.createDirectory(at: outside, withIntermediateDirectories: false)
+
         try await "allowed".write(toFileAt: readable.appending("data"))
         try await "outside".write(toFileAt: outside.appending("data"))
         try await FileSystem.shared.createSymbolicLink(
@@ -81,7 +82,8 @@ func openRemainsBoundDuringAuthorization(swapParent: Bool) async throws {
         let delegate = FileAccessDelegate { request in
             if
                 request.path.lastComponent?.string == "data",
-                case let .open(_, options) = request.operation, options.contains(.truncate)
+                case let .open(_, options) = request.operation,
+                options.contains(.truncate)
             {
                 // Change the visible path after the target has been pinned.
                 if swapParent {
@@ -100,17 +102,23 @@ func openRemainsBoundDuringAuthorization(swapParent: Bool) async throws {
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(delegate: delegate)
         defer { await session.close() }
+
         try await session.set(root.string, forKey: "root")
-        let result = try await session.evaluate(swapParent ? """
-        import os
-        directory = os.open(root + '/approved', os.O_RDONLY | os.O_DIRECTORY)
-        with open(os.open('data', os.O_WRONLY | os.O_TRUNC, dir_fd=directory), 'w') as file:
-            _ = file.write('written')
-        os.close(directory)
-        """ : """
-        with open(root + '/link', 'w') as file:
-            _ = file.write('written')
-        """)
+        let source = if swapParent {
+            """
+            import os
+            directory = os.open(root + '/approved', os.O_RDONLY | os.O_DIRECTORY)
+            with open(os.open('data', os.O_WRONLY | os.O_TRUNC, dir_fd=directory), 'w') as file:
+                _ = file.write('written')
+            os.close(directory)
+            """
+        } else {
+            """
+            with open(root + '/link', 'w') as file:
+                _ = file.write('written')
+            """
+        }
+        let result = try await session.evaluate(source)
         #expect(result.end == .finished)
 
         let written = swapParent ? moved.appending("data") : original
@@ -219,22 +227,18 @@ func failedEvaluationPreservesActualFileIOState() async throws {
         assert file.read(1) == b'a'
         """)
 
-        _ = try await #require(throws: Python::ExecutionError.self) {
-            try await session.evaluate("""
-            assert file.read(1) == b'b'
-            raise ValueError('read remains')
-            """)
-        }
+        try await session.requireFailure(evaluating: """
+        assert file.read(1) == b'b'
+        raise ValueError('read remains')
+        """)
         #expect(try await session.evaluate("assert file.read(1) == b'c'").end == .finished)
 
-        _ = try await #require(throws: Python::ExecutionError.self) {
-            try await session.evaluate("""
-            file.close()
-            replacement = io.FileIO(path)
-            del file
-            raise ValueError('close remains')
-            """)
-        }
+        try await session.requireFailure(evaluating: """
+        file.close()
+        replacement = io.FileIO(path)
+        del file
+        raise ValueError('close remains')
+        """)
 
         let result = try await session.evaluate("""
         assert 'file' not in globals() and alias.closed

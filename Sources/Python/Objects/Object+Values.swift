@@ -4,6 +4,31 @@
 
 internal import libcpython
 
+public extension Object {
+    @_lifetime(borrow owner)
+    internal init<T: Encodable & ~Copyable, Owner: ~Copyable & ~Escapable>(
+        encoding value: borrowing T,
+        in owner: borrowing Owner,
+    ) throws {
+        var encoder = Encoder(in: owner)
+        try value.encode(to: &encoder)
+        self = unsafe try Object(owned: encoder.take(), in: owner)
+    }
+
+    /// Discards the result of a void-returning Swift binding.
+    @_documentation(visibility: internal)
+    borrowing func decode(as type: Void.Type) throws {
+        _ = try Interpreter.Storage.requireCurrent()
+    }
+
+    borrowing func decode<T: Decodable & ~Copyable>(
+        as type: T.Type = T.self,
+    ) throws -> T {
+        let decoder = unsafe Decoder(pointer, in: self)
+        return try decoder.decode(type)
+    }
+}
+
 extension Object {
     @_lifetime(borrow attachment)
     init(bytes: Span<UInt8>, in attachment: borrowing PThread.Attachment) throws {
@@ -12,7 +37,7 @@ extension Object {
 
     @unsafe
     static func copyBytes(_ bytes: Span<UInt8>) -> UnsafeMutablePointer<PyObject>? {
-        // CPython copies the range synchronously; the Swift storage stays borrowed.
+        // CPython copies the bytes before this borrow ends.
         bytes.withUnsafeBytes { buffer in
             unsafe PyBytes_FromStringAndSize(
                 buffer.baseAddress?.assumingMemoryBound(to: CChar.self),
@@ -27,8 +52,8 @@ extension Object {
 
     borrowing func value(depth: Int) throws -> Value {
         guard depth < 64 else {
-            throw Exception(
-                name: "ValueError",
+            throw Failure(
+                .valueError,
                 message: "Swift argument nesting exceeds 64 levels.",
             )
         }
@@ -54,8 +79,8 @@ extension Object {
             let decoder = unsafe Decoder(pointer, depth: depth, in: self)
             return .dictionary(try decoder.dictionary(of: Value.self))
         default:
-            throw Exception(
-                name: "TypeError",
+            throw Failure(
+                .typeError,
                 message: "This Python value cannot be passed to Swift.",
             )
         }
@@ -63,11 +88,7 @@ extension Object {
 
     private borrowing func copiedBytes() throws -> [UInt8] {
         let span = try bytes()
-        return Array(capacity: span.count) { output in
-            for index in span.indices {
-                output.append(span[index])
-            }
-        }
+        return span.withUnsafeBufferPointer { unsafe Array($0) }
     }
 
     private borrowing func sequenceValues(depth: Int) throws -> [Value] {
@@ -85,30 +106,8 @@ extension Object {
         return values
     }
 
-    @_lifetime(borrow self)
-    public borrowing func utf8() throws -> UTF8Span {
-        _ = try Interpreter.Storage.requireCurrent()
-
-        guard let buffer = unsafe Self.utf8Buffer(pointer) else {
-            throw Self.failure("Unable to read a Python string.")
-        }
-        let utf8 = unsafe UTF8Span(unchecked: buffer.span)
-        return unsafe _overrideLifetime(utf8, borrowing: self)
-    }
-
-    // CPython owns the UTF-8 bytes for as long as the Unicode object is alive.
-    @unsafe
-    static func utf8Buffer(
-        _ pointer: UnsafeMutablePointer<PyObject>,
-    ) -> UnsafeBufferPointer<UInt8>? {
-        var count = 0
-        guard let bytes = unsafe PyUnicode_AsUTF8AndSize(pointer, &count) else {
-            return nil
-        }
-        return unsafe UnsafeBufferPointer(
-            start: UnsafeRawPointer(bytes).assumingMemoryBound(to: UInt8.self),
-            count: count,
-        )
+    borrowing func string() throws -> String {
+        String(copying: try utf8())
     }
 
     @_lifetime(borrow self)

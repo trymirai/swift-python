@@ -7,6 +7,9 @@ import Foundation
 import Python
 import SystemPackage
 import Testing
+#if OpenSSL && (os(macOS) || os(Linux))
+internal import libpythontestsupport
+#endif
 
 @Test(.timeLimit(.minutes(1)))
 func socketsPreserveStandardDescriptorAndCloseSemantics() async throws {
@@ -40,9 +43,7 @@ func socketsPreserveStandardDescriptorAndCloseSemantics() async throws {
     else:
         raise AssertionError('Nonblocking read waited for data')
     """)
-    _ = try await #require(throws: Python::ExecutionError.self) {
-        try await session.evaluate("transferred.close()\nraise ValueError('closed')")
-    }
+    try await session.requireFailure(evaluating: "transferred.close()\nraise ValueError('closed')")
     let result = try await session.evaluate("""
     assert transferred.fileno() == -1
     assert right.recv(1) == b''
@@ -95,107 +96,166 @@ func socketsTransferDescriptorsUsingStandardAncillaryData() async throws {
     #expect(result.end == .finished)
 }
 
-@Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func socketWaitsObserveInterruption(timeout: Bool) async throws {
+@Test(.timeLimit(.minutes(1)))
+func socketWaitsObserveInterruption() async throws {
     let session = try await Python::Runtime().session()
     defer { await session.close() }
     _ = try await session.evaluate("import socket; left, right = socket.socketpair()")
     try await expectReadInterruption(
         in: session,
         source: "print('waiting'); left.recv(1)",
-        timeout: timeout,
     )
-    let result = try await session
-        .evaluate("right.sendall(b'x'); assert left.recv(1) == b'x'; left.close(); right.close()")
+    let result = try await session.evaluate(
+        "right.sendall(b'x'); assert left.recv(1) == b'x'; left.close(); right.close()",
+    )
     #expect(result.end == .finished)
 }
 
 @Test(.timeLimit(.minutes(1)))
-func tlsConnectionsKeepTheirActualStateAfterErrors() async throws {
-    try await withTemporaryDirectory { root in
-        let runtime = try await Python::Runtime()
-        let server = try await runtime.session(delegate: FileAccessDelegate { _ in false })
-        let client = try await runtime.session()
-        defer {
-            await client.close()
-            await server.close()
-        }
-        let (port, serving) = try await startTLSServer(in: server, directory: root)
-        defer { serving.cancel() }
-        try await connectTLSClient(in: client, port: port)
+func asyncioResolvesHostnamesAndPreservesSocketErrors() async throws {
+    let session = try await Python::Runtime().session()
+    defer { await session.close() }
 
-        _ = try await #require(throws: Python::ExecutionError.self) {
-            try await client
-                .evaluate(
-                    "connection.sendall(b'ping'); assert connection.recv(4) == b'PING'; marker = 42; raise ValueError('state remains')",
-                )
-        }
-        _ = try await client
-            .evaluate(
-                "assert marker == 42; connection.sendall(b'pong'); assert connection.recv(4) == b'PONG'",
-            )
-        _ = try await #require(throws: Python::ExecutionError.self) {
-            try await client.evaluate("connection.close(); raise ValueError('closed')")
-        }
-        let closed = try await client
-            .evaluate("assert connection.fileno() == -1; assert connection._sslobj is None")
+    let execution = try await session.evaluate("""
+    import asyncio, socket
+    loop = asyncio.get_running_loop()
+
+    addresses = await loop.getaddrinfo("localhost", 80, type=socket.SOCK_STREAM)
+    assert addresses and addresses[0][4][1] == 80
+
+    name, port = await loop.getnameinfo(
+        ("127.0.0.1", 80), socket.NI_NUMERICHOST | socket.NI_NUMERICSERV,
+    )
+    assert (name, port) == ("127.0.0.1", "80")
+
+    try:
+        await loop.getaddrinfo("not-an-ip", 80, flags=socket.AI_NUMERICHOST)
+    except socket.gaierror as error:
+        assert error.errno is not None
+    else:
+        raise AssertionError("expected gaierror")
+    """)
+    #expect(execution.end == .finished)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func tlsConnectionsKeepTheirActualStateAfterErrors() async throws {
+    let denyFileAccess = FileAccessDelegate { _ in false }
+    try await withTLSConnection(serverDelegate: denyFileAccess) { client, serving in
+        try await client.requireFailure(evaluating: """
+        connection.sendall(b'ping')
+        assert connection.recv(4) == b'PING'
+        marker = 42
+        raise ValueError('state remains')
+        """)
+        _ = try await client.evaluate("""
+        assert marker == 42
+        connection.sendall(b'pong')
+        assert connection.recv(4) == b'PONG'
+        """)
+        try await client.requireFailure(
+            evaluating: "connection.close(); raise ValueError('closed')",
+        )
+        let closed = try await client.evaluate(
+            "assert connection.fileno() == -1; assert connection._sslobj is None",
+        )
         #expect(closed.end == .finished)
         #expect(try await serving.value.end == .finished)
         try await client.reset()
-        #expect(try await client.evaluate("assert 'connection' not in globals()").end == .finished)
+        let reset = try await client.evaluate("assert 'connection' not in globals()")
+        #expect(reset.end == .finished)
     }
 }
 
-@Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func tlsReadsObserveInterruption(timeout: Bool) async throws {
-    try await withTemporaryDirectory { root in
-        let runtime = try await Python::Runtime()
-        let server = try await runtime.session()
-        let client = try await runtime.session()
-        defer {
-            await client.close()
-            await server.close()
-        }
-        let (port, serving) = try await startTLSServer(in: server, directory: root)
-        defer { serving.cancel() }
-        try await connectTLSClient(in: client, port: port)
-
+@Test(.timeLimit(.minutes(1)))
+func tlsReadsObserveInterruption() async throws {
+    try await withTLSConnection { client, serving in
         try await expectReadInterruption(
             in: client,
             source: "connection.settimeout(None); print('waiting'); connection.recv(1)",
-            timeout: timeout,
         )
         _ = try await client.evaluate("connection.close()")
         #expect(try await serving.value.end == .finished)
     }
 }
 
+#if os(macOS) || os(Linux)
+@Test(.timeLimit(.minutes(1)))
+func tlsHandshakeWithAClosedPeerPreservesTheHostProcess() async {
+    await #expect(processExitsWith: .success) {
+        try useDefaultBrokenPipeSignal()
+        let session = try await Python::Runtime().session()
+        defer { await session.close() }
+
+        let result = try await session.evaluate("""
+        import socket, ssl
+
+        local, peer = socket.socketpair()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        with context.wrap_socket(local, server_hostname='localhost', do_handshake_on_connect=False) as connection:
+            peer.close()
+            try:
+                connection.do_handshake()
+            except OSError:
+                pass
+            else:
+                raise AssertionError('TLS handshake succeeded with a closed peer')
+        """)
+        try #require(result.end == .finished)
+    }
+}
+
+#if OpenSSL
+@Test(.timeLimit(.minutes(1)))
+func bundledOpenSSLSurvivesHostProcessExit() async {
+    await #expect(processExitsWith: .success) {
+        let session = try await Python::Runtime().session()
+        let result = try await session.evaluate(
+            "import ssl; ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)",
+        )
+        try #require(result.end == .finished)
+        await session.close()
+
+        // Global crypto cleanup would invalidate the state used by exiting worker threads.
+        try #require(CPython_FailOnOpenSSLCleanup() == 1)
+        exit(EXIT_SUCCESS)
+    }
+}
+#endif
+#endif
+
 private func expectReadInterruption(
     in session: Python::Session,
     source: String,
-    timeout: Bool,
     sourceLocation: SourceLocation = #_sourceLocation,
 ) async throws {
-    let started = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-    defer { started.continuation.finish() }
-
-    let task = Task {
-        try await session.evaluate(source, timeout: timeout ? .seconds(1) : nil) { stream, text in
-            if stream == .stdout, text.contains("waiting") {
-                started.continuation.yield(())
-            }
-        }
-    }
-    defer { task.cancel() }
-
-    _ = try await #require(nextSignal(from: started.stream), sourceLocation: sourceLocation)
-    if !timeout {
-        task.cancel()
-    }
-    #expect(
-        try await task.value.end == (timeout ? .timedOut : .stopped),
+    let result = try await runUntilInterrupted(
+        source,
+        in: session,
+        afterOutput: "waiting",
         sourceLocation: sourceLocation,
     )
+    #expect(result.end == .stopped, sourceLocation: sourceLocation)
+}
+
+private func withTLSConnection(
+    serverDelegate: (any Python::Session.Delegate)? = nil,
+    _ test: @Sendable (Python::Session, Task<Python::Execution, any Error>) async throws -> Void,
+) async throws {
+    try await withTemporaryDirectory { root in
+        let runtime = try await Python::Runtime()
+        let server = try await runtime.session(delegate: serverDelegate)
+        let client = try await runtime.session()
+        defer {
+            await client.close()
+            await server.close()
+        }
+
+        let (port, serving) = try await startTLSServer(in: server, directory: root)
+        defer { serving.cancel() }
+        try await connectTLSClient(in: client, port: port)
+        try await test(client, serving)
+    }
 }
 
 private func connectTLSClient(in session: Python::Session, port: Int) async throws {
@@ -207,50 +267,31 @@ private func connectTLSClient(in session: Python::Session, port: Int) async thro
 private func startTLSServer(
     in session: Python::Session,
     directory: FilePath,
-) async throws -> (Int, Task<Python::Execution, any Error>) {
+) async throws -> (port: Int, serving: Task<Python::Execution, any Error>) {
     let certificate = directory.appending("certificate.pem")
     let key = directory.appending("key.pem")
     try await (networkCertificate + "\n").write(toFileAt: certificate)
     try await (networkPrivateKey + "\n").write(toFileAt: key)
+
     try await session.set(certificate.string, forKey: "certificate_path")
     try await session.set(key.string, forKey: "key_path")
 
     let started = AsyncStream<Int>.makeStream(bufferingPolicy: .bufferingNewest(1))
     let task = Task {
         defer { started.continuation.finish() }
-        return try await session.evaluate("""
-        import socket, ssl
-
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certificate_path, key_path)
-        listener = socket.socket()
-        listener.settimeout(10)
-        listener.bind(('127.0.0.1', 0))
-        listener.listen()
-        print(listener.getsockname()[1])
-        raw, address = listener.accept()
-        listener.close()
-        raw.settimeout(10)
-        connection = context.wrap_socket(raw, server_side=True)
-        while True:
-            try:
-                data = connection.recv(4)
-            except ConnectionResetError:
-                break
-            if not data:
-                break
-            connection.sendall(data.upper())
-        connection.close()
-        """, timeout: .seconds(15)) { stream, text in
-            guard stream == .stdout else {
-                return
-            }
-            let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let port = Int(line) {
-                started.continuation.yield(port)
+        return try await withHostDeadline(.seconds(15)) {
+            try await session.evaluate(tlsServerSource) { stream, text in
+                guard stream == .stdout else {
+                    return
+                }
+                let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let port = Int(line) {
+                    started.continuation.yield(port)
+                }
             }
         }
     }
+
     do {
         var iterator = started.stream.makeAsyncIterator()
         let value = await iterator.next()
@@ -262,6 +303,33 @@ private func startTLSServer(
         throw error
     }
 }
+
+private let tlsServerSource = """
+import socket, ssl
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(certificate_path, key_path)
+
+listener = socket.socket()
+listener.settimeout(10)
+listener.bind(('127.0.0.1', 0))
+listener.listen()
+print(listener.getsockname()[1])
+raw, address = listener.accept()
+listener.close()
+raw.settimeout(10)
+
+connection = context.wrap_socket(raw, server_side=True)
+while True:
+    try:
+        data = connection.recv(4)
+    except (ConnectionResetError, BrokenPipeError):
+        break
+    if not data:
+        break
+    connection.sendall(data.upper())
+connection.close()
+"""
 
 private let tlsClientSource = """
 import socket, ssl

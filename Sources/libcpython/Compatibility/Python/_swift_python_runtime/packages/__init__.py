@@ -5,48 +5,13 @@ import os
 import sys
 from importlib.machinery import PathFinder as ImportPathFinder
 
-from .archive import Archive, Reader, normalize_name
+from .archive import Archive, normalize_name
 from .finder import FilteredFinder, MetadataFinder, PathFinder, directory_distributions
 
 
-def _archive_hook(archives):
-    def find(path: str) -> PathFinder:
-        for archive in archives:
-            if not archive.contains_path(path):
-                continue
-
-            relative = path[len(archive.root) :].strip("/")
-            return PathFinder(archive, relative)
-
-        raise ImportError
-
-    return find
-
-
-def load_sources(sources: list[dict], read) -> dict[str, Archive | None]:
-    paths = {}
-
-    for index, source in enumerate(sources):
-        if "directory" in source:
-            paths[source["directory"]] = None
-            continue
-
-        root = f"embedded:/packages/{index}"
-        reader = (
-            source["archive"]
-            if "archive" in source
-            else Reader(source["size"], lambda offset, size, i=index: read(i, offset, size))
-        )
-        paths[root] = Archive(root, reader)
-
-    return paths
-
-
-def _named_distributions(path: str, archive: Archive | None):
-    distributions = directory_distributions(path) if archive is None else archive.distributions()
+def _named_distributions(path: str):
     names = set()
-
-    for distribution in distributions:
+    for distribution in directory_distributions(path):
         name = distribution.metadata["Name"]
         if not name:
             raise ValueError(f"Missing distribution name in {path}")
@@ -60,12 +25,12 @@ def _named_distributions(path: str, archive: Archive | None):
         yield name, distribution
 
 
-def select_distributions(sources: dict[str, Archive | None]):
+def select_distributions(paths):
     selected = {}
     shadowed = {}
 
-    for path, archive in sources.items():
-        for name, distribution in _named_distributions(path, archive):
+    for path in paths:
+        for name, distribution in _named_distributions(path):
             if name in selected:
                 shadowed.setdefault(path, []).append(distribution)
             else:
@@ -78,15 +43,17 @@ def distribution_files(distribution):
 
 
 def _shadowed_files(selected, shadowed) -> dict[str, set[str]]:
-    hidden = {
-        path: {file for distribution in distributions for file in distribution_files(distribution)}
-        for path, distributions in shadowed.items()
-    }
+    hidden = {}
+    for path, distributions in shadowed.items():
+        hidden[path] = {
+            file for distribution in distributions for file in distribution_files(distribution)
+        }
 
     # A file can be listed by both a shadowed and a selected distribution in the same root.
     for path, distribution in selected.values():
-        if path in hidden:
-            hidden[path].difference_update(distribution_files(distribution))
+        files = hidden.get(path)
+        if files is not None:
+            files.difference_update(distribution_files(distribution))
 
     return {
         path: {os.path.normpath(path + "/" + file) for file in files}
@@ -117,24 +84,16 @@ def _hide_shadowed_modules(selected, shadowed) -> None:
     sys.path_hooks.insert(0, find)
 
 
-def install(sources: list[dict], read) -> list[str]:
-    paths = load_sources(sources, read)
+def install(paths: list[str]) -> None:
     if not paths:
-        return []
+        return
 
     selected, shadowed = select_distributions(paths)
-
-    # Capture the archive hook too when wrapping finders for shadowed distributions.
-    archives = tuple(archive for archive in paths.values() if archive is not None)
-    if archives:
-        sys.path_hooks.insert(0, _archive_hook(archives))
     _hide_shadowed_modules(selected, shadowed)
 
     sys.meta_path[sys.meta_path.index(ImportPathFinder)] = MetadataFinder(paths, selected)
     for path in paths:
         sys.path_importer_cache.pop(path, None)
-
-    return list(paths)
 
 
 def installation_tools() -> None:
@@ -152,4 +111,19 @@ def installation_tools() -> None:
 
     if archives:
         sys.path_hooks.insert(0, _archive_hook(tuple(archives)))
+
     sys.path[:0] = [archive.root for archive in archives]
+
+
+def _archive_hook(archives):
+    def find(path: str) -> PathFinder:
+        for archive in archives:
+            if not archive.contains_path(path):
+                continue
+
+            relative = path[len(archive.root) :].strip("/")
+            return PathFinder(archive, relative)
+
+        raise ImportError
+
+    return find

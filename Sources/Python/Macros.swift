@@ -35,8 +35,8 @@ public macro PythonExportedClass(
 /// Binds a Swift struct to a class in an importable Python module.
 ///
 /// The struct retains the Python instance. Its properties and methods, including
-/// class methods, work inside `Session.enqueue` or a Swift export. Declare typed
-/// members with `PythonProperty` and `PythonFunction`.
+/// class methods, support synchronous access inside `Session.enqueue` or a Swift export.
+/// An async instance method can also be called directly from a Swift task.
 @attached(memberAttribute)
 @attached(
     member,
@@ -53,7 +53,6 @@ public macro PythonExportedClass(
     Sendable,
     names: named(init(from:)),
     named(encode(to:)),
-    named(object(in:)),
     named(callAsFunction(_:))
 )
 public macro PythonImportedClass(
@@ -61,12 +60,13 @@ public macro PythonImportedClass(
     name: String,
 ) = #externalMacro(module: "PythonMacros", type: "PythonImportedClassMacro")
 
-/// Binds a function in the direction selected by its enclosing Python macro.
+/// Exports a Swift implementation or binds a throwing signature to a Python method.
 /// An exported function can receive a Context as its first unlabeled argument.
 /// An imported function declares a throwing signature with no body. Unlabeled
 /// arguments are positional and labels supply Python keywords. An async
-/// signature awaits a Python result during an active Swift export.
-@attached(peer, names: prefixed(__p_))
+/// instance method runs on the object's owning session or within its current Swift export.
+/// An async class method can take an explicit session when called from Swift.
+@attached(peer, names: overloaded, prefixed(__p_))
 public macro PythonFunction(
     _ name: String? = nil,
     documentation: String? = nil,
@@ -75,7 +75,12 @@ public macro PythonFunction(
     type: "PythonFunctionMacro",
 )
 
-/// Selects a synchronous, non-failable initializer. It may receive a `Context` parameter.
+/// Binds a Swift initializer to a Python class constructor.
+/// On an imported type, declare a throwing initializer without a body. End its parameters
+/// with `in context: Context` for synchronous access or `in session: Session` for an
+/// `async throws` initializer on the session's event loop. Other parameters follow the same
+/// positional and keyword argument rules as `@PythonFunction`.
+/// On an exported class, provide the synchronous initializer body. It can receive a `Context`.
 @attached(peer, names: prefixed(__p_))
 public macro PythonInit(documentation: String? = nil) = #externalMacro(
     module: "PythonMacros",

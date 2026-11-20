@@ -1,7 +1,6 @@
 """Download, verify, unpack and archive immutable wheel artifacts."""
 
 import email.parser
-import errno
 import hashlib
 import os
 import shutil
@@ -21,7 +20,13 @@ from packaging.version import Version
 from ..packages.archive import distribution_metadata_paths
 from .candidate import Wheel
 from .configuration import Configuration
-from .paths import absolute_path, walk_files
+from .paths import (
+    absolute_path,
+    archive_entries,
+    archive_member_path,
+    publish_directory,
+    walk_files,
+)
 
 
 def _download(wheel: Wheel, temporary: Path) -> None:
@@ -48,13 +53,11 @@ def _download(wheel: Wheel, temporary: Path) -> None:
 
 def _validate_archive(wheel_path: Path, wheel: Wheel) -> None:
     with zipfile.ZipFile(wheel_path) as archive:
-        entries = archive.infolist()
-        if sum(info.file_size for info in entries) > 1024 * 1024 * 1024:
-            raise ValueError(f"Unpacked wheel exceeds the installation limit: {wheel.name}")
-
+        entries = archive_entries(
+            archive, f"Unpacked wheel exceeds the installation limit: {wheel.name}"
+        )
         for info in entries:
-            path = Path(info.filename)
-            if path.is_absolute() or ".." in path.parts or "\0" in info.filename:
+            if archive_member_path(info.filename) is None or "\0" in info.filename:
                 raise ValueError(f"Invalid wheel member: {info.filename!r}")
 
 
@@ -76,15 +79,6 @@ def _install_archive(wheel_path: Path, stage: Path, site_packages: str) -> None:
 
     for path in walk_files(stage):
         path.chmod(path.stat().st_mode & ~0o222)
-
-
-def _publish_install(stage: Path, target: Path) -> None:
-    try:
-        os.rename(stage, target)
-    except OSError as error:
-        # Another installer may have published this same digest first.
-        if error.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not target.is_dir():
-            raise
 
 
 class WheelCache:
@@ -138,26 +132,27 @@ class WheelCache:
 
         if not target.is_dir():
             self._install(wheel, target)
+
         return target
 
     def _install(self, wheel: Wheel, target: Path) -> None:
         configuration = self._configuration
 
-        # Stage on the same filesystem so readers only see a complete installation.
-        stage = Path(tempfile.mkdtemp(prefix=configuration.installation_prefix, dir=target.parent))
-        try:
+        # Renaming from the target filesystem publishes each directory atomically.
+        with tempfile.TemporaryDirectory(
+            prefix=configuration.installation_prefix, dir=target.parent
+        ) as temporary:
+            stage = Path(temporary)
             wheel_path = self.download(wheel)
+
             _validate_archive(wheel_path, wheel)
             _install_archive(wheel_path, stage, configuration.site_packages)
 
-            # Publish auxiliary wheel data first; site-packages marks a complete unpack.
+            # The presence of site-packages marks a complete unpack.
             for entry in stage.iterdir():
                 if entry.name != configuration.site_packages:
-                    _publish_install(entry, target.parent / entry.name)
-            _publish_install(stage / configuration.site_packages, target)
-        finally:
-            if stage.exists():
-                shutil.rmtree(stage)
+                    publish_directory(entry, target.parent / entry.name)
+            publish_directory(stage / configuration.site_packages, target)
 
 
 def archive(request: dict) -> None:

@@ -62,18 +62,17 @@ private class Counter {
         if linkToSelf {
             try self.$next(self)
             // The construction scope keeps the self-linked wrapper alive during collection.
-            _ = try context.import(module: "gc").attribute("collect").call()
+            _ = try context.import(module: "gc")(methodNamed: "collect")()
         }
 
         guard value >= 0 else {
-            throw Python::Exception(
-                name: "ValueError",
-                message: "negative",
-            )
+            throw Python::Failure(.valueError, message: "negative")
         }
     }
 
-    deinit { CounterLifetime.instanceCount.withLock { $0 -= 1 } }
+    deinit {
+        CounterLifetime.instanceCount.withLock { $0 -= 1 }
+    }
 
     @PythonFunction
     func increment(_ amount: Int = 1) throws -> Int {
@@ -98,7 +97,7 @@ private class Counter {
             return -1
         }
         let function = try context.object(reference)
-        return try function.call().decode()
+        return try function().decode()
     }
 
     @PythonFunction
@@ -120,8 +119,12 @@ extension Counter {
 
     @PythonProperty
     var doubled: Int {
-        get { secret * 2 }
-        set { secret = newValue / 2 }
+        get {
+            secret * 2
+        }
+        set {
+            secret = newValue / 2
+        }
     }
 }
 
@@ -167,11 +170,8 @@ private final class ExistingInstance: Sendable {
 
 @Test
 func exportedClassHelpAndConstructorSignatures() async throws {
-    let runtime = try await Python::Runtime()
-    let session = try await runtime.session(modules: [LabeledCounterModule.self])
-
-    try await withSession(session) { session in
-        _ = try await session.evaluate("""
+    try await evaluateInFreshSession(
+        """
         from counter_base import Counter
         from counter_child import Labeled, ExistingCounter, ExistingInstance
         from contextlib import redirect_stdout
@@ -208,8 +208,9 @@ func exportedClassHelpAndConstructorSignatures() async throws {
             assert '_swift_python_runtime' not in text
             assert '_SwiftObject' not in text
             assert 'NativeClasses' not in text and 'initialize(' not in text
-        """)
-    }
+        """,
+        modules: [LabeledCounterModule.self],
+    )
 }
 
 @Test
@@ -237,6 +238,7 @@ private func checkInheritedClass(in session: Python::Session) async throws {
     assert x.increment(2) == 42
     assert x.extended(1) == 43
     assert x.describe() == 'child:x'
+
     assert x.myself() is x and echo(x) is x
     assert echoList([x, x]) == [x, x] and echoList([x])[0] is x
     x.doubled = 20
@@ -246,6 +248,7 @@ private func checkInheritedClass(in session: Python::Session) async throws {
     assert x.value == 10 and x.label == 'x'
     assert x.readOnlyValue == 7
     assert not hasattr(x, 'secret')
+
     assert list(inspect.signature(Counter.increment).parameters) == ['self', 'amount']
     assert inspect.signature(echo).return_annotation == 'counter_base.Counter'
     assert typing.get_type_hints(echo) == {'value': Counter, 'return': Counter}
@@ -253,7 +256,6 @@ private func checkInheritedClass(in session: Python::Session) async throws {
     assert typing.get_type_hints(Counter.recall)['return'] == Counter | None
     assert typing.get_type_hints(Counter.next.fget)['return'] == Counter | None
     assert Counter.next.__doc__.startswith('counter_base.Counter | None')
-
 
     linked = Counter(12, True)
     assert linked.value == 12 and linked.next is linked
@@ -371,8 +373,9 @@ func classIdentityAndSessionGenerations() async throws {
     let decoded = try await session.get("peer", as: ExistingInstance.self)
     #expect(decoded === peer)
 
-    _ = try await session
-        .evaluate("import weakref; dead_peer = weakref.ref(peer); peer.note = 'old'")
+    _ = try await session.evaluate(
+        "import weakref; dead_peer = weakref.ref(peer); peer.note = 'old'",
+    )
     try await session.remove("peer")
     _ = try await session.evaluate("import gc; gc.collect(); assert dead_peer() is None")
 
@@ -393,8 +396,8 @@ func classIdentityAndSessionGenerations() async throws {
     #expect(value == 42)
 
     try await session.reset()
-    await #expect(throws: Python::Exception.self) { try await session.set(peer, forKey: "peer") }
-    await #expect(throws: Python::Exception.self) { try await managed { $0.number } }
+    await #expect(throws: Python::Failure.self) { try await session.set(peer, forKey: "peer") }
+    await #expect(throws: Python::Failure.self) { try await managed { $0.number } }
 }
 
 // MARK: - ReferenceModule
@@ -459,21 +462,24 @@ func failedEvaluationKeepsPythonAndSwiftObjects() async throws {
     """)
     #expect(prepared.end == .finished)
 
-    let error = try await #require(throws: Python::ExecutionError.self) {
-        try await session.evaluate("""
-        del child
-        replacement = holder.recall()
-        assert replacement.value == 17
-        nested.extend([2, 3])
-        values.append(4)
-        holder.remember(values)
-        print("diagnostic")
-        raise ValueError("reference fixture")
-        """, filename: "r2")
+    let error = try await #require(throws: Python::Failure.self) {
+        try await session.evaluate(
+            """
+            del child
+            replacement = holder.recall()
+            assert replacement.value == 17
+            nested.extend([2, 3])
+            values.append(4)
+            holder.remember(values)
+            print("diagnostic")
+            raise ValueError("reference fixture")
+            """,
+            filename: "r2",
+        )
     }
-    #expect(error.traceback.contains("reference fixture"))
-    #expect(error.traceback.contains("r2"))
-    #expect(error.output.stdout == "diagnostic\n")
+    #expect(error.traceback?.contains("reference fixture") == true)
+    #expect(error.traceback?.contains("r2") == true)
+    #expect(error.output?.stdout == "diagnostic\n")
 
     let retained = try await session.evaluate("""
     assert 'child' not in globals()
@@ -503,18 +509,20 @@ func failedPublicationKeepsAnotherInterpreterAlive() async throws {
     try await session.initialize()
 
     await #expect(throws: PublicationError.failed) {
-        try await session.evaluate("""
-        import threading
-        speculative_thread = threading.Thread()
-        """, committing: { _ in
-            // Publication can initialize another interpreter without changing this session.
-            try await other.initialize()
-            throw PublicationError.failed
-        })
+        try await session.evaluate(
+            """
+            import threading
+            speculative_thread = threading.Thread()
+            """,
+            committing: { _ in
+                // Publication can initialize another interpreter without changing this session.
+                try await other.initialize()
+                throw PublicationError.failed
+            },
+        )
     }
-    #expect(try await session.evaluate("'speculative_thread' in globals()")
-        .output
-        .stdout == "True\n")
+    let globals = try await session.evaluate("'speculative_thread' in globals()")
+    #expect(globals.output.stdout == "True\n")
     await session.close()
     #expect(try await other.evaluate("6 * 7").output.stdout == "42\n")
 }
@@ -526,10 +534,13 @@ func evaluationWaitsForHostPublication() async throws {
     defer { await session.close() }
 
     await #expect(throws: PublicationError.failed) {
-        try await session.evaluate("values.append(2)", committing: { seal in
-            try seal.seal()
-            throw PublicationError.failed
-        })
+        try await session.evaluate(
+            "values.append(2)",
+            committing: { seal in
+                try seal.seal()
+                throw PublicationError.failed
+            },
+        )
     }
 
     #expect(try await cancelDuringPublication(in: session, afterSealing: false).end == .stopped)
@@ -544,21 +555,21 @@ func evaluationWaitsForHostPublication() async throws {
 }
 
 private func checkDeadlineDuringPublication(in session: Python::Session) async throws {
-    let attemptedPublication = Mutex(false)
+    let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     let cancelledPublication = Mutex(false)
-    let expired = try await session.evaluate(
-        "values.append(5)",
-        timeout: .milliseconds(500),
-        committing: { seal in
-            attemptedPublication.withLock { $0 = true }
-            defer { cancelledPublication.withLock { $0 = Task.isCancelled } }
-            try await Task.sleep(for: .seconds(1))
-            try seal.seal()
-        },
-    )
-    #expect(attemptedPublication.withLock { $0 })
+    let expired = try await runUntilInterrupted(whenReady: entered, delay: .milliseconds(500)) {
+        try await session.evaluate(
+            "values.append(5)",
+            committing: { seal in
+                entered.continuation.yield(())
+                defer { cancelledPublication.withLock { $0 = Task.isCancelled } }
+                try await Task.sleep(for: .seconds(1))
+                try seal.seal()
+            },
+        )
+    }
     #expect(cancelledPublication.withLock { $0 })
-    #expect(expired.end == .timedOut)
+    #expect(expired.end == .stopped)
 }
 
 private func cancelDuringPublication(
@@ -574,16 +585,19 @@ private func cancelDuringPublication(
 
     let source = afterSealing ? "values.append(4); print('ready')" : "values.append(3)"
     let evaluation = Task {
-        try await session.evaluate(source, committing: { seal in
-            if afterSealing {
-                try seal.seal()
-            }
-            signal.yield(())
-            _ = await nextSignal(from: resume)
-            if !afterSealing {
-                try seal.seal()
-            }
-        })
+        try await session.evaluate(
+            source,
+            committing: { seal in
+                if afterSealing {
+                    try seal.seal()
+                }
+                signal.yield(())
+                _ = await nextSignal(from: resume)
+                if !afterSealing {
+                    try seal.seal()
+                }
+            },
+        )
     }
     defer { evaluation.cancel() }
 

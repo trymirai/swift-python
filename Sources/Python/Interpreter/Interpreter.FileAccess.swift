@@ -17,23 +17,15 @@ extension Interpreter {
 
         init(
             importPaths: [String],
-            packages: [Runtime.PackageSource.Resolved],
+            packages: [Runtime.Path],
             delegate: (any Session.Delegate)?,
         ) throws {
             self.delegate = delegate
             self.importRoots = Self.resolve(importPaths.lazy.map { FilePath($0) })
-            let packagePaths = packages.lazy.compactMap { package -> FilePath? in
-                switch package {
-                case let .directory(path), let .archive(path):
-                    path.file
-                case .embedded:
-                    nil
-                }
-            }
-            self.packageRoots = Self.resolve(packagePaths)
+            self.packageRoots = Self.resolve(packages.lazy.map(\.file))
 
             guard let descriptors = unsafe CPython_NewFiles() else {
-                throw Runtime.Failure("Unable to allocate the Python file descriptor registry.")
+                throw Failure("Unable to allocate the Python file descriptor registry.")
             }
             unsafe self.descriptors = descriptors
         }
@@ -60,6 +52,7 @@ extension Interpreter {
             case .createDirectory, .remove, .renameSource, .renameDestination:
                 return false
             }
+
             return importRoots.contains { request.path.starts(with: $0) }
                 || packageRoots.contains { request.path.starts(with: $0) }
         }

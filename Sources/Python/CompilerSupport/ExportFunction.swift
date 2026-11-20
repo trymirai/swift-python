@@ -196,7 +196,7 @@ package extension _ExportFunction {
 
     private static func values(in tuple: borrowing Object, count: Int) throws -> [Value] {
         guard case let .list(values) = try tuple.value(), values.count == count else {
-            throw Exception(name: "TypeError", message: "Invalid Swift callback arguments.")
+            throw Failure(.typeError, message: "Invalid Swift callback arguments.")
         }
         return values
     }

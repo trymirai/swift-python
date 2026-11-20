@@ -31,8 +31,8 @@ public extension Object {
         }
 
         var wrapper: WeakReference? {
-            state.withLock {
-                if case let .bound(wrapper) = $0.wrapper {
+            state.withLock { state in
+                if case let .bound(wrapper) = state.wrapper {
                     wrapper
                 } else {
                     nil
@@ -63,12 +63,11 @@ private extension Object.Identity {
             }
 
             guard previous == owner else {
-                throw Module.Catalog
-                    .failure("An instance identity cannot be shared by Swift objects.")
+                throw Module.Catalog.failure(
+                    "An instance identity cannot be shared by Swift objects.",
+                )
             }
-            guard self.references === references else {
-                throw Reference.wrongInterpreter()
-            }
+            try references.requireSameGeneration(as: self.references)
         }
     }
 }
@@ -88,8 +87,8 @@ private extension Object.Identity {
             case let .bound(wrapper):
                 self = .constructing(previous: wrapper)
             case .constructing:
-                throw Exception(
-                    name: "RuntimeError",
+                throw Failure(
+                    .runtimeError,
                     message: "Python wrapper construction is already in progress.",
                 )
             }

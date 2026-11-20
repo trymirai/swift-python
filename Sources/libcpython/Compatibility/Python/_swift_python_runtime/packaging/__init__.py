@@ -10,7 +10,7 @@ from ..packages import installation_tools
 installation_tools()
 
 from .candidate import Wheel
-from .configuration import Configuration, describe, load
+from .configuration import Configuration, describe, load, marker_environment
 from .configuration import project_package_source as project_package_source
 from .requirements import module_name as module_name
 from .requirements import names as names
@@ -30,6 +30,7 @@ def configure(configuration: dict, sources: list[dict], read) -> dict:
         raise RuntimeError("The package service is already configured")
 
     options = load(configuration)
+    # Publish the configuration only after the initial sources are validated.
     description = describe(options, sources, read)
 
     _configuration = options
@@ -49,8 +50,8 @@ def fingerprint(request: dict) -> str:
 
 
 def _configuration_for(request: dict) -> Configuration:
-    # Each request supplies its own base because sessions can select different sources.
-    return replace(_configuration, base=request["base"])
+    # One service resolves for sessions with different base packages and destinations.
+    return replace(_configuration, base=request["base"], markers=marker_environment(request))
 
 
 def package_fingerprint(request: dict) -> str:
@@ -74,4 +75,5 @@ def decode_manifest(data: bytes) -> dict:
 
     for name, record in packages.items():
         Wheel.from_record(name, record)
+
     return manifest

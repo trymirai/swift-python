@@ -42,8 +42,9 @@ extension CPythonBuild.Generate {
             revision: revision,
             workspace: workspace,
         )
-        let exclusions = paths.filter {
-            $0.hasSuffix(".inc") || ($0.hasSuffix(".c") && !graph.translationUnits.contains($0))
+        let exclusions = paths.filter { path in
+            path.hasSuffix(".inc")
+                || (path.hasSuffix(".c") && !graph.translationUnits.contains(path))
         }
 
         let manifest = package.appending("Package.swift")
@@ -56,10 +57,9 @@ extension CPythonBuild.Generate {
             contents: updated,
         )
 
-        workspace.logger
-            .info(
-                "Updated the layout for \(graph.translationUnits.count) OpenSSL translation units.",
-            )
+        workspace.logger.info(
+            "Updated the layout for \(graph.translationUnits.count) OpenSSL translation units.",
+        )
     }
 
     // MARK: Source graph
@@ -70,6 +70,37 @@ extension CPythonBuild.Generate {
         jobs: Int,
         environment: Environment,
     ) async throws -> SourceGraph {
+        try await configureOpenSSL(in: workspace, environment: environment)
+
+        let output = workspace.outputDirectory
+        let plan = try await workspace.run(
+            "perl",
+            ["-I.", "-Mconfigdata", "-e", Self.sourceGraph],
+            in: output,
+            stage: "Read OpenSSL source graph",
+            environment: environment,
+            output: .string(limit: 1 << 20),
+        )
+        var graph = try SourceGraph(plan)
+
+        // Configure's buildinf.h describes the host compiler. Use our own build description.
+        graph.generated.remove("crypto/buildinf.h")
+        try await workspace.run(
+            "make",
+            ["-s", "-j", String(jobs)] + graph.generated.sorted(),
+            in: output,
+            stage: "Generate OpenSSL headers and tables",
+            environment: environment,
+        )
+
+        try await includeFragments(in: &graph, at: source, workspace: workspace)
+        return graph
+    }
+
+    private static func configureOpenSSL(
+        in workspace: borrowing BuildWorkspace,
+        environment: Environment,
+    ) async throws {
         let output = workspace.outputDirectory
         // Staging lives two levels below the package. Make requires a relative Configure path
         // when the package directory contains spaces.
@@ -84,6 +115,8 @@ extension CPythonBuild.Generate {
                 "no-dso",
                 "no-engine",
                 "no-async",
+                // Host worker threads may still be using libcrypto when the process exits.
+                "no-atexit",
                 "no-tests",
                 "no-apps",
                 "--prefix=/",
@@ -93,30 +126,6 @@ extension CPythonBuild.Generate {
             stage: "Configure portable 64-bit OpenSSL",
             environment: environment,
         )
-
-        let plan = try await workspace.run(
-            "perl",
-            ["-I.", "-Mconfigdata", "-e", Self.sourceGraph],
-            in: output,
-            stage: "Read OpenSSL source graph",
-            environment: environment,
-            output: .string(limit: 1 << 20),
-        )
-
-        var graph = try SourceGraph(plan)
-
-        // This header holds our build description. Configure's version describes its host compiler.
-        graph.generated.remove("crypto/buildinf.h")
-        try await workspace.run(
-            "make",
-            ["-s", "-j", String(jobs)] + graph.generated.sorted(),
-            in: output,
-            stage: "Generate OpenSSL headers and tables",
-            environment: environment,
-        )
-
-        try await includeFragments(in: &graph, at: source, workspace: workspace)
-        return graph
     }
 
     private static func readRevision(
@@ -212,18 +221,17 @@ extension CPythonBuild.Generate {
 
         func linkSource(_ name: String) async throws {
             let link = sources.appending(name)
-            let depth = FilePath(name).components.count
+            // Resolve from the link's final location under Sources/libopenssl/src.
+            let libraryRoot = String(repeating: "../", count: FilePath(name).components.count)
 
             let destination: FilePath
             if graph.generated.contains(name) {
-                destination = FilePath(String(repeating: "../", count: depth) + "Generated/" + name)
+                destination = FilePath(libraryRoot + "Generated/" + name)
             } else {
                 guard try await fileSystem.info(forFileAt: source.appending(name)) != nil else {
                     throw BuildError("Missing OpenSSL source \(name).")
                 }
-                destination = FilePath(
-                    String(repeating: "../", count: depth + 2) + "Submodules/openssl/" + name,
-                )
+                destination = FilePath(libraryRoot + "../../Submodules/openssl/" + name)
             }
 
             try await createParent(of: link)
@@ -233,7 +241,7 @@ extension CPythonBuild.Generate {
         let configuredSource = graph.sourcePrefix + "/"
         let absoluteSource = source.string + "/"
 
-        func copyGeneratedFile(_ name: String) async throws {
+        func writeGeneratedFile(_ name: String) async throws {
             let path = generatedFiles.appending(name)
             let contents = try await workspace.read(textFrom: output.appending(name))
             let normalized = contents
@@ -245,11 +253,11 @@ extension CPythonBuild.Generate {
         }
 
         for name in graph.generated.sorted() {
-            try await copyGeneratedFile(name)
+            try await writeGeneratedFile(name)
         }
 
         // Preserve upstream include paths while storing generated files separately.
-        let paths = graph.links.union(graph.generated).sorted()
+        let paths = graph.paths.sorted()
         for name in paths {
             try await linkSource(name)
         }
@@ -260,6 +268,7 @@ extension CPythonBuild.Generate {
             to: generatedFiles.appending("module.modulemap"),
             workspace: workspace,
         )
+
         return paths
     }
 
@@ -269,18 +278,16 @@ extension CPythonBuild.Generate {
         to destination: FilePath,
         workspace: borrowing BuildWorkspace,
     ) async throws {
-        let headers = paths
-            .filter { $0.hasPrefix("include/openssl/") && $0.hasSuffix(".h") }
-
-        let moduleMap =
-            [
-                "// OpenSSL \(revision). Generated by CPythonBuild generate.",
-                "module libopenssl {",
-            ]
-            + headers.map { "    textual header \"\($0.dropFirst("include/".count))\"" }
-            + ["    export *", "}", ""]
-
-        try await workspace.write(moduleMap.joined(separator: "\n"), to: destination)
+        var lines = [
+            "// OpenSSL \(revision). Generated by CPythonBuild generate.",
+            "module libopenssl {",
+        ]
+        for path in paths where path.hasPrefix("include/openssl/") && path.hasSuffix(".h") {
+            let header = path.dropFirst("include/".count)
+            lines.append("    textual header \"\(header)\"")
+        }
+        lines.append(contentsOf: ["    export *", "}", ""])
+        try await workspace.write(lines.joined(separator: "\n"), to: destination)
     }
 
     private static func updateExclusions(
@@ -291,18 +298,24 @@ extension CPythonBuild.Generate {
         let original = try await workspace.read(textFrom: manifest)
 
         // Keep the LICENSE exclusion in Package.swift when replacing the src/ exclusions.
-        let pattern = #/(?m)^[ \t]*name: "libopenssl",\n([ \t]*)exclude: \[\n(?:[ \t]*"(?!src\/)[^"\n]+",\n)*((?:[ \t]*"src\/[^"\n]+",\n|[ \t]*\n)*)[ \t]*\],/#
+        let pattern = #/
+        (?m) ^[\ \t]* name:\ "libopenssl",\n
+        (?<indent>[\ \t]*) exclude:\ \[\n
+        (?:[\ \t]*"(?!src\/)[^"\n]+",\n)*
+        (?<sources>(?:[\ \t]*"src\/[^"\n]+",\n|[\ \t]*\n)*)
+        [\ \t]*\],
+        /#
         guard let list = original.firstMatch(of: pattern) else {
             throw BuildError("Missing the libopenssl exclude list in Package.swift.")
         }
 
-        let entries = list.2
+        let entries = list.sources
         let previous = entries.matches(of: #/"src\/([^"\n]+)"/#).map { String($0.1) }
 
         guard previous.sorted() != exclusions else {
             return nil
         }
-        let lines = exclusions.map { "\(list.1)    \"src/\($0)\",\n" }.joined()
+        let lines = exclusions.map { "\(list.indent)    \"src/\($0)\",\n" }.joined()
         return String(original[..<entries.startIndex]) + lines + original[entries.endIndex...]
     }
 
@@ -327,46 +340,29 @@ extension CPythonBuild.Generate {
         let backup = FilePath(candidate.removingLastComponent().string + "-previous")
         try await fileSystem.createDirectory(at: backup, withIntermediateDirectories: false)
 
-        var saved = [String]()
-        var replaced = [String]()
+        var moves = [(from: FilePath, to: FilePath)]()
 
         func moveDirectory(
             _ name: String,
             from source: FilePath,
             to target: FilePath,
         ) async throws {
-            try await fileSystem.moveItem(at: source.appending(name), to: target.appending(name))
+            let from = source.appending(name)
+            let to = target.appending(name)
+            try await fileSystem.moveItem(at: from, to: to)
+            moves.append((from, to))
         }
 
-        func restoreDirectories() async throws {
-            for name in replaced.reversed() {
-                try await moveDirectory(name, from: installed, to: candidate)
-            }
-            for name in saved.reversed() {
-                try await moveDirectory(name, from: backup, to: installed)
-            }
-        }
-
-        func saveInstalledDirectories() async throws {
+        do {
             for name in Self.generatedDirectories {
                 let path = installed.appending(name)
                 if try await fileSystem.info(forFileAt: path, infoAboutSymbolicLink: true) != nil {
                     try await moveDirectory(name, from: installed, to: backup)
-                    saved.append(name)
                 }
             }
-        }
-
-        func installCandidateDirectories() async throws {
             for name in Self.generatedDirectories {
                 try await moveDirectory(name, from: candidate, to: installed)
-                replaced.append(name)
             }
-        }
-
-        do {
-            try await saveInstalledDirectories()
-            try await installCandidateDirectories()
 
             if let contents {
                 try await contents.write(
@@ -375,7 +371,9 @@ extension CPythonBuild.Generate {
                 )
             }
         } catch {
-            try await restoreDirectories()
+            for move in moves.reversed() {
+                try await fileSystem.moveItem(at: move.to, to: move.from)
+            }
             try await fileSystem.removeItem(at: backup, strategy: .platformDefault)
             throw error
         }
@@ -427,15 +425,20 @@ private extension CPythonBuild.Generate {
         var links: Set<String> = []
         var generated: Set<String> = []
 
+        var paths: Set<String> {
+            links.union(generated)
+        }
+
         init(_ plan: String) throws {
             for line in plan.split(whereSeparator: \.isNewline) {
                 try addEntry(line)
             }
 
             guard
-                !sourcePrefix.isEmpty, !translationUnits.isEmpty, !generated.isEmpty,
-                links.union(generated)
-                    .allSatisfy({ CPythonBuild.Generate.isRelativeSourcePath(FilePath($0)) }),
+                !sourcePrefix.isEmpty,
+                !translationUnits.isEmpty,
+                !generated.isEmpty,
+                paths.allSatisfy({ CPythonBuild.Generate.isRelativeSourcePath(FilePath($0)) }),
                 links.isDisjoint(with: generated)
             else {
                 throw BuildError("Invalid paths in the OpenSSL source graph.")

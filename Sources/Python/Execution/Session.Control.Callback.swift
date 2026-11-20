@@ -3,7 +3,18 @@
 //
 
 extension Session.Control {
-    struct Callback: Object.Callable {
+    @_lifetime(borrow attachment)
+    func makeCallback(
+        streamsOutput: Bool,
+        in attachment: borrowing PThread.Attachment,
+    ) throws -> Object {
+        try Object.makeFunction(
+            Callback(execution: self, streamsOutput: streamsOutput),
+            in: attachment,
+        )
+    }
+
+    private struct Callback: Object.Callable {
         let execution: Session.Control
         let streamsOutput: Bool
 
@@ -12,7 +23,7 @@ extension Session.Control {
             _ arguments: borrowing Object,
             in attachment: borrowing PThread.Attachment,
         ) throws -> Object {
-            switch try arguments.item(at: 0).string() {
+            switch try arguments.tupleItem(at: 0).string() {
             case "descriptor":
                 return try Object(
                     encoding: execution.pipe.readDescriptor().rawValue,
@@ -21,12 +32,12 @@ extension Session.Control {
             case "capture":
                 return try Object(encoding: streamsOutput, in: attachment)
             case "interrupted":
-                return try Object(encoding: execution.interruption != nil, in: attachment)
+                return try Object(encoding: execution.isInterrupted, in: attachment)
             case "write":
                 try write(arguments)
                 return try Object(encoding: Value.none, in: attachment)
             default:
-                throw Exception(name: "ValueError", message: "Unknown Swift execution command.")
+                throw Failure(.valueError, message: "Unknown Swift execution command.")
             }
         }
 
@@ -35,14 +46,14 @@ extension Session.Control {
                 return
             }
 
-            let name = try arguments.item(at: 1).string()
+            let name = try arguments.tupleItem(at: 1).string()
             guard let stream = Output.Stream(rawValue: name) else {
-                throw Exception(
-                    name: "ValueError",
+                throw Failure(
+                    .valueError,
                     message: "Unknown Python output stream: \(name).",
                 )
             }
-            try execution.write(stream, arguments.item(at: 2).string())
+            try execution.write(stream, arguments.tupleItem(at: 2).string())
         }
     }
 }

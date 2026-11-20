@@ -29,6 +29,7 @@ extension BuildWorkspace {
             for try await entry in handle.listContents() {
                 result.append(entry.name.string)
             }
+
             return result.sorted()
         }
     }
@@ -36,9 +37,9 @@ extension BuildWorkspace {
     func paths(_ root: FilePath, omitting: Set<String>) async throws -> [String] {
         try await fileSystem.withDirectoryHandle(atPath: root) { handle in
             var result = [String]()
-            for try await entry in handle.listContents(recursive: true)
-                where entry.type == .regular
-            {
+            let entries = handle.listContents(recursive: true)
+
+            for try await entry in entries where entry.type == .regular {
                 var path = entry.path
                 if
                     path.removePrefix(root),
@@ -47,6 +48,7 @@ extension BuildWorkspace {
                     result.append(path.string)
                 }
             }
+
             return result
         }
     }
@@ -89,9 +91,12 @@ extension BuildWorkspace {
         logger.debug("\(stage)")
 
         // On Apple, Subprocess takes the SDK's FilePath and the workspace uses Swift System.
-        let command: Executable = executable.isAbsolute
-            ? .path(.init(executable.string))
-            : .name(executable.string)
+        let command: Executable = if executable.isAbsolute {
+            .path(.init(executable.string))
+        } else {
+            .name(executable.string)
+        }
+
         let result = try await Subprocess::run(
             command,
             arguments: .init(arguments),
@@ -103,6 +108,7 @@ extension BuildWorkspace {
         guard result.terminationStatus == .exited(0) else {
             throw BuildError("\(stage) failed (\(result.terminationStatus)).")
         }
+
         return result.standardOutput
     }
 }

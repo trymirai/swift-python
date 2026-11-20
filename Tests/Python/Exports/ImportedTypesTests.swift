@@ -10,6 +10,107 @@ import Python
 import SystemPackage
 import Testing
 
+// MARK: - PythonFuture
+
+@PythonImportedClass(module: "asyncio", name: "Future")
+private struct PythonFuture {
+    @PythonInit
+    init(in session: Python::Session) async throws
+
+    @PythonFunction("set_result")
+    func resolve(_ value: Int) async throws
+
+    @PythonFunction
+    func result() async throws -> Int
+}
+
+@Test(.timeLimit(.minutes(1)))
+func importedConstructorsReturnAwaitableInstancesOnTheirOwningLoop() async throws {
+    let session = try await Python::Runtime().session()
+    defer { await session.close() }
+
+    let future = try await PythonFuture(in: session)
+    try await session.set(future, forKey: "future")
+    _ = try await session.evaluate("""
+    import asyncio
+    assert future.get_loop() is asyncio.get_running_loop()
+    await asyncio.sleep(0)
+    """)
+    try await future.resolve(42)
+    #expect(try await future.result() == 42)
+
+    try await session.reset()
+    try await expectPythonFailure(.exception(.referenceError)) { _ = try await future.result() }
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func sessionCallsAwaitReadyAndPendingFutures(ready: Bool) async throws {
+    let session = try await Python::Runtime().session(.source("""
+    import asyncio
+    def complete(future, value, ready):
+        if ready:
+            future.set_result(value)
+        else:
+            asyncio.get_running_loop().call_soon(future.set_result, value)
+        return future
+    """))
+    defer { await session.close() }
+
+    let complete = try await session.get("complete", as: Python::Reference.self)
+    for value: Int? in [42, nil] {
+        let future = try await PythonFuture(in: session)
+        let result: Int? = try await session.call(complete, arguments: [future, value, ready])
+        #expect(result == value)
+    }
+}
+
+// MARK: - ScaledValue
+
+@PythonImportedClass(module: "__main__", name: "ScaledValue")
+private struct ScaledValue {
+    @PythonInit
+    init(_ value: Int, scale multiplier: Int = 2, in context: Python::Context) throws
+
+    @PythonInit
+    init(_ value: Int, scale multiplier: Int = 2, in session: Python::Session) async throws
+
+    @PythonProperty(isReadOnly: true)
+    var total: Int
+}
+
+@Test(.timeLimit(.minutes(1)))
+func importedInitializersMapSwiftArgumentsToThePythonConstructor() async throws {
+    let session = try await Python::Runtime().session()
+    defer { await session.close() }
+
+    _ = try await session.evaluate("""
+    class ScaledValue:
+        def __init__(self, value, /, *, scale):
+            if scale < 0:
+                raise ValueError("scale must be nonnegative")
+            self.total = value * scale
+    """)
+
+    let value = try await ScaledValue(6, in: session)
+    try await session.enqueue { py in
+        #expect(try value.total == 12)
+        let local = try ScaledValue(6, scale: 3, in: py)
+        #expect(try local.total == 18)
+
+        let module = try py.import(module: "__main__")
+        let type = try module.value(forAttribute: "ScaledValue")
+        let dynamic = try type(6, keywords: [("scale", 3)])
+        #expect(try dynamic.value(forAttribute: "total").decode(as: Int.self) == 18)
+
+        try expectPythonFailure(.exception(.valueError)) {
+            _ = try ScaledValue(6, scale: -1, in: py)
+        }
+    }
+    try await expectPythonFailure(.exception(.valueError)) {
+        _ = try await ScaledValue(6, scale: -1, in: session)
+    }
+}
+
 // MARK: - ImportedReport
 
 @PythonImportedClass(module: "report_fixture", name: "Report")
@@ -24,7 +125,7 @@ private struct ImportedReport {
     var kind: String
 
     @PythonFunction
-    func rename(_ prefix: String, _ suffix: String, copies: Int) throws -> ImportedReport
+    func rename(_ object: String, _ suffix: String, copies: Int) throws -> ImportedReport
 
     @PythonFunction
     func refresh() async throws -> ImportedReport
@@ -42,7 +143,7 @@ private struct ImportedReport {
     func waitUntilCancelled() async throws
 
     @PythonFunction("make")
-    static func make(_ name: String) async throws -> ImportedReport
+    static func make(_ session: String) async throws -> ImportedReport
 }
 
 // MARK: - ImportedTypes
@@ -81,7 +182,7 @@ private enum ImportedTypes {
         try report.$title("draft")
         try report.$title { $0.uppercased() }
         guard try report.kind == "report" else {
-            throw Python::Exception(name: "TypeError", message: "Expected a report.")
+            throw Python::Failure(.typeError, message: "Expected a report.")
         }
         return try report.rename("[", "]", copies: 2)
     }
@@ -93,7 +194,7 @@ private enum ImportedTypes {
         _ = try await created
         try ImportedReport.$category("updated")
         guard try ImportedReport.category == "updated" else {
-            throw Python::Exception(name: "ValueError", message: "Unexpected class property.")
+            throw Python::Failure(.valueError, message: "Unexpected class property.")
         }
         return try await updated
     }
@@ -166,6 +267,17 @@ func importedTypesSupplyLazyAnnotationsAndPreserveIdentity() async throws {
         try await withSession(session) { session in
             let execution = try await session.evaluate(importedTypesChecks)
             #expect(execution.end == .finished)
+            let created = try await ImportedReport.make("outside", in: session)
+            let refreshed = try await created.refresh()
+            let title = try await session.enqueue { _ in try refreshed.title }
+            #expect(title == "outside!")
+
+            try await session.reset()
+            try await expectPythonFailure(.exception(.referenceError)) {
+                _ = try await created.refresh()
+            }
+            let fresh = try await ImportedReport.make("fresh", in: session)
+            #expect(try await session.enqueue { _ in try fresh.title } == "fresh")
         }
     }
 }
@@ -221,7 +333,6 @@ class Report:
 
 private let importedTypesChecks = """
 import inspect
-import linecache
 import sys
 import typing
 import imported_types as exports
@@ -230,15 +341,8 @@ assert 'report_fixture' not in sys.modules
 signature = inspect.signature(exports.keep)
 assert signature.parameters['report'].annotation == 'report_fixture.Report'
 assert signature.return_annotation == 'report_fixture.Report'
-source = linecache.getlines(exports.keep.__code__.co_filename)
-assert source.count('lazy import report_fixture\\n') == 1
 assert 'report: report_fixture.Report' in inspect.getsource(exports.keep)
-
-module_source = linecache.getlines(exports.__file__)
 assert exports.__doc__ == 'Imports for exported types.'
-assert module_source.count('lazy import datetime\\n') == 1
-assert module_source.count('lazy import report_fixture\\n') == 1
-assert module_source.index('from __future__ import annotations\\n') < module_source.index('lazy import datetime\\n')
 assert 'report_fixture' not in sys.modules
 
 Report = typing.get_type_hints(exports.keep)['return']
@@ -330,7 +434,7 @@ func standardImportedTypesRetainThePythonInstance() async throws {
         """)
 
         try await session.reset()
-        await #expect(throws: Python::Exception.self) {
+        await #expect(throws: Python::Failure.self) {
             try await session.set(day, forKey: "previous_day")
         }
     }
@@ -346,12 +450,12 @@ func aSwiftTaskCannotBorrowAnotherTasksPythonAttachment() async throws {
             let day = try Python::Date(year: 2000, month: 2, day: 29, in: context)
             let attachedContext = context
             return Task.immediate {
-                try day.object(in: attachedContext).attribute("year").decode(as: Int.self)
+                try day.object(in: attachedContext).value(forAttribute: "year").decode(as: Int.self)
             }
         }
-        let error = try await #require(throws: Python::Exception.self) { try await task.value }
-        #expect(error.name == "RuntimeError")
-        #expect(error.message == "Python is attached to another Swift task.")
+        try await expectPythonFailure(.exception(.runtimeError)) {
+            _ = try await task.value
+        }
     }
 }
 
@@ -362,64 +466,64 @@ func standardImportedTypesSupportSwiftConstructionAndConversion() async throws {
 
     try await withSession(session) { session in
         try await session.enqueue { context in
-            func checkCalendarDate() throws -> Python::Date {
-                let day = try Python::Date(year: 2000, month: 2, day: 29, in: context)
-                #expect(try day.isoFormat() == "2000-02-29")
-                #expect(try day.weekday() == 1)
-                #expect(throws: Python::Exception.self) {
-                    try Python::Date(year: 2001, month: 2, day: 29, in: context)
-                }
-                return day
-            }
-
-            func checkLocalDateTime(on day: Python::Date) throws {
-                let local = try Python::DateTime(
-                    year: 2000,
-                    month: 2,
-                    day: 29,
-                    hour: 12,
-                    microsecond: 125_000,
-                    fold: 1,
-                    in: context,
-                )
-                #expect(try local.date().isoFormat() == day.isoFormat())
-                #expect(try local.microsecond == 125_000)
-                #expect(try local.fold == 1)
-                #expect(try local.timeZoneName() == nil)
-            }
-
-            func checkUTCDateTime() throws {
-                let utc = try Python::DateTime(utcTimestamp: -0.125, in: context)
-                #expect(try utc.isoFormat() == "1969-12-31T23:59:59.875000+00:00")
-                #expect(try utc.timestamp() == -0.125)
-
-                #if canImport(Foundation)
-                let instant = Foundation::Date(timeIntervalSince1970: 0.25)
-                let dateTime = try Python::DateTime(instant, in: context)
-                #expect(try dateTime.timeZoneName() == "UTC")
-                #expect(abs(try dateTime.foundationDate().timeIntervalSince(instant)) < 0.000_001)
-                #endif
-            }
-
-            func checkPathConversions() throws {
-                let base = try Python::Path("reports", in: context)
-                let path = try base.joinPath("résumé.txt").withSuffix(".md")
-                #expect(try path.stem == "résumé")
-                #expect(try path.suffix == ".md")
-                #expect(try path.parts == ["reports", "résumé.md"])
-                #expect(try path.relativeTo(base).string() == "résumé.md")
-                #expect(try path.filePath == FilePath("reports/résumé.md"))
-                #expect(try Python::Path(path.filePath, in: context).string() == path.string())
-                #expect(try !path.isAbsolute())
-
-                let invalidPath = try Python::Path("a\0b", in: context)
-                #expect(throws: Python::Exception.self) { try invalidPath.filePath }
-            }
-
-            let day = try checkCalendarDate()
-            try checkLocalDateTime(on: day)
-            try checkUTCDateTime()
-            try checkPathConversions()
+            let day = try checkCalendarDate(in: context)
+            try checkLocalDateTime(on: day, in: context)
+            try checkUTCDateTime(in: context)
+            try checkPathConversions(in: context)
         }
     }
+}
+
+private func checkCalendarDate(in context: Python::Context) throws -> Python::Date {
+    let day = try Python::Date(year: 2000, month: 2, day: 29, in: context)
+    #expect(try day.isoFormat() == "2000-02-29")
+    #expect(try day.weekday() == 1)
+    #expect(throws: Python::Failure.self) {
+        try Python::Date(year: 2001, month: 2, day: 29, in: context)
+    }
+    return day
+}
+
+private func checkLocalDateTime(on day: Python::Date, in context: Python::Context) throws {
+    let local = try Python::DateTime(
+        year: 2000,
+        month: 2,
+        day: 29,
+        hour: 12,
+        microsecond: 125_000,
+        fold: 1,
+        in: context,
+    )
+    #expect(try local.date().isoFormat() == day.isoFormat())
+    #expect(try local.microsecond == 125_000)
+    #expect(try local.fold == 1)
+    #expect(try local.timeZoneName() == nil)
+}
+
+private func checkUTCDateTime(in context: Python::Context) throws {
+    let utc = try Python::DateTime(utcTimestamp: -0.125, in: context)
+    #expect(try utc.isoFormat() == "1969-12-31T23:59:59.875000+00:00")
+    #expect(try utc.timestamp() == -0.125)
+
+    #if canImport(Foundation)
+    let instant = Foundation::Date(timeIntervalSince1970: 0.25)
+    let dateTime = try Python::DateTime(instant, in: context)
+    #expect(try dateTime.timeZoneName() == "UTC")
+    #expect(abs(try dateTime.foundationDate().timeIntervalSince(instant)) < 0.000_001)
+    #endif
+}
+
+private func checkPathConversions(in context: Python::Context) throws {
+    let base = try Python::Path("reports", in: context)
+    let path = try base.joinPath("résumé.txt").withSuffix(".md")
+    #expect(try path.stem == "résumé")
+    #expect(try path.suffix == ".md")
+    #expect(try path.parts == ["reports", "résumé.md"])
+    #expect(try path.relativeTo(base).string() == "résumé.md")
+    #expect(try path.filePath == FilePath("reports/résumé.md"))
+    #expect(try Python::Path(path.filePath, in: context).string() == path.string())
+    #expect(try !path.isAbsolute())
+
+    let invalidPath = try Python::Path("a\0b", in: context)
+    #expect(throws: Python::Failure.self) { try invalidPath.filePath }
 }

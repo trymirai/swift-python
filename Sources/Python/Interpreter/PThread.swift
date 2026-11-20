@@ -15,15 +15,13 @@ struct PThread: ~Copyable {
 
     init(
         fileAccess: Interpreter.FileAccess? = nil,
+        session: Session? = nil,
         scheduleRelease: @escaping @Sendable () -> Void = {},
     ) throws {
         var pointer: UnsafeMutablePointer<PyThreadState>?
         let status = unsafe CPython_NewThreadState(&pointer)
         guard unsafe PyStatus_Exception(status) == 0, let pointer = unsafe pointer else {
-            throw Runtime.Failure(unsafe Self.message(
-                status,
-                default: "Unable to create a Python interpreter.",
-            ))
+            throw unsafe Self.failure(status, default: "Unable to create a Python interpreter.")
         }
 
         let storage: Interpreter.Storage
@@ -32,6 +30,7 @@ struct PThread: ~Copyable {
             storage = unsafe Interpreter.Storage(
                 key: CPython_InterpreterKey(pointer),
                 view: view,
+                session: session,
                 fileAccess: fileAccess,
                 schedule: scheduleRelease,
             )
@@ -57,17 +56,35 @@ struct PThread: ~Copyable {
     static func initializeRuntime() throws {
         let status = unsafe CPython_InitializeRuntime()
         if unsafe PyStatus_Exception(status) != 0 {
-            throw Runtime.Failure(unsafe message(
-                status,
-                default: "Unable to initialize Python.",
-            ))
+            throw unsafe failure(status, default: "Unable to initialize Python.")
         }
     }
 
     borrowing func withAttached<Result: Sendable & ~Copyable>(
-        execution: Session.Control? = nil,
-        releasingReferences: Bool = true,
         _ body: (borrowing Attachment) throws -> Result,
+    ) rethrows -> Result {
+        try withScope(execution: nil) { _ in try withCurrentAttachment(body) }
+    }
+
+    borrowing func withAttached<Result: Sendable & ~Copyable>(
+        execution: Session.Control,
+        _ body: (borrowing Attachment) throws -> Result,
+    ) throws -> Result {
+        try withScope(execution: execution) { scope in
+            try scope.withEvaluation { try withCurrentAttachment(body) }
+        }
+    }
+
+    private borrowing func withCurrentAttachment<Result: ~Copyable>(
+        _ body: (borrowing Attachment) throws -> Result,
+    ) rethrows -> Result {
+        storage.releasePendingReferences()
+        return try Self.withAttachment(to: storage, body)
+    }
+
+    private borrowing func withScope<Result: ~Copyable>(
+        execution: Session.Control?,
+        _ body: (Scope) throws -> Result,
     ) rethrows -> Result {
         precondition(unsafe PyThreadState_GetUnchecked() == nil)
         unsafe CPython_AttachThreadState(pointer)
@@ -75,12 +92,7 @@ struct PThread: ~Copyable {
 
         return try Scope.run(storage: storage, execution: execution) { scope in
             try storage.withFileAccess {
-                try scope.withEvaluation {
-                    if releasingReferences {
-                        storage.releasePendingReferences()
-                    }
-                    return try Self.withAttachment(to: storage, body)
-                }
+                try body(scope)
             }
         }
     }
@@ -102,11 +114,11 @@ struct PThread: ~Copyable {
         try storage.withConstructionScope { try body(Attachment(storage)) }
     }
 
-    private static func message(_ status: borrowing PyStatus, default fallback: String) -> String {
+    private static func failure(_ status: borrowing PyStatus, default fallback: String) -> Failure {
         guard let message = unsafe status.err_msg else {
-            return fallback
+            return Failure(fallback)
         }
-        return unsafe String(cString: message)
+        return Failure(unsafe String(cString: message))
     }
 }
 

@@ -44,7 +44,7 @@ struct PythonPropertyMacro: PeerMacro {
         let name = property.pythonNameSource
         let setterBody = property.variable.modifiers.declaresStaticMember
             ? "try Self._pSetClassProperty(newValue, forKey: \(name))"
-            : "try self { try $0.setAttribute(\(name), to: newValue) }"
+            : "try self { try $0.set(newValue, forAttribute: \(name)) }"
         return writeMethods(
             for: property,
             type: type,
@@ -100,6 +100,7 @@ struct PythonPropertyMacro: PeerMacro {
         let hasWriteAccessor = accessors.contains {
             ["set", "willSet", "didSet", "_modify"].contains($0.accessorSpecifier.text)
         }
+
         guard
             property.variable.bindingSpecifier.text != "let",
             !isReadOnly, !hasPrivateSetter, hasWriteAccessor
@@ -189,7 +190,7 @@ struct PythonPropertyGetterMacro: AccessorMacro {
             let name = property.pythonNameSource
             body = property.variable.modifiers.declaresStaticMember
                 ? "try Self._pGetClassProperty(\(name))"
-                : "try self { try $0.attribute(\(name)).decode() }"
+                : "try self { try $0.value(forAttribute: \(name)).decode() }"
         } else {
             let field = try property.storageSource().field
             body = "try self._pGetProperty(\(field))"

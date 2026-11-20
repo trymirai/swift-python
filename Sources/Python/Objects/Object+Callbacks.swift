@@ -4,6 +4,20 @@
 
 internal import libcpython
 
+// MARK: - Object.Callable
+
+extension Object {
+    // A method requirement preserves the result's lifetime dependency through
+    // existential dispatch. Stored function values cannot express it in Swift 6.4.
+    protocol Callable {
+        @_lifetime(borrow attachment)
+        func call(
+            _ arguments: borrowing Object,
+            in attachment: borrowing PThread.Attachment,
+        ) throws -> Object
+    }
+}
+
 // MARK: - Object.Callback
 
 extension Object {
@@ -25,11 +39,12 @@ extension Object {
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
         let context = unsafe Unmanaged.passRetained(Callback(body)).toOpaque()
-        return unsafe try take(CPython_NewFunction(
+        let function = unsafe CPython_NewFunction(
             context,
             { context, arguments in unsafe Object.invoke(context, arguments) },
             { context in unsafe Object.releaseCallback(context) },
-        ), in: attachment)
+        )
+        return unsafe try take(function, in: attachment)
     }
 
     private static func invoke(
@@ -37,7 +52,7 @@ extension Object {
         _ arguments: UnsafeMutablePointer<PyObject>?,
     ) -> UnsafeMutablePointer<PyObject>? {
         guard let context = unsafe context, let argumentsPointer = unsafe arguments else {
-            unsafe CPython_RaiseSwiftError("RuntimeError", "Missing Swift callback arguments.")
+            Object.raise(Failure("Missing Swift callback arguments."))
             return nil
         }
 

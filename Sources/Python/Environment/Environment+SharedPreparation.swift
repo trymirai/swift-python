@@ -23,7 +23,7 @@ extension Environment {
         let (service, configuration) = try await environment.open()
         let baseSources = environment.sessionPackages.map(\.source)
 
-        func prepare(using execution: Session.Control) async throws -> Runtime.ProjectResources {
+        return try await service.withSharedPreparation { execution in
             let requirements = try await service.projectRequirements(
                 at: project,
                 execution: execution,
@@ -32,6 +32,7 @@ extension Environment {
                 .resolutionFingerprint(requirements: requirements, base: configuration.base),
                 execution: execution,
             )
+
             let paths = Runtime.Paths.preparation(in: directory.file, fingerprint: fingerprint)
             let previous = try await readSharedManifest(
                 at: paths.manifestFile,
@@ -48,6 +49,7 @@ extension Environment {
                 using: service,
                 execution: execution,
             )
+
             if previous != manifest {
                 try await publishShared(manifest, at: paths, using: service, execution: execution)
             }
@@ -56,16 +58,13 @@ extension Environment {
             if let sitePackages {
                 sources.insert(.directory(sitePackages.string), at: 0)
             }
+
             return Runtime.ProjectResources(
                 project: project,
                 sources: sources,
                 fingerprint: fingerprint,
                 paths: paths,
             )
-        }
-
-        return try await service.preparations.withReservation(.queued) {
-            try await withPackageOperation(prepare)
         }
     }
 
@@ -75,16 +74,17 @@ extension Environment {
         abi: [String],
         using service: Service,
     ) async throws -> Manifest? {
-        guard let manifest = try await readManifest(at: file, using: service, as: Manifest.self)
-        else {
+        let manifest = try await readManifest(at: file, using: service, as: Manifest.self)
+        guard let manifest else {
             return nil
         }
+
         guard
             manifest.abi == abi,
             manifest.fingerprint == fingerprint,
             manifest.local.isEmpty
         else {
-            throw Runtime.Failure("Invalid shared package preparation: \(file)")
+            throw Failure("Invalid shared package preparation: \(file)")
         }
         return manifest
     }
@@ -99,6 +99,7 @@ extension Environment {
     ) async throws -> (manifest: Manifest, sitePackages: FilePath?) {
         let cache = configuration.paths
         let installed = previous?.packages ?? [:]
+
         let cached = try await sharedPackagesDirectory(
             for: installed,
             in: cache,
@@ -106,12 +107,12 @@ extension Environment {
             execution: execution,
         )
         let fingerprint: String? = if let cached, try await !hasEnvironmentDirectory(at: cached) {
+            // Resolve from retained wheel records when the assembled directory is missing.
             nil
         } else {
             previous?.fingerprint
         }
 
-        // Keep the selected wheels for offline repair even when the assembly needs rebuilding.
         let preparation = try await service.request(
             .prepare(
                 requirements: requirements,
@@ -126,7 +127,7 @@ extension Environment {
         switch preparation {
         case .unchanged:
             guard let previous else {
-                throw Runtime.Failure("A shared preparation returned no package records.")
+                throw Failure("A shared preparation returned no package records.")
             }
             return (previous, cached)
         case let .resolved(resolution):
@@ -137,7 +138,7 @@ extension Environment {
                 execution: execution,
             )
         case .requiresReset:
-            throw Runtime.Failure("Shared dependency preparation unexpectedly requires a reset.")
+            throw Failure("Shared dependency preparation unexpectedly requires a reset.")
         }
     }
 
@@ -176,6 +177,7 @@ extension Environment {
         guard !packages.isEmpty else {
             return nil
         }
+
         let digest = try await service.request(.packageFingerprint(packages), execution: execution)
         return cache.environmentPackagesDirectory(digest: digest)
     }

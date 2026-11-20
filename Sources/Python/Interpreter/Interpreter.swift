@@ -9,6 +9,7 @@ internal import libcpython
 // A session's interpreter and the operations that require its attached thread state.
 struct Interpreter: ~Copyable {
     let pThread: PThread
+
     private let packagePaths: [String]
 
     var references: Reference.Store {
@@ -19,7 +20,7 @@ struct Interpreter: ~Copyable {
         execution: Session.Control,
         importPaths: [String],
         modules: [Module],
-        packages: [Runtime.PackageSource.Resolved],
+        packages: [Runtime.Path],
         history: Session.History.Store?,
         scheduleRelease: @escaping @Sendable () -> Void,
         session: Session,
@@ -31,13 +32,16 @@ struct Interpreter: ~Copyable {
                 packages: packages,
                 delegate: delegate,
             ),
+            session: session,
             scheduleRelease: scheduleRelease,
         )
-        let storage = pThread.storage
-
-        storage.session = session
 
         let packagePaths = try pThread.withAttached(execution: execution) { attachment in
+            try Object.check(
+                CPython_WatchOperationContexts(),
+                "Unable to track Python operation contexts.",
+            )
+
             try Self.prepareImports(in: attachment)
             let packagePaths = try Self.installPackages(packages, in: attachment)
 
@@ -65,21 +69,10 @@ struct Interpreter: ~Copyable {
     ) throws {
         try pThread.withAttached(execution: execution) { attachment in
             let module = try Object.import(module: "_swift_python_runtime.imports", in: attachment)
-            let update = try module.attribute("update_imports")
             let searchPaths = Self.searchPaths(paths, packages: packagePaths)
-            _ = try update.call(Object(encoding: [searchPaths, modules], in: attachment))
+            _ = try module(methodNamed: "update_imports")([searchPaths, modules])
         }
         pThread.storage.fileAccess?.replaceImportPaths(paths)
-    }
-
-    borrowing func withContext<R: Sendable & ~Copyable>(
-        _ body: @Sendable (borrowing Context) throws -> R,
-        execution: Session.Control,
-    ) throws -> R {
-        try pThread.withAttached(execution: execution) { attachment in
-            let context = Context(storage: attachment.storage)
-            return try CurrentContext.withAttached { try body(context) }
-        }
     }
 
     borrowing func releasePendingReferences() {
@@ -105,16 +98,17 @@ private extension Interpreter {
     }
 
     static func installPackages(
-        _ packages: [Runtime.PackageSource.Resolved],
+        _ packages: [Runtime.Path],
         in attachment: borrowing PThread.Attachment,
     ) throws -> [String] {
-        let reader = try Object.makeFunction(Runtime.PackageSource.Reader(packages), in: attachment)
-        let sources = try Object(encoding: packages, in: attachment)
+        let paths = packages.map(\.string)
+        guard !paths.isEmpty else {
+            return []
+        }
 
         let module = try Object.import(module: "_swift_python_runtime.packages", in: attachment)
-        let install = try module.attribute("install")
-        let installed = try install.call(sources, reader)
-        return try installed.decode(as: [String].self)
+        _ = try module(methodNamed: "install")(paths)
+        return paths
     }
 
     static func configureExecution(
@@ -125,24 +119,28 @@ private extension Interpreter {
         execution: Session.Control,
     ) throws {
         let module = try executionModule(in: attachment)
-        let configure = try module.attribute("configure")
+        let configure = try module(methodNamed: "configure")
+
         let imports = try Object(encoding: importPaths, in: attachment)
         let packages = try Object(encoding: packagePaths, in: attachment)
         let limit = try Object(encoding: history?.configuration.outputs.limit, in: attachment)
+
         let reader: Object = if let history {
             try Object.makeFunction(history, in: attachment)
         } else {
             try Object(encoding: Value.none, in: attachment)
         }
+        let dns = try Object.makeFunction(ExportDispatcher([.resolveHost]), in: attachment)
+
         _ = unsafe try configure.callInterruptibly(
-            [imports.pointer, packages.pointer, limit.pointer, reader.pointer],
+            [imports.pointer, packages.pointer, limit.pointer, reader.pointer, dns.pointer],
             using: execution,
         )
     }
 
     static func cacheArrayType(in attachment: borrowing PThread.Attachment) throws {
         let module = try Object.import(module: "array", in: attachment)
-        let type = try module.attribute("array")
+        let type = try module.value(forAttribute: "array")
         let storage = attachment.storage
         storage.arrayType = unsafe try storage.references.retain(type.pointer)
     }
@@ -160,15 +158,15 @@ private extension Interpreter {
         storage.classRegistry = registry
 
         let exports = try Object.import(module: "_swift_python_runtime.exports", in: attachment)
-        let marker = try exports.attribute("_DEFAULT")
+        let marker = try exports.value(forAttribute: "_DEFAULT")
         storage.defaultArgumentMarker = unsafe UInt(bitPattern: marker.pointer)
 
-        let install = try exports.attribute("install")
+        let install = try exports(methodNamed: "install")
         let plan = Module.Plan(modules)
         let invoke = try Object.makeFunction(ExportDispatcher(plan.functions), in: attachment)
         let metadata = try Object(encoding: plan.metadata, in: attachment)
 
-        _ = try install.call(metadata, invoke)
+        _ = try install(metadata, invoke)
         registry.finishInstallation()
     }
 }

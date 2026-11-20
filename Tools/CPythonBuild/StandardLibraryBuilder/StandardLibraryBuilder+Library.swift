@@ -10,18 +10,20 @@ extension StandardLibraryBuilder {
         try await appendRuntimeResources(to: &resources)
         try await appendConfigurationResources(to: &resources)
 
-        // Sort by UTF-8 bytes to match strcmp in the C catalog lookup.
-        resources.sort { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
-        let modules = resources.compactMap(Module.init(resource:))
-            .sorted { $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) }
+        resources.sort { Self.precedesInCatalog($0.path, $1.path) }
+
+        var modules = resources.compactMap(Module.init(resource:))
+        modules.sort { Self.precedesInCatalog($0.name, $1.name) }
 
         return Library(modules: modules, resources: resources)
     }
 
-    private func standardLibraryResources() async throws -> [Resource] {
-        let source = workspace.sourceDirectory
-        let output = workspace.outputDirectory
+    // The C catalog searches with strcmp, so compare UTF-8 bytes.
+    private static func precedesInCatalog(_ left: String, _ right: String) -> Bool {
+        left.utf8.lexicographicallyPrecedes(right.utf8)
+    }
 
+    private func standardLibraryResources() async throws -> [Resource] {
         let omitted: Set<String> = [
             "test",
             "tests",
@@ -32,13 +34,15 @@ extension StandardLibraryBuilder {
             "ensurepip",
         ]
 
-        let library = source.appending("Lib")
-        let paths = try await workspace.paths(library, omitting: omitted).filter { path in
-            ![".pyc", ".pyo", ".so", ".dll", ".exe", ".pyd", ".DS_Store"]
-                .contains { path.hasSuffix($0) }
-        }
-        return paths.map { path in
-            let directory = path == "subprocess.py" ? output : library
+        let excludedSuffixes = [".pyc", ".pyo", ".so", ".dll", ".exe", ".pyd", ".DS_Store"]
+        let library = workspace.sourceDirectory.appending("Lib")
+        let paths = try await workspace.paths(library, omitting: omitted)
+
+        return paths.compactMap { path in
+            guard !excludedSuffixes.contains(where: path.hasSuffix) else {
+                return nil
+            }
+            let directory = path == "subprocess.py" ? workspace.outputDirectory : library
             return Resource(path: path, source: directory.appending(path))
         }
     }
@@ -46,9 +50,8 @@ extension StandardLibraryBuilder {
     private func appendRuntimeResources(to resources: inout [Resource]) async throws {
         let root = workspace.packageDirectory
         let adapters = root.appending("Sources/libcpython/Compatibility/Python")
-        for path in try await workspace.paths(adapters, omitting: ["__pycache__"])
-            where path.hasSuffix(".py")
-        {
+        let adapterPaths = try await workspace.paths(adapters, omitting: ["__pycache__"])
+        for path in adapterPaths where path.hasSuffix(".py") {
             resources.append(Resource(path: path, source: adapters.appending(path)))
         }
 

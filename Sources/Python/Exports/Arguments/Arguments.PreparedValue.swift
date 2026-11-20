@@ -36,8 +36,8 @@ extension Arguments {
             }
         }
 
-        private static var alreadyUsed: Runtime.Failure {
-            Runtime.Failure("The prepared Python argument has already been used.")
+        private static var alreadyUsed: Failure {
+            Failure("The prepared Python argument has already been used.")
         }
     }
 }

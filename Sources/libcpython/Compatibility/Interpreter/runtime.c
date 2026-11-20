@@ -14,7 +14,8 @@ CPython_SetScope(void *scope)
 void *
 CPython_CurrentScope(void)
 {
-    return current_scope;
+    // An asyncio handle can belong to a previous operation on this same thread.
+    return CPython_HasOperationAccess() ? current_scope : NULL;
 }
 
 PyInterpreterView *

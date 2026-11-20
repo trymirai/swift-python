@@ -9,7 +9,7 @@ public import Foundation
 // MARK: - Date
 
 /// A reference to a `datetime.date` in the current Python session.
-/// Use its Swift members inside `Session.enqueue` or a Swift export.
+/// Access its synchronous properties and methods inside `Session.enqueue` or a Swift export.
 @PythonImportedClass(module: "datetime", name: "date")
 public struct Date {
     @PythonProperty(isReadOnly: true)
@@ -20,9 +20,11 @@ public struct Date {
     public var day: Int
 
     /// Creates a calendar date in the supplied context.
-    public init(year: Int, month: Int, day: Int, in context: Context) throws {
-        self = try context.construct(Self.self, arguments: [year, month, day])
-    }
+    @PythonInit
+    public init(year: Int, month: Int, day: Int, in context: Context) throws
+
+    @PythonInit
+    public init(year: Int, month: Int, day: Int, in session: Session) async throws
 
     /// Parses a Python ISO calendar date in the supplied context.
     public init(isoFormat text: String, in context: Context) throws {
@@ -61,7 +63,7 @@ public extension Foundation::Date {
         calendar.timeZone = timeZone
         let components = try DateComponents(year: date.year, month: date.month, day: date.day)
         guard let instant = calendar.date(from: components) else {
-            throw Exception(name: "ValueError", message: "Cannot represent this calendar date.")
+            throw Failure(.valueError, message: "Cannot represent this calendar date.")
         }
         self = instant
     }

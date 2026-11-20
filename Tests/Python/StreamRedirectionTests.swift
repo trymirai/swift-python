@@ -23,18 +23,20 @@ func lazyStartupKeepsItsStreamsSeparateFromEvaluation() async throws {
         print("startup")
         """))
         try await withSession(session) { session in
-            await #expect {
-                try await session.evaluate("pass", redirecting: [.stdout: FilePath("relative")])
-            } throws: { error in
-                String(describing: error).contains("Expected an absolute UTF-8 Python path")
-            }
+            await #expect(
+                performing: {
+                    try await session.evaluate("pass", redirecting: [.stdout: FilePath("relative")])
+                },
+                throws: { error in
+                    String(describing: error).contains("Expected an absolute UTF-8 Python path")
+                },
+            )
             #expect(await session.startupOutput == nil)
 
             _ = try await session.evaluate(
                 "print(input())",
                 redirecting: [.stdin: input, .stdout: output],
-            ) {
-                _, text in
+            ) { _, text in
                 streamed.withLock { $0 += text }
             }
             #expect(await session.startupOutput?.stdout == "startup\n")
@@ -54,11 +56,13 @@ func fileBackedStreamsAppendAndReadFromOffsets() async throws {
 
         let messageWidth = 2048
         try await "input from file\n".write(toFileAt: input)
+
         let redirects: [Python::Session.Stream: FilePath] = [
             .stdin: input,
             .stdout: stdout,
             .stderr: stderr,
         ]
+
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(.source("print('initialized')"))
         defer { await session.close() }
@@ -67,17 +71,20 @@ func fileBackedStreamsAppendAndReadFromOffsets() async throws {
         #expect(await session.startupOutput?.stdout == "")
         #expect(try await readOutput(at: startup) == Array("initialized\n".utf8))
 
-        let execution = try await session.evaluate(#"""
-        import logging, sys
+        let execution = try await session.evaluate(
+            #"""
+            import logging, sys
 
-        print(input())
-        _ = sys.stdout.buffer.write(b"\x00\xff")
-        sys.stdout.flush()
-        print("HEAD" + "x" * \#(messageWidth) + "TAIL")
-        logger = logging.getLogger("streams-test")
-        logger.addHandler(logging.StreamHandler(sys.stderr))
-        logger.warning("first diagnostic")
-        """#, redirecting: redirects)
+            print(input())
+            _ = sys.stdout.buffer.write(b"\x00\xff")
+            sys.stdout.flush()
+            print("HEAD" + "x" * \#(messageWidth) + "TAIL")
+            logger = logging.getLogger("streams-test")
+            logger.addHandler(logging.StreamHandler(sys.stderr))
+            logger.warning("first diagnostic")
+            """#,
+            redirecting: redirects,
+        )
         #expect(execution.output.stdout.isEmpty)
         #expect(execution.output.stderr.isEmpty)
 
@@ -93,10 +100,11 @@ func fileBackedStreamsAppendAndReadFromOffsets() async throws {
         )
         #expect(next.output.stdout.isEmpty)
         #expect(next.output.stderr.isEmpty)
+
         let appended = try await readOutput(at: stdout, from: Int64(firstBytes.count))
         #expect(appended == Array("next\n".utf8))
-        #expect(try await readOutput(at: stderr) ==
-            Array("first diagnostic\nsecond diagnostic\n".utf8))
+        let diagnostics = try await readOutput(at: stderr)
+        #expect(diagnostics == Array("first diagnostic\nsecond diagnostic\n".utf8))
     }
 }
 
@@ -109,24 +117,30 @@ func fileBackedStreamsUseHostFileAccess() async throws {
         defer { await session.close() }
 
         let redirects: [Python::Session.Stream: FilePath] = [.stdout: stdout]
-        _ = try await session.evaluate("""
-        import builtins, io
+        _ = try await session.evaluate(
+            """
+            import builtins, io
 
-        def managed_open(*args, **kwargs):
-            raise PermissionError("managed file access")
+            def managed_open(*args, **kwargs):
+                raise PermissionError("managed file access")
 
-        builtins.open = io.open = managed_open
-        """, redirecting: redirects)
+            builtins.open = io.open = managed_open
+            """,
+            redirecting: redirects,
+        )
 
-        _ = try await session.evaluate("""
-        print("host stream")
-        try:
-            open("/unapproved")
-        except PermissionError:
-            pass
-        else:
-            raise AssertionError("The user file adapter was bypassed")
-        """, redirecting: redirects)
+        _ = try await session.evaluate(
+            """
+            print("host stream")
+            try:
+                open("/unapproved")
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("The user file adapter was bypassed")
+            """,
+            redirecting: redirects,
+        )
         #expect(try await readOutput(at: stdout) == Array("host stream\n".utf8))
     }
 }
@@ -141,7 +155,7 @@ func redirectedOutputAndTracebackReachHostOnFailure() async throws {
         let session = try await runtime.session()
         defer { await session.close() }
 
-        let error = try await #require(throws: Python::ExecutionError.self) {
+        let error = try await #require(throws: Python::Failure.self) {
             try await session.evaluate(
                 """
                 import sys
@@ -156,10 +170,10 @@ func redirectedOutputAndTracebackReachHostOnFailure() async throws {
                 }
             }
         }
-        #expect(error.output.stdout.isEmpty)
-        #expect(error.output.stderr.isEmpty)
-        #expect(error.traceback.contains("ValueError: failure"))
-        let diagnostics = "diagnostic\n" + error.traceback
+        #expect(error.output?.stdout.isEmpty == true)
+        #expect(error.output?.stderr.isEmpty == true)
+        #expect(error.traceback?.contains("ValueError: failure") == true)
+        let diagnostics = "diagnostic\n" + (try #require(error.traceback))
         #expect(try await readOutput(at: stderr) == Array(diagnostics.utf8))
         #expect(streamed.withLock { $0 } == diagnostics)
         #expect(try await readOutput(at: stdout) == Array("before failure\n".utf8))
@@ -179,11 +193,14 @@ func capturedStreamsRecoverAfterCloseAndReadEOFWithoutInput() async throws {
     """)
     #expect(captured.output.stdout == String(repeating: "x", count: 131_072) + "\n")
     #expect(try await session.evaluate("'alive'").output.stdout == "'alive'\n")
-    await #expect {
-        try await session.evaluate("sys.stderr.close(); input()")
-    } throws: { error in
-        (error as? Python::ExecutionError)?.traceback.contains("EOFError") == true
-    }
+    await #expect(
+        performing: {
+            try await session.evaluate("sys.stderr.close(); input()")
+        },
+        throws: { error in
+            (error as? Python::Failure)?.traceback?.contains("EOFError") == true
+        },
+    )
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -208,12 +225,15 @@ func readStreamsDuringExecution() async throws {
 
         let stdout = root.appending("stdout.log")
         let evaluation = Task {
-            try await session.evaluate("""
-            import host
-            print("ready", flush=True)
-            await host.wait()
-            print("finished")
-            """, redirecting: [.stdout: stdout])
+            try await session.evaluate(
+                """
+                import host
+                print("ready", flush=True)
+                await host.wait()
+                print("finished")
+                """,
+                redirecting: [.stdout: stdout],
+            )
         }
         defer { evaluation.cancel() }
 
@@ -227,6 +247,84 @@ func readStreamsDuringExecution() async throws {
         #expect(try await evaluation.value.output.stdout.isEmpty)
         let suffix = try await readOutput(at: stdout, from: Int64(prefix.count))
         #expect(suffix == Array("finished\n".utf8))
+    }
+}
+
+@Test(.timeLimit(.minutes(1)))
+func resumedPythonTasksCannotBorrowTheNextOperationsStreamsOrFileGrant() async throws {
+    try await withTemporaryDirectory { root in
+        let input = root.appending("input")
+        let output = root.appending("output")
+        try await "current input\n".write(toFileAt: input)
+
+        let session = try await Python::Runtime().session(delegate: FileAccessDelegate { request in
+            request.path == input && request.scope as? String == "current"
+        })
+        defer { await session.close() }
+
+        try await session.set(input.string, forKey: "path")
+        _ = try await session.evaluate("""
+        import asyncio, sys
+        gate = asyncio.get_running_loop().create_future()
+        async def previous():
+            await gate
+            sys.stdout.buffer.write(b"old")
+            print("old", file=sys.stderr)
+            assert sys.stdin.readline() == "" and sys.stdin.buffer.read() == b""
+            try:
+                open(path).close()
+            except PermissionError:
+                return "denied"
+            return "leaked"
+        task = asyncio.create_task(previous())
+        await asyncio.sleep(0)
+        """)
+
+        _ = try await session.evaluate("""
+        gate.set_result(None)
+        assert await task == "denied"
+        with open(path) as stream:
+            assert stream.read() == "current input\\n"
+        print(input())
+        """, scope: "current", redirecting: [.stdin: input, .stdout: output, .stderr: output])
+        #expect(try await readOutput(at: output) == Array("current input\n".utf8))
+    }
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func endingAGenerationDrainsItsTasksAndAsyncGenerators(reset: Bool) async throws {
+    try await withTemporaryDirectory { root in
+        let log = root.appending("shutdown")
+        let session = try await Python::Runtime()
+            .session(delegate: FileAccessDelegate { $0.path == log })
+        defer { await session.close() }
+        try await session.set(log.string, forKey: "log_path")
+        _ = try await session.evaluate("""
+        import asyncio
+        log = open(log_path, "w", buffering=1)
+        async def numbers():
+            try:
+                yield 1
+                yield 2
+            finally:
+                log.write("generator closed\\n")
+        async def wait():
+            try:
+                await asyncio.get_running_loop().create_future()
+            finally:
+                log.write("task cancelled\\n")
+        pending = asyncio.create_task(wait())
+        values = numbers()
+        assert await anext(values) == 1
+        """)
+        _ = try await session.evaluate("assert await anext(values) == 2")
+        if reset {
+            try await session.reset()
+        } else {
+            await session.close()
+        }
+        let events = try await readText(at: log).split(separator: "\n").sorted()
+        #expect(events == ["generator closed", "task cancelled"])
     }
 }
 

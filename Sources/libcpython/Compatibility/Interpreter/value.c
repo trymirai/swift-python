@@ -13,17 +13,18 @@ CPython_ValueTypeOf(PyObject *object)
         return CPython_ValueNone;
     }
 
+    // bool is an int subclass, so it must be recognized first.
     if (PyBool_Check(object)) {
         return CPython_ValueBool;
     }
-    if (PyLong_CheckExact(object)) {
+    if (PyLong_Check(object)) {
         return CPython_ValueInteger;
     }
     if (PyFloat_CheckExact(object)) {
         return CPython_ValueFloat;
     }
 
-    if (PyUnicode_CheckExact(object)) {
+    if (PyUnicode_Check(object)) {
         return CPython_ValueString;
     }
     if (PyBytes_CheckExact(object)) {
@@ -36,5 +37,6 @@ CPython_ValueTypeOf(PyObject *object)
     if (PyDict_CheckExact(object)) {
         return CPython_ValueDictionary;
     }
+
     return CPython_ValueUnsupported;
 }

@@ -9,6 +9,7 @@ extension Environment {
         let paths: Runtime.Paths
         let abi: [String]
 
+        let packageDirectories: [Runtime.Path]
         let base: [String: BasePackage]
     }
 }
@@ -31,6 +32,8 @@ extension Environment.Configuration: Decodable {
         paths = Runtime.Paths(cacheDirectory: cache.file)
         abi = try decoder.decode([String].self, forKey: "abi")
 
+        let directories = try decoder.decode([String].self, forKey: "paths")
+        packageDirectories = try directories.map(Runtime.Path.init)
         base = try decoder.decode([String: Environment.BasePackage].self, forKey: "base")
     }
 }

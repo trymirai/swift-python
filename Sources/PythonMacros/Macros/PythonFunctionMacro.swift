@@ -29,7 +29,7 @@ extension PythonFunctionMacro: PeerMacro {
 
         let owner = scope.owner
         if owner?.isImportedClass == true {
-            return []
+            return try sessionOverload(for: method, annotation: attribute)
         }
 
         let isStatic = method.modifiers.declaresStaticMember
@@ -51,9 +51,11 @@ extension PythonFunctionMacro: PeerMacro {
             attribute: attribute,
             isInstanceMethod: !isStatic,
         )
-        let definition = isStatic
-            ? "collector.addFunction(module: \(owner.name).self, function: \(function))"
-            : "collector.addMethod(\(owner.name).self, function: \(function))"
+        let definition = if isStatic {
+            "collector.addFunction(module: \(owner.name).self, function: \(function))"
+        } else {
+            "collector.addMethod(\(owner.name).self, function: \(function))"
+        }
 
         return [ExportRegistration(method: method, definition: definition, in: context).declaration]
     }
@@ -67,6 +69,10 @@ extension PythonFunctionMacro: BodyMacro {
         providingBodyFor declaration: some DeclSyntaxProtocol & WithOptionalCodeBlockSyntax,
         in context: some MacroExpansionContext,
     ) throws -> [CodeBlockItemSyntax] {
+        if let initializer = declaration.as(InitializerDeclSyntax.self) {
+            return [try PythonInitMacro.importedBody(for: initializer)]
+        }
+
         guard
             let method = declaration.as(FunctionDeclSyntax.self),
             method.body == nil,
@@ -79,64 +85,92 @@ extension PythonFunctionMacro: BodyMacro {
             )
         }
 
-        let arguments = try argumentsSource(for: method.signature.parameterClause.parameters)
-        let name = annotation.nameSource(default: method.name.identifier?.name ?? method.name.text)
-        let type = method.signature.returnClause?.type.trimmedDescription ?? "Swift::Void"
+        return [try importedBody(for: method, annotation: annotation)]
+    }
+}
 
-        func forwardingBody(_ call: String) -> CodeBlockItemSyntax {
-            CodeBlockItemSyntax(stringLiteral: """
-            return \(call)(\(name), \(arguments)) {
-                try $0.decode(as: (\(type)).self)
-            }
-            """)
+private extension PythonFunctionMacro {
+    static func sessionOverload(
+        for method: FunctionDeclSyntax,
+        annotation: AttributeSyntax,
+    ) throws -> [DeclSyntax] {
+        guard
+            method.modifiers.declaresStaticMember,
+            method.signature.effectSpecifiers?.asyncSpecifier != nil
+        else {
+            return []
         }
 
-        func synchronousBody() -> CodeBlockItemSyntax {
-            if method.modifiers.declaresStaticMember {
-                return forwardingBody("try Self._pCallMethod")
+        var overload = method
+        let bindingAttributes = ["PythonFunction", "_PythonImportedFunction"].compactMap { name in
+            method.attributes.attribute(named: name)?.id
+        }
+        overload.attributes = method.attributes.filter { !bindingAttributes.contains($0.id) }
+
+        var parameters = overload.signature.parameterClause.parameters
+        let existingLocals = parameters.map { $0.secondName ?? $0.firstName }
+        var localNames = Set(existingLocals.map { $0.identifier?.name ?? $0.text })
+
+        func append(_ parameter: FunctionParameterSyntax) -> String {
+            let name = (parameter.secondName ?? parameter.firstName).text
+            var local = name
+            while !localNames.insert(local).inserted {
+                local += "_"
             }
-            return CodeBlockItemSyntax(stringLiteral: """
-            return try self { object in
-                let method = try object.attribute(\(name))
-                return try method.call(\(arguments)).decode(as: (\(type)).self)
+
+            if !parameters.isEmpty {
+                let last = parameters.index(before: parameters.endIndex)
+                parameters[last].trailingComma = .commaToken()
             }
-            """)
+
+            var parameter = parameter
+            // Preserve the overload's argument label when disambiguating the local name.
+            if local != name {
+                parameter.secondName = .identifier(local)
+            }
+            parameters.append(parameter)
+            return local
         }
 
-        if effects.asyncSpecifier != nil {
-            let receiver = method.modifiers.declaresStaticMember ? "Self" : "self.__p_reference"
-            return [forwardingBody("try await \(receiver)._pAwaitMethod")]
-        }
-        return [synchronousBody()]
+        let session = append("in session: Python::Session")
+        let parent = append("from parent: Python::Context? = nil")
+        let scope = append("scope: (any Swift::Sendable)? = nil")
+        overload.signature.parameterClause.parameters = parameters
+
+        let destination = ", in: \(session), from: \(parent), scope: \(scope)"
+        let body = try importedBody(for: method, annotation: annotation, destination: destination)
+        overload.body = CodeBlockSyntax { body }
+        return [DeclSyntax(overload)]
     }
 
-    private static func argumentsSource(for parameters: FunctionParameterListSyntax) throws
-        -> String
-    {
-        var positional = [String]()
-        var keywords = [String]()
+    static func importedBody(
+        for method: FunctionDeclSyntax,
+        annotation: AttributeSyntax,
+        destination: String = "",
+    ) throws -> CodeBlockItemSyntax {
+        let arguments = try importedArguments(for: method.signature.parameterClause.parameters)
+        let name = annotation.nameSource(default: method.name.identifier?.name ?? method.name.text)
+        let type = method.signature.returnClause?.type.trimmedDescription ?? "Swift::Void"
+        let isStatic = method.modifiers.declaresStaticMember
 
-        for parameter in parameters {
-            let localName = parameter.secondName ?? parameter.firstName
-            guard
-                localName.text != "_", parameter.ellipsis == nil,
-                !parameter.type.trimmedDescription.hasPrefix("inout ")
-            else {
-                throw MacroExpansionErrorMessage(
-                    "Imported Python parameters require names and fixed, encodable types.",
-                )
+        let call: String
+        if method.signature.effectSpecifiers?.asyncSpecifier != nil {
+            let receiver = isStatic ? "Self" : "self.__p_reference"
+            call = "try await \(receiver)._pAwaitMethod(\(name), \(arguments)\(destination))"
+        } else if isStatic {
+            call = "try Self._pCallMethod(\(name), \(arguments))"
+        } else {
+            return CodeBlockItemSyntax(stringLiteral: """
+            return try self {
+                try $0(methodNamed: \(name))(\(arguments)).decode(as: (\(type)).self)
             }
-
-            if parameter.firstName.text == "_" {
-                positional.append(localName.trimmedDescription)
-            } else {
-                let keyword = parameter.firstName.identifier?.name ?? parameter.firstName.text
-                keywords.append("(\(String(reflecting: keyword)), \(localName.trimmedDescription))")
-            }
+            """)
         }
 
-        let positionalList = positional.joined(separator: ", ")
-        let keywordList = keywords.joined(separator: ", ")
-        return "arguments: [\(positionalList)], keywords: [\(keywordList)]"
+        return CodeBlockItemSyntax(stringLiteral: """
+        return \(call) {
+            try $0.decode(as: (\(type)).self)
+        }
+        """)
     }
 }

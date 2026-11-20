@@ -18,16 +18,14 @@ func sqliteKeepsActualStateAfterErrors() async throws {
     connection.execute('CREATE TABLE values_ (value int)')
     values = []
     """)
-    _ = try await #require(throws: Python::ExecutionError.self) {
-        try await session.evaluate("""
-        values.append(42)
-        connection.execute('INSERT INTO values_ VALUES (42)')
-        connection.commit()
-        connection.create_function('double', 1, lambda value: value * 2)
-        cursor = connection.execute('SELECT value FROM values_')
-        raise ValueError('state remains')
-        """)
-    }
+    try await session.requireFailure(evaluating: """
+    values.append(42)
+    connection.execute('INSERT INTO values_ VALUES (42)')
+    connection.commit()
+    connection.create_function('double', 1, lambda value: value * 2)
+    cursor = connection.execute('SELECT value FROM values_')
+    raise ValueError('state remains')
+    """)
     let retained = try await session.evaluate("""
     assert values == [42]
     assert cursor.fetchone() == (42,)
@@ -35,9 +33,7 @@ func sqliteKeepsActualStateAfterErrors() async throws {
     """)
     #expect(retained.end == .finished)
 
-    _ = try await #require(throws: Python::ExecutionError.self) {
-        try await session.evaluate("connection.close()\nraise ValueError('closed')")
-    }
+    try await session.requireFailure(evaluating: "connection.close()\nraise ValueError('closed')")
     let closed = try await session.evaluate("""
     try:
         connection.execute('SELECT 42')
@@ -95,9 +91,9 @@ func opensslHashesKeepActualStateAfterErrors() async throws {
     value = hashlib.sha256(b'first')
     assert isinstance(value, _hashlib.HASH)
     """)
-    _ = try await #require(throws: Python::ExecutionError.self) {
-        try await session.evaluate("value.update(b'second')\nraise ValueError('state remains')")
-    }
+    try await session.requireFailure(
+        evaluating: "value.update(b'second')\nraise ValueError('state remains')",
+    )
     let result = try await session.evaluate("""
     assert value.hexdigest() == hashlib.sha256(b'firstsecond').hexdigest()
     """)

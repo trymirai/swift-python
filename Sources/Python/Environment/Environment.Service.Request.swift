@@ -33,8 +33,13 @@ extension Environment.Service {
 }
 
 extension Environment.Service.Request where Reply == [String] {
-    static func project(pyproject: String?, requirements: String?) -> Self {
+    static func project(
+        pyproject: String?,
+        requirements: String?,
+        target: [String: String],
+    ) -> Self {
         Self("project") { encoder in
+            try encoder.encode(target, forKey: "target")
             try encoder.encode(pyproject, forKey: "pyproject")
             try encoder.encode(requirements, forKey: "requirements")
         }
@@ -59,6 +64,7 @@ extension Environment.Service.Request where Reply == Environment.Preparation {
     static func prepare(
         requirements: [String],
         base: [String: Environment.BasePackage],
+        target: [String: String] = [:],
         local: [String] = [],
         removed: [String] = [],
         installed: [String: Environment.InstalledPackage],
@@ -69,6 +75,7 @@ extension Environment.Service.Request where Reply == Environment.Preparation {
         Self("prepare") { encoder in
             try encodeResolutionInputs(requirements, base: base, to: &encoder)
 
+            try encoder.encode(target, forKey: "target")
             try encoder.encode(local, forKey: "local")
             try encoder.encode(removed, forKey: "removed")
 
@@ -92,8 +99,8 @@ extension Environment.Service.Request where Reply == String {
     }
 
     static func packageFingerprint(_ packages: [String: Environment.InstalledPackage]) -> Self {
-        Self("package_fingerprint") {
-            try $0.encode(packages.mapValues(\.digest), forKey: "digests")
+        Self("package_fingerprint") { encoder in
+            try encoder.encode(packages.mapValues(\.digest), forKey: "digests")
         }
     }
 

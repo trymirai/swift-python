@@ -51,6 +51,7 @@ extension _PClass {
     private func pProperty<Value: ~Copyable>(_ property: Object.Property<Value>) throws -> Object? {
         let fields = try pFields()
         let key = try Object(encoding: property.key, in: fields)
+
         var pointer: UnsafeMutablePointer<PyObject>?
         switch unsafe PyDict_GetItemRef(fields.pointer, key.pointer, &pointer) {
         case 0:
@@ -67,6 +68,7 @@ extension _PClass {
         if let value = try pProperty(property) {
             return consume value
         }
+
         return unsafe try Object.take(Py_GetConstant(UInt32(Py_CONSTANT_NONE)), in: self)
     }
 
@@ -88,8 +90,8 @@ extension _PClass {
             try identity.claim(self, in: storage)
             let context = Context(storage: storage)
             guard let bound = try context.object(weak) else {
-                throw Exception(
-                    name: "ReferenceError",
+                throw Failure(
+                    .referenceError,
                     message: "The Python property has no live wrapper.",
                 )
             }
@@ -97,8 +99,11 @@ extension _PClass {
         } else {
             let registry = try storage.requireClassRegistry()
             wrapper = try registry.wrapper(for: self, in: self)
+
+            // Keep the wrapper alive for subsequent writes during the same construction.
             try storage.retainConstructedWrapper(wrapper)
         }
-        return try wrapper.attribute("_swift_fields")
+
+        return try wrapper.value(forAttribute: "_swift_fields")
     }
 }

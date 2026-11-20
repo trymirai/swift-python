@@ -16,8 +16,7 @@ public extension Runtime {
     /// the source and its directory becomes a readable import root.
     /// The same scope is available when checking the source and running the script.
     ///
-    /// The timeout starts after reading the source and preparing dependencies. Omit
-    /// `environmentDirectory` for a temporary environment. The session closes on every outcome.
+    /// Omit `environmentDirectory` for a temporary environment. The session closes on every outcome.
     func run(
         script path: String,
         scope: (any Sendable)? = nil,
@@ -25,12 +24,10 @@ public extension Runtime {
         environmentDirectory: String? = nil,
         importPaths: [String] = [],
         modules: [any ModuleHost.Type] = [],
-        timeout: Duration? = nil,
         redirecting redirects: [Session.Stream: FilePath] = [:],
         delegate: (any Session.Delegate)? = nil,
         _ output: (@Sendable (Output.Stream, String) -> Void)? = nil,
     ) async throws -> Execution {
-        try Session.Control.validateTimeout(timeout)
         let definitions = try Module.Catalog.resolve(modules)
 
         let script = try await Self.readScript(at: path, scope: scope, delegate: delegate)
@@ -50,7 +47,6 @@ public extension Runtime {
             .script(script.source, arguments: arguments),
             scope: scope,
             filename: script.filename,
-            timeout: timeout,
             redirecting: redirects,
             output: output,
         )
@@ -109,16 +105,17 @@ extension Runtime {
     private static func decodeScript(_ bytes: some Collection<UInt8>) throws -> String {
         let bomLength = bytes.starts(with: [0xEF, 0xBB, 0xBF]) ? 3 : 0
         guard let source = String(validating: bytes.dropFirst(bomLength), as: UTF8.self) else {
-            throw Runtime.Failure("Python script source must be UTF-8.")
+            throw Failure("Python script source must be UTF-8.")
         }
         return source
     }
 
     private func scriptRequirements(_ source: String) async throws -> [String] {
-        // Skip the package service for scripts without inline metadata.
+        // Scripts without package metadata can run without a service interpreter.
         guard source.contains("# /// script") else {
             return []
         }
+
         return try await withPackageService { service, _, execution in
             try await service.request(
                 .script(source: source),

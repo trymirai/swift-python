@@ -23,21 +23,28 @@ extension Runtime.PackageSource.Reader: Object.Callable {
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
         guard
-            let index = try? arguments.item(at: 0).decode(as: Int.self),
+            let index = try? arguments.tupleItem(at: 0).decode(as: Int.self),
             sources.indices.contains(index),
             case let .embedded(bytes) = sources[index],
-            let offset = try? arguments.item(at: 1).decode(as: Int.self),
-            let count = try? arguments.item(at: 2).decode(as: Int.self),
-            offset >= 0,
-            count >= 0,
-            offset <= bytes.count,
-            count <= bytes.count - offset
+            let range = Self.readRange(from: arguments, size: bytes.count)
         else {
-            throw Exception(name: "ValueError", message: "Invalid embedded package read.")
+            throw Failure(.valueError, message: "Invalid embedded package read.")
         }
 
         // Keep the archive shared and copy only the requested range into CPython.
-        let range = offset ..< (offset + count)
         return try Object(bytes: bytes.span.extracting(range), in: attachment)
+    }
+
+    private static func readRange(from arguments: borrowing Object, size: Int) -> Range<Int>? {
+        guard
+            let offset = try? arguments.tupleItem(at: 1).decode(as: Int.self),
+            let count = try? arguments.tupleItem(at: 2).decode(as: Int.self),
+            (0 ... size).contains(offset),
+            (0 ... size - offset).contains(count)
+        else {
+            return nil
+        }
+
+        return offset ..< (offset + count)
     }
 }

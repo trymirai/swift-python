@@ -8,15 +8,15 @@ public import SystemPackage
 public extension Session {
     /// Evaluates an interactive block with top-level await.
     ///
-    /// Blocks and package operations share a queue. The timeout starts when the block
-    /// runs and includes implicit startup. Interrupted blocks wait for Swift callbacks
+    /// Blocks and package operations share a queue. Interrupted blocks wait for Swift callbacks
     /// to finish before returning. Cancel the calling task to interrupt the execution.
     ///
     /// Standard output and error redirections append to absolute paths for this block.
     /// A source redirection saves recorded input to a new file. Implicit startup captures
     /// its own output.
-    /// Set recordingHistory to false to exclude an internal block from In/Out and numbering.
-    /// An explicit reservation supplies the history number and requires recordingHistory.
+    ///
+    /// Set `recordingHistory` to false to exclude a block from `In`, `Out`, and numbering.
+    /// An explicit reservation supplies the history number and requires `recordingHistory`.
     /// It is consumed before queue admission, including when that wait is cancelled.
     ///
     /// The scope is available to Swift exports and the file access delegate during the block.
@@ -24,7 +24,6 @@ public extension Session {
         _ source: String,
         scope: (any Sendable)? = nil,
         filename: String? = nil,
-        timeout: Duration? = nil,
         recordingHistory: Bool = true,
         reservation: Reservation? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
@@ -36,7 +35,6 @@ public extension Session {
             in: context,
             scope: scope,
             filename: filename,
-            timeout: timeout,
             recordingHistory: recordingHistory,
             reservation: reservation,
             redirecting: redirects,
@@ -51,7 +49,6 @@ public extension Session {
         _ source: String,
         scope: (any Sendable)? = nil,
         filename: String? = nil,
-        timeout: Duration? = nil,
         recordingHistory: Bool = true,
         reservation: Reservation? = nil,
         redirecting redirects: [Stream: FilePath] = [:],
@@ -64,22 +61,12 @@ public extension Session {
             in: context,
             scope: scope,
             filename: filename,
-            timeout: timeout,
             recordingHistory: recordingHistory,
             reservation: reservation,
             redirecting: redirects,
             output: output,
             committing: committing,
         )
-    }
-
-    struct Commit: Sendable {
-        let checking: @Sendable () throws -> Void
-
-        /// Seals the execution for publication. Throws if it was cancelled or timed out.
-        public func seal() throws {
-            try checking()
-        }
     }
 
     /// Runs startup when the session is idle. The redirections apply to startup.
@@ -93,53 +80,14 @@ public extension Session {
             try session.openInterpreterIfNeeded(execution: execution, redirecting: redirects)
         }
     }
-
-    /// Runs synchronously on this session's interpreter thread in the operation queue.
-    /// Scoped Python objects and views cannot escape the closure or cross an await.
-    nonisolated func enqueue<R: Sendable & ~Copyable>(
-        in context: Context? = nil,
-        scope: (any Sendable)? = nil,
-        _ body: @Sendable (borrowing Context) throws -> R,
-    ) async throws -> R {
-        try await enqueue(generation: nil, in: context, scope: scope, body)
-    }
-
-    /// Runs asynchronous Swift work with a context bound to the current generation.
-    /// Each asynchronous context operation takes its own turn in the session queue
-    /// and inherits the supplied scope. Other operations, including reset, can run
-    /// while the Swift body is suspended between context operations.
-    nonisolated func enqueue<R: Sendable & ~Copyable>(
-        in parent: Context? = nil,
-        scope: (any Sendable)? = nil,
-        _ body: @Sendable (borrowing Context) async throws -> R,
-    ) async throws -> R {
-        let context = try await enqueue(in: parent, scope: scope) { $0.queued(scope: scope) }
-        return try await body(context)
-    }
 }
 
 extension Session {
-    nonisolated func enqueue<R: Sendable & ~Copyable>(
-        generation: Reference.Store?,
-        in context: Context? = nil,
-        scope: (any Sendable)? = nil,
-        _ body: @Sendable (borrowing Context) throws -> R,
-    ) async throws -> R {
-        let result = try await withExecution(in: context, scope: scope) { session, execution in
-            try session
-                .withInterpreter(execution: execution, generation: generation) { interpreter in
-                    Session.Transfer(try interpreter.withContext(body, execution: execution))
-                }
-        }
-        return result.take()
-    }
-
     nonisolated func run(
         _ source: Interpreter.Source,
         in context: Context? = nil,
         scope: (any Sendable)?,
         filename: String?,
-        timeout: Duration?,
         recordingHistory: Bool = true,
         reservation: Reservation? = nil,
         redirecting redirects: [Stream: FilePath],
@@ -147,34 +95,34 @@ extension Session {
         committing: (@Sendable (Commit) async throws -> Void)? = nil,
     ) async throws -> Execution {
         let reservedNumber = try claim(reservation, for: source, recordingHistory: recordingHistory)
+        let number = Mutex<Int?>(reservedNumber)
 
         let settlement = committing.map(Self.publicationSettlement)
-        let number = Mutex<Int?>(reservedNumber)
         return try await withExecution(
             in: context,
-            timeout: timeout,
             scope: scope,
             output: output,
-            onInterruption: { interruption, result in
-                Self.interruptedExecution(interruption, result, number: number.withLock { $0 })
+            onInterruption: { result in
+                Self.interruptedExecution(result, number: number.withLock { $0 })
             },
             settling: settlement,
-        ) { session, execution in
-            let redirects = try redirects.mapValues(Runtime.Path.init)
-            try await session.recordInput(
-                source,
-                enabled: recordingHistory,
-                redirecting: redirects,
-                number: number,
-            )
-            return try session.evaluate(
-                source,
-                filename: filename,
-                number: number.withLock { $0 },
-                redirecting: redirects,
-                execution: execution,
-            )
-        }
+            { session, execution in
+                let redirects = try redirects.mapValues(Runtime.Path.init)
+                try await session.recordInput(
+                    source,
+                    enabled: recordingHistory,
+                    redirecting: redirects,
+                    number: number,
+                )
+                return try session.evaluate(
+                    source,
+                    filename: filename,
+                    number: number.withLock { $0 },
+                    redirecting: redirects,
+                    execution: execution,
+                )
+            },
+        )
     }
 
     private nonisolated func claim(
@@ -186,7 +134,7 @@ extension Session {
             return nil
         }
         guard recordingHistory, case .interactive = source, let history else {
-            throw Runtime.Failure("A reservation requires recorded interactive input.")
+            throw Failure("A reservation requires recorded interactive input.")
         }
         return try reservation.claim(in: history)
     }
@@ -209,8 +157,10 @@ extension Session {
                 )
                 return Execution(output: captured, end: .finished, number: number)
             }
-        } catch let error as ExecutionError {
-            throw ExecutionError(traceback: error.traceback, output: error.output, number: number)
+        } catch var failure as Failure where failure.output != nil {
+            // Implicit startup can fail before the interactive block reaches the interpreter.
+            failure.number = number
+            throw failure
         }
     }
 
@@ -224,8 +174,7 @@ extension Session {
             return
         }
 
-        let destination = redirects[.source]
-        try Self.validateSourceDestination(in: redirects)
+        let destination = try Self.sourceDestination(in: redirects)
 
         let reserved = number.withLock { $0 }
         let next = try reserved ?? history.reserveNumber()
@@ -234,17 +183,20 @@ extension Session {
         try await history.save(source, number: next, destination: destination)
     }
 
-    private static func validateSourceDestination(in redirects: [Stream: Runtime.Path]) throws {
+    private static func sourceDestination(
+        in redirects: [Stream: Runtime.Path],
+    ) throws -> Runtime.Path? {
         guard let destination = redirects[.source] else {
-            return
+            return nil
         }
         let sourcePath = destination.file.lexicallyNormalized()
         let hasConflictingRedirect = redirects.contains { stream, path in
             stream != .source && path.file.lexicallyNormalized() == sourcePath
         }
         if hasConflictingRedirect {
-            throw Runtime.Failure("A source history file must be separate from standard streams.")
+            throw Failure("A source history file must be separate from standard streams.")
         }
+        return destination
     }
 }
 
@@ -253,43 +205,69 @@ extension Session {
 private extension Session {
     @Sendable
     static func interruptedExecution(
-        _ interruption: Control.Interruption,
         _ result: Swift::Result<Execution, any Swift::Error>,
         number: Int?,
     ) -> Execution {
         let captured: Output = switch result {
         case let .success(execution):
             execution.output
-        case let .failure(error as ExecutionError):
-            error.output
+        case let .failure(failure as Failure):
+            failure.output ?? .empty
         case .failure:
             .empty
         }
 
-        let end: Execution.End = switch interruption {
-        case .stopped:
-            .stopped
-        case .timedOut:
-            .timedOut
-        }
-        return Execution(output: captured, end: end, number: number)
+        return Execution(output: captured, end: .stopped, number: number)
     }
 
     static func publicationSettlement(
         committing: @escaping @Sendable (Commit) async throws -> Void,
     ) -> Control.Settlement<Execution> {
         { _, control, result in
+            guard case .success = result else {
+                return result
+            }
+
             do {
-                _ = try result.get()
                 try control.checkInterruption()
 
-                let commit = Commit(checking: control.finishCheckingInterruption)
-                try await committing(commit)
+                try await Commit.withPublication(using: control, committing)
                 try control.finishCheckingInterruption()
                 return result
             } catch {
-                return control.interruption == nil ? .failure(error) : result
+                return control.isInterrupted ? result : .failure(error)
             }
+        }
+    }
+}
+
+// MARK: - Session.Commit
+
+public extension Session {
+    struct Commit: Sendable {
+        private let sealExecution: @Sendable () throws -> Void
+
+        /// Seals the execution for publication. Throws if cancelled or used after publication.
+        public func seal() throws {
+            try sealExecution()
+        }
+
+        fileprivate static func withPublication(
+            using control: Control,
+            _ body: @Sendable (Commit) async throws -> Void,
+        ) async throws {
+            // All copies share the same validity window, including copies retained by the host.
+            let current = Mutex<Control?>(control)
+            let commit = Commit {
+                try current.withLock { active in
+                    guard let active else {
+                        throw Failure.closed
+                    }
+                    try active.finishCheckingInterruption()
+                }
+            }
+            defer { current.withLock { $0 = nil } }
+            try await body(commit)
         }
     }
 }

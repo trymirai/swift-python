@@ -26,7 +26,7 @@ public struct Stubs: Sendable {
     public func write(to directory: String) async throws {
         let destination = try Runtime.Path(directory).file.lexicallyNormalized()
         guard destination.lastComponent != nil else {
-            throw Runtime.Failure("The stubs directory cannot be the filesystem root.")
+            throw Failure("The stubs directory cannot be the filesystem root.")
         }
 
         let definitions = try Module.Catalog.resolve(modules)
@@ -41,7 +41,9 @@ public struct Stubs: Sendable {
         let files = FileSystem.shared
         _ = try await files.removeItem(at: destination)
         try await files.createDirectory(at: destination, withIntermediateDirectories: true)
-        for (name, source) in sources.sorted(by: { $0.key < $1.key }) {
+
+        let sorted = sources.sorted { left, right in left.key < right.key }
+        for (name, source) in sorted {
             try Task.checkCancellation()
             let path = destination.appending(name)
             try await files.createDirectory(

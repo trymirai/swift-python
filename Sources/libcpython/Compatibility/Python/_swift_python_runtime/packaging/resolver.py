@@ -14,9 +14,9 @@ from packaging.version import Version
 from resolvelib import AbstractProvider, BaseReporter, ResolutionImpossible, Resolver
 
 from .candidate import Candidate, Distribution, Wheel
-from .configuration import ABI, MARKER_ENVIRONMENT, Configuration, supports_python
+from .configuration import ABI, Configuration, supports_python
 from .paths import walk_files
-from .requirements import _requirements
+from .requirements import parse_requirements
 from .wheels import WheelCache
 
 
@@ -25,23 +25,31 @@ def fingerprint(request: dict, configuration: Configuration) -> str:
 
 
 def prepare(request: dict, configuration: Configuration) -> dict:
-    overrides, pinned = _select_overrides(request, configuration.base)
-    requirements = request["requirements"] + request["local"]
-    fingerprint = _resolution_fingerprint(requirements, configuration, overrides)
-    if request.get("fingerprint") == fingerprint and not request["update"]:
+    requested = request["requirements"]
+    local = request["local"]
+    local_roots = parse_requirements(local, configuration.markers)
+    overrides, pinned = _select_overrides(request, configuration.base, local_roots)
+
+    signature = _resolution_fingerprint(requested + local, configuration, overrides)
+    if request.get("fingerprint") == signature and not request["update"]:
         return {"status": "unchanged"}
 
-    roots = _requirements(requirements + list(configuration.base))
+    roots = [
+        *parse_requirements(requested, configuration.markers),
+        *local_roots,
+        *parse_requirements(list(configuration.base), configuration.markers),
+    ]
     base = {name: package for name, package in configuration.base.items() if name not in overrides}
     installed = request["installed"]
     provider = Provider(replace(configuration, base=base), installed, request["update"], pinned)
+
     wheels = _resolve_wheels(provider, roots)
     if not request["replace_files"] and _changes_installed_wheels(wheels, installed):
         return {"status": "requires_reset"}
 
     distributions = _prepare_distributions(provider.wheels, wheels)
     _check_base_collisions(distributions, base)
-    return {"status": "resolved", "fingerprint": fingerprint, "distributions": distributions}
+    return {"status": "resolved", "fingerprint": signature, "distributions": distributions}
 
 
 def _has_exact_pin(version: Version, requirements: list[Requirement]) -> bool:
@@ -54,7 +62,11 @@ def _has_exact_pin(version: Version, requirements: list[Requirement]) -> bool:
     )
 
 
-def _dependencies_for_extras(values: list[str], extras: frozenset[str]) -> list[Requirement]:
+def _dependencies_for_extras(
+    values: list[str],
+    extras: frozenset[str],
+    markers: dict,
+) -> list[Requirement]:
     dependencies = []
     extras = extras | {""}
 
@@ -64,7 +76,7 @@ def _dependencies_for_extras(values: list[str], extras: frozenset[str]) -> list[
             raise ValueError(f"Source dependency is unsupported: {value}")
 
         if requirement.marker is None or any(
-            requirement.marker.evaluate({**MARKER_ENVIRONMENT, "extra": extra}) for extra in extras
+            requirement.marker.evaluate({**markers, "extra": extra}) for extra in extras
         ):
             # The resolver receives dependencies after evaluating the parent's markers.
             requirement.marker = None
@@ -75,7 +87,11 @@ def _dependencies_for_extras(values: list[str], extras: frozenset[str]) -> list[
 
 class Provider(AbstractProvider):
     def __init__(
-        self, configuration: Configuration, installed: dict, update: bool, pinned: set[str]
+        self,
+        configuration: Configuration,
+        installed: dict,
+        update: bool,
+        pinned: set[str],
     ) -> None:
         self.configuration = configuration
         self.wheels = WheelCache(configuration)
@@ -109,11 +125,20 @@ class Provider(AbstractProvider):
 
     def find_matches(self, identifier: str, requirements, incompatibilities):
         # The resolver can advance before it starts consuming the returned generator.
-        requirements = list(requirements[identifier])
-        extras = frozenset(extra for requirement in requirements for extra in requirement.extras)
+        constraints = list(requirements[identifier])
+        extras = frozenset(extra for requirement in constraints for extra in requirement.extras)
         excluded = set(incompatibilities[identifier])
 
-        return self._matching_candidates(identifier, extras, requirements, excluded)
+        def matches():
+            for candidate in self._candidates(identifier, extras, constraints):
+                if candidate in excluded:
+                    continue
+
+                excluded.add(candidate)
+                if all(self.is_satisfied_by(requirement, candidate) for requirement in constraints):
+                    yield candidate
+
+        return matches()
 
     def get_dependencies(self, candidate: Candidate) -> list[Requirement]:
         distribution = candidate.distribution
@@ -127,7 +152,7 @@ class Provider(AbstractProvider):
         else:
             values = self.configuration.base[candidate.name]["requires"]
 
-        return _dependencies_for_extras(values, candidate.extras)
+        return _dependencies_for_extras(values, candidate.extras, self.configuration.markers)
 
     def _index_files(self, name: str) -> list[dict]:
         cached = self._index_cache.get(name)
@@ -184,7 +209,10 @@ class Provider(AbstractProvider):
             yield Wheel(name, version, filename, url, digest)
 
     def _candidates(
-        self, name: str, extras: frozenset[str], requirements: list[Requirement]
+        self,
+        name: str,
+        extras: frozenset[str],
+        requirements: list[Requirement],
     ) -> Iterator[Candidate]:
         if name in self.configuration.base:
             version = Version(self.configuration.base[name]["version"])
@@ -203,21 +231,6 @@ class Provider(AbstractProvider):
             reverse=True,
         )
         yield from (Candidate(wheel, extras) for wheel in wheels)
-
-    def _matching_candidates(
-        self,
-        name: str,
-        extras: frozenset[str],
-        requirements: list[Requirement],
-        excluded: set[Candidate],
-    ) -> Iterator[Candidate]:
-        for candidate in self._candidates(name, extras, requirements):
-            if candidate in excluded:
-                continue
-
-            excluded.add(candidate)
-            if all(self.is_satisfied_by(requirement, candidate) for requirement in requirements):
-                yield candidate
 
     def _metadata(self, wheel: Wheel):
         metadata = self._wheel_metadata.get(wheel.digest)
@@ -258,31 +271,35 @@ def _resolve_wheels(provider: Provider, roots: list[Requirement]) -> dict[str, W
 
 
 def _resolution_fingerprint(
-    requirements: list[str], configuration: Configuration, overrides: set[str]
+    requirements: list[str],
+    configuration: Configuration,
+    overrides: set[str],
 ) -> str:
     signature = {
         "requirements": requirements,
         "base": configuration.base,
         "overrides": sorted(overrides),
         "abi": ABI,
+        "markers": configuration.markers,
         "index": configuration.index,
     }
     return hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
 
 
-def _select_overrides(request: dict, base: dict) -> tuple[set[str], set[str]]:
+def _select_overrides(
+    request: dict, base: dict, local_roots: list[Requirement]
+) -> tuple[set[str], set[str]]:
     def excludes_version(requirement: Requirement, record: dict | None) -> bool:
         return bool(record) and not requirement.specifier.contains(
             record["version"], prereleases=None
         )
 
-    local = request["local"]
     installed = request["installed"]
     overrides = set(installed).difference(request["removed"])
 
     # An existing local override stays selected until an explicit change replaces it.
-    pinned = set() if request["update"] else set(overrides)
-    for requirement in _requirements(local):
+    pinned = set() if request["update"] else overrides.copy()
+    for requirement in local_roots:
         name = canonicalize_name(requirement.name)
         if excludes_version(requirement, installed.get(name)):
             pinned.discard(name)

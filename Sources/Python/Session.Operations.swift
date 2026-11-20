@@ -17,12 +17,13 @@ extension Session {
             _ body: () async throws -> Result,
         ) async throws -> Result {
             try Task.checkCancellation()
+
             switch admission {
             case .queued:
                 try await waitForTurn()
             case .immediate:
                 guard state.withLock({ $0.reserve() }) else {
-                    throw Session.Error.busy
+                    throw Failure.busy
                 }
             }
             defer { release() }
@@ -39,29 +40,27 @@ extension Session {
                 }
             }
             defer { release() }
+
             await body()
         }
 
         private func waitForTurn() async throws {
             let ticket = Ticket()
 
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { continuation in
-                    let result = state.withLock { state -> Swift::Result<Void, any Swift::Error>? in
-                        // Check under the queue lock in case cancellation ran before enqueueing.
-                        if Task.isCancelled {
-                            return .failure(CancellationError())
+            try await withTaskCancellationHandler(
+                operation: {
+                    try await withCheckedThrowingContinuation { continuation in
+                        let result = state.withLock { $0.enqueue(ticket, continuation) }
+                        if let result {
+                            continuation.resume(with: result)
                         }
-                        return state.enqueue(.operation(ticket, continuation)) ? .success(()) : nil
                     }
-                    if let result {
-                        continuation.resume(with: result)
-                    }
-                }
-            } onCancel: {
-                let continuation = state.withLock { $0.removeOperation(ticket) }
-                continuation?.resume(throwing: CancellationError())
-            }
+                },
+                onCancel: {
+                    let continuation = state.withLock { $0.removeOperation(ticket) }
+                    continuation?.resume(throwing: CancellationError())
+                },
+            )
         }
 
         private func release() {
@@ -134,6 +133,17 @@ private extension Session.Operations {
             return false
         }
 
+        mutating func enqueue(
+            _ ticket: Ticket,
+            _ continuation: CheckedContinuation<Void, any Swift::Error>,
+        ) -> Swift::Result<Void, any Swift::Error>? {
+            // Cancellation may have already run its removal handler before we acquired the lock.
+            if Task.isCancelled {
+                return .failure(CancellationError())
+            }
+            return enqueue(.operation(ticket, continuation)) ? .success(()) : nil
+        }
+
         mutating func removeOperation(
             _ ticket: Ticket,
         ) -> CheckedContinuation<Void, any Swift::Error>? {
@@ -143,6 +153,7 @@ private extension Session.Operations {
             else {
                 return nil
             }
+
             return continuation
         }
 
@@ -151,6 +162,7 @@ private extension Session.Operations {
                 waiters = nil
                 return nil
             }
+
             return waiters?.removeFirst()
         }
     }

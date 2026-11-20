@@ -26,6 +26,7 @@ extension Environment {
         guard needsPreparation else {
             return
         }
+
         try await Self.withPackageOperation { execution in
             _ = try await apply(.resolve, canReplacePackages: true, execution: execution)
         }
@@ -34,7 +35,7 @@ extension Environment {
     static func withPackageOperation<Result>(
         _ operation: (Session.Control) async throws -> Result,
     ) async throws -> Result {
-        let execution = try Session.Control(timeout: nil)
+        let execution = try Session.Control()
         return try await execution.withCancellation {
             defer { _ = execution.finish() }
             let result = try await operation(execution)
@@ -55,11 +56,7 @@ extension Environment {
         let (service, configuration) = try await open()
         let previous = manifest ?? Manifest(abi: configuration.abi)
 
-        let project: [String] = if let projectDirectory {
-            try await service.projectRequirements(at: projectDirectory, execution: execution)
-        } else {
-            []
-        }
+        let requirements = try await resolutionRequirements(using: service, execution: execution)
         let local = try await localRequirements(
             after: change,
             manifest: previous,
@@ -69,7 +66,7 @@ extension Environment {
         )
 
         let request = Service.Request.prepare(
-            requirements: project + requirements,
+            requirements: requirements,
             base: configuration.base,
 
             local: local.ordered,
@@ -94,17 +91,34 @@ extension Environment {
         }
 
         let next = previous.updating(local: local.byName, resolution: resolution)
-        if next != previous {
-            let replacesFiles = !next.hasSameWheels(as: previous)
-            try await save(
-                next,
-                replacingFiles: replacesFiles ? resolution : nil,
-                using: service,
-                configuration: configuration,
-                execution: execution,
-            )
+        guard next != previous else {
+            return .applied
         }
+
+        let replacesFiles = !next.hasSameWheels(as: previous)
+        try await save(
+            next,
+            replacingFiles: replacesFiles ? resolution : nil,
+            using: service,
+            configuration: configuration,
+            execution: execution,
+        )
         return .applied
+    }
+
+    private func resolutionRequirements(
+        using service: Service,
+        execution: Session.Control,
+    ) async throws -> [String] {
+        guard let projectDirectory else {
+            return requirements
+        }
+
+        let project = try await service.projectRequirements(
+            at: projectDirectory,
+            execution: execution,
+        )
+        return project + requirements
     }
 
     private func localRequirements(
@@ -116,22 +130,7 @@ extension Environment {
     ) async throws -> (byName: [String: String], ordered: [String], removed: [String]) {
         var byName = manifest.local
         var order = byName.keys.sorted()
-
         var removed = [String]()
-
-        func remove(_ name: String) throws {
-            let isSupplied = configuration.base[name] != nil
-            let overridesBase = isSupplied && manifest.packages[name] != nil
-            guard byName.removeValue(forKey: name) != nil || overridesBase else {
-                let message = if isSupplied {
-                    "Package '\(name)' belongs to a supplied source and cannot be uninstalled locally"
-                } else {
-                    "Package '\(name)' is required by the project or another package"
-                }
-                throw Exception(name: "ValueError", message: message)
-            }
-            removed.append(name)
-        }
 
         switch change {
         case let .install(requirements):
@@ -145,18 +144,38 @@ extension Environment {
                 }
             }
         case let .uninstall(packages):
-            let names = try await service.request(
+            removed = try await service.request(
                 .names(packages),
                 execution: execution,
             )
-            for name in names {
-                try remove(name)
-            }
+            byName = try manifest.removingLocalRequirements(removed, base: configuration.base)
         case .resolve, .update:
             break
         }
 
         // Preserve the order of newly requested packages after the saved names.
         return (byName, order.compactMap { byName[$0] }, removed)
+    }
+}
+
+private extension Environment.Manifest {
+    func removingLocalRequirements(
+        _ names: [String],
+        base: [String: Environment.BasePackage],
+    ) throws -> [String: String] {
+        var remaining = local
+        for name in names {
+            let supplied = base[name] != nil
+            let overridesBase = supplied && packages[name] != nil
+            guard remaining.removeValue(forKey: name) != nil || overridesBase else {
+                let message = if supplied {
+                    "Package '\(name)' belongs to a supplied source and cannot be uninstalled locally"
+                } else {
+                    "Package '\(name)' is required by the project or another package"
+                }
+                throw Failure(.valueError, message: message)
+            }
+        }
+        return remaining
     }
 }

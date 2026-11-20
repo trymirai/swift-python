@@ -39,7 +39,7 @@ public extension Session {
             in context: Context? = nil,
         ) async throws -> Change {
             guard !requirements.isEmpty else {
-                throw Runtime.Failure("Expected package requirements.")
+                throw Failure("Expected package requirements.")
             }
             return try await apply(.install(requirements), in: context)
         }
@@ -49,7 +49,7 @@ public extension Session {
             in context: Context? = nil,
         ) async throws -> Change {
             guard !names.isEmpty else {
-                throw Runtime.Failure("Expected local distribution names.")
+                throw Failure("Expected local distribution names.")
             }
             return try await apply(.uninstall(names), in: context)
         }
@@ -60,7 +60,7 @@ public extension Session {
         ) async throws -> Change {
             try await session.withExecution(in: context) { session, execution in
                 guard let environment = session.environment else {
-                    throw Session.Error.closed
+                    throw Failure.closed
                 }
                 return try await environment.apply(
                     change,

@@ -14,8 +14,8 @@ extension PThread {
         @unsafe
         private let task: UnsafeCurrentTask?
 
+        var invocation: Context.Invocation?
         private var callbackExecutor: Interpreter.CallbackExecutor?
-
         var constructedWrappers: [Reference] = []
 
         var streams: Session.Stream.Descriptors?
@@ -29,8 +29,9 @@ extension PThread {
         ) {
             self.storage = storage
             self.execution = execution
-            self.streams = streams
             unsafe self.task = task
+
+            self.streams = streams
         }
 
         static var current: Scope? {
@@ -50,16 +51,21 @@ extension PThread {
             if let callbackExecutor {
                 return callbackExecutor
             }
+
             let executor = try Interpreter.CallbackExecutor()
             callbackExecutor = executor
             return executor
         }
 
         // Register only while attached: the GIL keeps the thread-state pointers alive.
-        func withEvaluation<Result: ~Copyable>(_ body: () throws -> Result) rethrows -> Result {
+        func withEvaluation<Result: ~Copyable>(
+            inheritingOperation: Bool = false,
+            _ body: () throws -> Result,
+        ) throws -> Result {
             guard let execution else {
                 return try body()
             }
+
             execution.beginEvaluation(in: storage.key)
             defer { execution.endEvaluation() }
 
@@ -67,13 +73,16 @@ extension PThread {
                 context: Unmanaged.passUnretained(execution).toOpaque(),
                 interrupt: { context in unsafe Object.interrupt(context) },
             )
-            var result: Result?
-            try withUnsafeMutablePointer(to: &evaluation) { pointer in
+            return try withUnsafeMutablePointer(to: &evaluation) { pointer in
                 let previous = unsafe CPython_SetEvaluation(pointer)
                 defer { _ = unsafe CPython_SetEvaluation(previous) }
-                result = try body()
+
+                return try storage.withOperationContext(
+                    execution,
+                    forCallback: inheritingOperation,
+                    body,
+                )
             }
-            return result!
         }
 
         static func run<Result: ~Copyable>(
@@ -95,6 +104,7 @@ extension PThread {
                     _ = unsafe CPython_SetScope(previous)
                     withExtendedLifetime(scope) {}
                 }
+
                 result = try body(scope)
             }
             return result!

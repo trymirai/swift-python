@@ -3,6 +3,7 @@
 import contextlib
 import io
 import sys
+from _swift_python import has_operation_access
 
 # Borrow host-opened descriptors through the original io.open even if user code replaces it.
 _open = io.open
@@ -22,14 +23,23 @@ class _MemoryOutput(io.RawIOBase):
             return len(view)
 
 
+class _DiscardedOutput(io.RawIOBase):
+    def writable(self):
+        return True
+
+    def write(self, data):
+        return memoryview(data).nbytes
+
+
 class _Output(io.TextIOWrapper):
-    def __init__(self, descriptor: int | None, control=None, stream: str | None = None) -> None:
-        self.memory = _MemoryOutput() if descriptor is None else None
-        raw = (
-            self.memory
-            if self.memory is not None
-            else _open(descriptor, "ab", buffering=0, closefd=False)
-        )
+    def __init__(self, descriptor: int | None, control, stream: str, *, collect: bool) -> None:
+        self.memory = None
+        if descriptor is not None:
+            raw = _open(descriptor, "ab", buffering=0, closefd=False)
+        elif collect:
+            raw = self.memory = _MemoryOutput()
+        else:
+            raw = _DiscardedOutput()
 
         try:
             super().__init__(
@@ -82,17 +92,17 @@ class _Stream(io.TextIOBase):
         return True
 
     def write(self, text: str) -> int:
-        if self.target is None:
+        if self.target is None or not has_operation_access():
             return len(text)
 
         return self.target.write(text)
 
     def flush(self) -> None:
-        if self.target is not None and not self.target.closed:
+        if has_operation_access() and self.target is not None and not self.target.closed:
             self.target.flush()
 
     def close(self) -> None:
-        if self.target is not None:
+        if has_operation_access() and self.target is not None:
             self.target.close()
 
     def _attached_target(self):
@@ -102,10 +112,16 @@ class _Stream(io.TextIOBase):
         return self.target
 
     def fileno(self) -> int:
+        if not has_operation_access():
+            raise io.UnsupportedOperation("The execution stream is closed")
+
         return self._attached_target().fileno()
 
     @property
     def buffer(self) -> io.BufferedIOBase:
+        if not has_operation_access():
+            return _DiscardedOutput()
+
         return self._attached_target().buffer
 
 
@@ -120,6 +136,35 @@ def _input_stream(descriptor: int | None) -> io.TextIOBase:
     return _open(descriptor, "r", encoding="utf-8", closefd=False)
 
 
+class _Input:
+    def __init__(self, stream):
+        self._stream = stream
+        self._empty = None
+
+    def __getattr__(self, name):
+        if has_operation_access():
+            return getattr(self._stream, name)
+
+        if self._empty is None or self._empty.closed:
+            self._empty = _input_stream(None)
+        return getattr(self._empty, name)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
 def install() -> None:
     sys.stdout = sys.__stdout__ = _stdout
     sys.stderr = sys.__stderr__ = _stderr
@@ -127,27 +172,27 @@ def install() -> None:
 
 
 @contextlib.contextmanager
-def capture(control, configuration: dict[str, int]):
+def capture(control, configuration: dict[str, int], *, collect: bool = True):
     callback = control if control("capture") else None
 
     with contextlib.ExitStack() as stack:
-        stdout = stack.enter_context(_Output(configuration.get("stdout"), callback, "stdout"))
-        stderr = stack.enter_context(_Output(configuration.get("stderr"), callback, "stderr"))
-        stdin = stack.enter_context(_input_stream(configuration.get("stdin")))
 
-        bindings = (
-            (sys, "stdin", stdin),
-            (sys, "__stdin__", stdin),
-            (sys, "stdout", _stdout),
-            (sys, "__stdout__", _stdout),
-            (sys, "stderr", _stderr),
-            (sys, "__stderr__", _stderr),
-            (_stdout, "target", stdout),
-            (_stderr, "target", stderr),
-        )
-        for owner, attribute, value in bindings:
+        def output(name):
+            stream = _Output(configuration.get(name), callback, name, collect=collect)
+            return stack.enter_context(stream)
+
+        def bind(owner, attribute, value):
             previous = getattr(owner, attribute)
             setattr(owner, attribute, value)
             stack.callback(setattr, owner, attribute, previous)
 
+        stdout, stderr = output("stdout"), output("stderr")
+        stdin = _Input(stack.enter_context(_input_stream(configuration.get("stdin"))))
+
+        for name, stream in (("stdin", stdin), ("stdout", _stdout), ("stderr", _stderr)):
+            bind(sys, name, stream)
+            bind(sys, f"__{name}__", stream)
+
+        bind(_stdout, "target", stdout)
+        bind(_stderr, "target", stderr)
         yield stdout, stderr

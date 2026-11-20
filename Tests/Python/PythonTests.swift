@@ -83,10 +83,10 @@ func bundledNativeModulesAreUsable() async throws {
     try thread.withAttached { attachment in
         try Python::Object.installImporter(in: attachment)
         let builtins = try Python::Object.import(module: "builtins", in: attachment)
-        let run = try builtins.attribute("exec")
+        let run = try builtins.value(forAttribute: "exec")
         let code = try Python::Object(encoding: source, in: attachment)
         let namespace = try Python::Object(encoding: [String: String](), in: attachment)
-        _ = try run.call(code, namespace)
+        _ = try run(code, namespace)
     }
 }
 
@@ -96,15 +96,18 @@ func interactiveSessions() async throws {
     let first = try await runtime.session(directory: "/tmp")
     let second = try await runtime.session()
 
-    async let initial = first.evaluate("""
-    import sys
-    counter = 40
-    assert sys.path[0] == "/tmp"
-    def fail():
-        raise ValueError("from an earlier block")
-    print("diagnostic", file=sys.stderr)
-    counter + 2
-    """, filename: "<initial>")
+    async let initial = first.evaluate(
+        """
+        import sys
+        counter = 40
+        assert sys.path[0] == "/tmp"
+        def fail():
+            raise ValueError("from an earlier block")
+        print("diagnostic", file=sys.stderr)
+        counter + 2
+        """,
+        filename: "<initial>",
+    )
     async let other = second.evaluate("""
     import asyncio
     assert "counter" not in globals()
@@ -127,24 +130,24 @@ func interactiveSessions() async throws {
     #expect(try await second.evaluate("_").output.stdout == "7\n")
 
     await first.close()
-    await #expect(throws: Python::Session.Error.self) {
+    await #expect(throws: Python::Failure.self) {
         try await first.evaluate("1")
     }
     await second.close()
 }
 
 private func checkInteractiveErrors(in session: Python::Session) async throws {
-    let error = try await #require(throws: Python::ExecutionError.self) {
+    let error = try await #require(throws: Python::Failure.self) {
         try await session.evaluate("print('before'); fail()", filename: "<failure>")
     }
-    #expect(error.output.stdout == "before\n")
-    #expect(error.output.stderr == error.traceback)
-    #expect(error.traceback.contains("<failure>"))
-    #expect(error.traceback.contains("<initial>"))
-    #expect(error.traceback.contains("raise ValueError"))
+    #expect(error.output?.stdout == "before\n")
+    #expect(error.output?.stderr == error.traceback)
+    #expect(error.traceback?.contains("<failure>") == true)
+    #expect(error.traceback?.contains("<initial>") == true)
+    #expect(error.traceback?.contains("raise ValueError") == true)
 
     for source in ["raise SystemExit(1)", "raise KeyboardInterrupt()"] {
-        await #expect(throws: Python::ExecutionError.self) {
+        await #expect(throws: Python::Failure.self) {
             try await session.evaluate(source)
         }
     }
@@ -173,11 +176,11 @@ func sourceInitialization() async throws {
 
     let failed = try await runtime.session(.source("raise ValueError('initialization failed')"))
     defer { await failed.close() }
-    let error = try await #require(throws: Python::ExecutionError.self) {
+    let error = try await #require(throws: Python::Failure.self) {
         try await failed.initialize()
     }
-    #expect(error.traceback.contains("ValueError: initialization failed"))
-    #expect(error.output.stderr == error.traceback)
+    #expect(error.traceback?.contains("ValueError: initialization failed") == true)
+    #expect(error.output?.stderr == error.traceback)
 }
 
 @Test
@@ -198,26 +201,120 @@ func temporaryFixturePathsResolveSymbolicParents() async throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
-func timeoutRemainsActiveWhenPythonReplacesItsTrace() async throws {
+func cancellationInterruptsPythonAfterItReplacesItsTrace() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
     try await withSession(session) { session in
         try await session.initialize()
-        let execution = try await session.evaluate("""
-        import sys, time
-        sys.settrace(None)
-        print("trace replaced")
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            pass
-        print("continued past timeout")
-        """, timeout: .seconds(1))
-        #expect(execution.end == .timedOut)
+        let execution = try await runUntilInterrupted(
+            """
+            import sys, time
+            sys.settrace(None)
+            print("trace replaced")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                pass
+            print("continued past timeout")
+            """,
+            in: session,
+            afterOutput: "trace replaced",
+            delay: .seconds(1),
+        )
+        #expect(execution.end == .stopped)
         #expect(execution.output.stdout == "trace replaced\n")
     }
 }
 
 // MARK: Test support
+
+// The timer cancels the operation and the group waits for its cleanup and result.
+func withHostDeadline<Result: Sendable>(
+    _ duration: Duration,
+    _ operation: @escaping @Sendable () async throws -> Result,
+) async throws -> Result {
+    try await withThrowingTaskGroup(of: Result?.self) { group in
+        group.addTask { .some(try await operation()) }
+        group.addTask {
+            try? await Task.sleep(for: duration)
+            return nil
+        }
+        defer { group.cancelAll() }
+
+        for try await result in group {
+            if let result {
+                return result
+            }
+            group.cancelAll()
+        }
+        preconditionFailure("The operation must finish before the group exits.")
+    }
+}
+
+// Synchronize cancellation with the blocking call so startup time does not affect the test.
+func runUntilInterrupted(
+    whenReady ready: (stream: AsyncStream<Void>, continuation: AsyncStream<Void>.Continuation),
+    signals: Int = 1,
+    delay: Duration? = nil,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ operation: @escaping @Sendable () async throws -> Python::Execution,
+) async throws -> Python::Execution {
+    try await withThrowingTaskGroup(of: Python::Execution.self) { group in
+        group.addTask {
+            defer { ready.continuation.finish() }
+            return try await operation()
+        }
+
+        var entries = ready.stream.makeAsyncIterator()
+        for _ in 0 ..< signals {
+            guard await entries.next() != nil else {
+                let result = try await #require(group.next(), sourceLocation: sourceLocation)
+                Issue.record(
+                    "Execution returned before signalling readiness for interruption.",
+                    sourceLocation: sourceLocation,
+                )
+                return result
+            }
+        }
+        if let delay {
+            try await Task.sleep(for: delay)
+        }
+        group.cancelAll()
+        return try await #require(group.next(), sourceLocation: sourceLocation)
+    }
+}
+
+func runUntilInterrupted(
+    _ source: String,
+    in session: Python::Session,
+    afterOutput marker: String,
+    delay: Duration? = nil,
+    sourceLocation: SourceLocation = #_sourceLocation,
+) async throws -> Python::Execution {
+    let ready = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    return try await runUntilInterrupted(
+        whenReady: ready,
+        delay: delay,
+        sourceLocation: sourceLocation,
+    ) {
+        try await session.evaluate(source) { stream, text in
+            if stream == .stdout, text.contains(marker) {
+                ready.continuation.yield(())
+            }
+        }
+    }
+}
+
+extension Python::Session {
+    @discardableResult
+    nonisolated func requireFailure(
+        evaluating source: String,
+        sourceLocation: SourceLocation = #_sourceLocation,
+    ) async throws -> Python::Failure {
+        try await #require(throws: Python::Failure.self, sourceLocation: sourceLocation) {
+            try await evaluate(source)
+        }
+    }
+}
 
 func evaluateInFreshSession(
     _ source: String,
@@ -257,30 +354,34 @@ func nextSignal(from stream: AsyncStream<Void>) async -> Void? {
     return await iterator.next()
 }
 
-func expectPythonException(
-    _ name: String,
+@discardableResult
+func expectPythonFailure(
+    _ kind: Python::Failure.Kind,
     sourceLocation: SourceLocation = #_sourceLocation,
     _ operation: () throws -> Void,
-) throws {
+) throws -> Python::Failure {
     let exception = try #require(
-        throws: Python::Exception.self,
+        throws: Python::Failure.self,
         sourceLocation: sourceLocation,
     ) {
         try operation()
     }
-    #expect(exception.name == name, sourceLocation: sourceLocation)
+    #expect(exception.kind == kind, sourceLocation: sourceLocation)
+    return exception
 }
 
-func expectPythonException(
-    _ name: String,
+@discardableResult
+func expectPythonFailure(
+    _ kind: Python::Failure.Kind,
     sourceLocation: SourceLocation = #_sourceLocation,
     _ operation: () async throws -> Void,
-) async throws {
+) async throws -> Python::Failure {
     let exception = try await #require(
-        throws: Python::Exception.self,
+        throws: Python::Failure.self,
         sourceLocation: sourceLocation,
     ) {
         try await operation()
     }
-    #expect(exception.name == name, sourceLocation: sourceLocation)
+    #expect(exception.kind == kind, sourceLocation: sourceLocation)
+    return exception
 }

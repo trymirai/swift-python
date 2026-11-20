@@ -21,11 +21,11 @@ public extension Session {
 
         func claim(in history: History.Store) throws -> Int {
             guard self.history === history else {
-                throw Runtime.Failure("The reservation belongs to another Python session.")
+                throw Failure("The reservation belongs to another Python session.")
             }
             return try isConsumed.withLock { consumed in
                 guard !consumed else {
-                    throw Runtime.Failure("The execution reservation has already been used.")
+                    throw Failure("The execution reservation has already been used.")
                 }
                 consumed = true
                 return number
@@ -38,7 +38,7 @@ public extension Session {
     /// remain gaps. Reset preserves the counter and outstanding reservations.
     nonisolated func reserve() throws -> Reservation {
         guard let history else {
-            throw Runtime.Failure("Execution reservations require session history.")
+            throw Failure("Execution reservations require session history.")
         }
         return try Reservation(number: history.reserveNumber(), history: history)
     }
@@ -83,7 +83,7 @@ public extension Session.History {
 
         func validate() throws {
             if case let .last(count) = self, count <= 0 {
-                throw Runtime.Failure("A history entry limit must be positive.")
+                throw Failure("A history entry limit must be positive.")
             }
         }
     }

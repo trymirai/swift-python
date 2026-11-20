@@ -3,8 +3,6 @@
 import CompilerPluginSupport
 import PackageDescription
 
-private let appleRuntimePlatforms: [Platform] = [.macOS, .iOS, .macCatalyst]
-
 let package = Package(
     name: "swift-python",
     platforms: [
@@ -97,7 +95,7 @@ let package = Package(
                 .byName(name: "libcpython"),
                 .byName(name: "PythonMacros"),
             ],
-            swiftSettings: .default,
+            swiftSettings: .default + .lifetimes,
         ),
 
         .testTarget(
@@ -165,7 +163,7 @@ let package = Package(
                 .product(name: "SystemPackage", package: "swift-system"),
             ],
             path: "Tools/CPythonBuild",
-            swiftSettings: .default,
+            swiftSettings: .default + .lifetimes,
         ),
 
         // Supporting
@@ -448,20 +446,22 @@ private extension Target {
                 .define(
                     "__STDC_WANT_LIB_EXT1__",
                     to: "1",
-                    .when(platforms: appleRuntimePlatforms),
+                    .when(platforms: .supportedApplePlatforms),
                 ),
             ],
 
             linkerSettings: [
-                .linkedFramework("Security", .when(platforms: appleRuntimePlatforms)),
+                .linkedFramework("Security", .when(platforms: .supportedApplePlatforms)),
                 .linkedFramework("SystemConfiguration", .when(platforms: [.macOS])),
-                .linkedFramework("CoreFoundation", .when(platforms: appleRuntimePlatforms)),
+                .linkedFramework("CoreFoundation", .when(platforms: .supportedApplePlatforms)),
+                // CPython's platform.ios_ver() queries UIDevice through the Objective-C runtime.
+                .linkedFramework("UIKit", .when(platforms: [.iOS, .macCatalyst])),
 
                 .linkedLibrary("z"),
                 .linkedLibrary("bz2"),
 
                 .linkedLibrary("edit", .when(platforms: [.macOS])),
-                .linkedLibrary("iconv", .when(platforms: appleRuntimePlatforms)),
+                .linkedLibrary("iconv", .when(platforms: .supportedApplePlatforms)),
                 .linkedLibrary("ncurses", .when(platforms: [.macOS])),
                 .linkedLibrary("panel", .when(platforms: [.macOS])),
 
@@ -669,6 +669,7 @@ private extension Target {
                 .suppressAppleIntegerNarrowing,
 
                 .headerSearchPath("Compatibility"),
+                .headerSearchPath("Compatibility/Sockets"),
                 .headerSearchPath("src"),
                 .headerSearchPath("src/include"),
                 .headerSearchPath("src/providers/common/include"),
@@ -717,6 +718,9 @@ private extension Target {
             ],
             path: "Tests/libpythontestsupport",
             sources: ["src"],
+            cSettings: [
+                .define("SWIFT_PYTHON_BUNDLED_OPENSSL", .when(traits: ["OpenSSL"])),
+            ],
         )
     }
 }
@@ -777,9 +781,15 @@ private extension Target {
     }
 }
 
+private extension Array where Element == Platform {
+    static var supportedApplePlatforms: [Platform] {
+        [.macOS, .iOS, .macCatalyst]
+    }
+}
+
 private extension CSetting {
     static var suppressAppleIntegerNarrowing: Self {
-        .disableWarning("shorten-64-to-32", .when(platforms: appleRuntimePlatforms))
+        .disableWarning("shorten-64-to-32", .when(platforms: .supportedApplePlatforms))
     }
 }
 
@@ -788,10 +798,13 @@ private extension CSetting {
 private extension Array where Element == SwiftSetting {
     static var `default`: [SwiftSetting] {
         [
-            .enableExperimentalFeature("Lifetimes"),
             .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
             .strictMemorySafety(),
             .treatAllWarnings(as: .error),
         ]
+    }
+
+    static var lifetimes: [SwiftSetting] {
+        [.enableExperimentalFeature("Lifetimes")]
     }
 }

@@ -17,8 +17,8 @@ extension Float: Decodable {
         let value = try decoder.double()
         let converted = Float(value)
         guard !value.isFinite || converted.isFinite else {
-            throw Exception(
-                name: "OverflowError",
+            throw Failure(
+                .overflowError,
                 message: "Python float does not fit Float.",
             )
         }

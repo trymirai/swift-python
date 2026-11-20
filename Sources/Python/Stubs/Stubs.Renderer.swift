@@ -24,17 +24,19 @@ extension Stubs {
 
         func render(_ modules: [Module]) throws -> [String: String] {
             try Task.checkCancellation()
+
             let interpreter = try PThread()
             interpreter.storage.classRegistry = Interpreter.ClassRegistry(modules: modules)
+
             return try interpreter.withAttached { attachment in
                 try Object.installImporter(in: attachment)
                 let module = try Object.import(
                     module: "_swift_python_runtime.stubs",
                     in: attachment,
                 )
-                let generate = try module.attribute("generate")
+                let generate = try module(methodNamed: "generate")
                 let metadata = try Object(encoding: Module.Plan(modules).metadata, in: attachment)
-                return try generate.call(metadata).decode(as: [String: String].self)
+                return try generate(metadata).decode(as: [String: String].self)
             }
         }
     }

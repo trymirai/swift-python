@@ -44,7 +44,7 @@ private enum CallbackAccess {
         let created = try Python::DateTime(year: year, month: month, day: 1, in: python)
         let path = try Python::Path("reports/today.txt", in: python)
         guard try path.name == "today.txt", try created.day == 1, saved == year else {
-            throw Python::Exception(name: "ValueError", message: "Unexpected native value.")
+            throw Python::Failure(.valueError, message: "Unexpected native value.")
         }
         return try [year, month, counter.value]
     }
@@ -108,13 +108,13 @@ private enum CallbackAccess {
     static func expired(_ python: Python::Context) async throws -> Bool {
         let capture: EscapedCallback = try requireScope(python, message: "Missing escaped task.")
         guard let task = capture.task.withLock({ $0 }) else {
-            throw Python::Exception(name: "ValueError", message: "Missing escaped task.")
+            throw Python::Failure(.valueError, message: "Missing escaped task.")
         }
         capture.gate.continuation.finish()
         do {
             _ = try await task.value
             return false
-        } catch Python::Session.Error.closed {
+        } catch let error as Python::Failure where error.kind == .closed {
             return true
         }
     }
@@ -129,7 +129,7 @@ private enum CallbackAccess {
     static func nested(_ python: Python::Context) async throws -> Bool {
         let capture: EscapedCallback = try requireScope(python, message: "Missing nested session.")
         guard let other = capture.session else {
-            throw Python::Exception(name: "ValueError", message: "Missing nested session.")
+            throw Python::Failure(.valueError, message: "Missing nested session.")
         }
         _ = try await other.evaluate(
             "from callback_access import escape_sync; escape_sync()",
@@ -144,7 +144,7 @@ private enum CallbackAccess {
         message: String = "Missing test capture.",
     ) throws -> Value {
         guard let value = context.scope as? Value else {
-            throw Python::Exception(name: "ValueError", message: message)
+            throw Python::Failure(.valueError, message: message)
         }
         return value
     }
@@ -185,7 +185,7 @@ private struct AccessRunner {
 // MARK: - RetainedCallback
 
 private final class RetainedCallback: Sendable {
-    let state: Mutex<(Python::Context, Int)?> = .init(nil)
+    let state: Mutex<(context: Python::Context, descriptor: Int)?> = .init(nil)
 }
 
 // MARK: - EscapedCallback
@@ -196,8 +196,7 @@ private final class EscapedCallback: Sendable {
     let gate: (
         stream: AsyncStream<Void>,
         continuation: AsyncStream<Void>.Continuation,
-    ) = AsyncStream<Void>
-        .makeStream()
+    ) = AsyncStream<Void>.makeStream()
 
     let task: Mutex<Task<Int, any Swift::Error>?> = .init(nil)
 
@@ -240,12 +239,15 @@ func inheritedCallbackAccessExpiresWhenItsExportReturns() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [CallbackAccess.self])
     defer { await session.close() }
-    let result = try await session.evaluate("""
-    from callback_access import escape, expired
-    from datetime import datetime
-    await escape(datetime(2026, 11, 11))
-    assert await expired()
-    """, scope: capture)
+    let result = try await session.evaluate(
+        """
+        from callback_access import escape, expired
+        from datetime import datetime
+        await escape(datetime(2026, 11, 11))
+        assert await expired()
+        """,
+        scope: capture,
+    )
     #expect(result.end == .finished)
 }
 
@@ -276,7 +278,7 @@ func nativeCallbackMutationsRemainAfterFailure() async throws {
     counter = Counter(7)
     date = datetime(2026, 11, 11, tzinfo=UTC)
     """)
-    await #expect(throws: Python::ExecutionError.self) {
+    await #expect(throws: Python::Failure.self) {
         try await session.evaluate("""
         assert await inspect(date, counter) == [2026, 11, 8]
         raise ValueError("state remains")
@@ -318,29 +320,33 @@ func nativeCallbackAccessUsesTheFileDelegate(allowed: Bool) async throws {
         defer { await session.close() }
         try await session.set(file.string, forKey: "filename")
         try await session.set(allowed ? "callback contents" : "denied", forKey: "expected")
-        let result = try await session.evaluate("""
-        import asyncio
-        from callback_access import read_text
-        from pathlib import Path
-        loop = asyncio.get_running_loop()
-        class CallbackPath(Path):
-            def read_text(self):
-                assert asyncio.get_running_loop() is loop
-                return super().read_text()
-        limit = asyncio.Semaphore(3)
-        async def read_one():
-            async with limit:
-                try:
-                    return await read_text(CallbackPath(filename))
-                except PermissionError:
-                    return "denied"
-        values = await asyncio.gather(*(read_one() for _ in range(128)))
-        assert values == [expected] * 128
-        """, scope: "foreign callback")
+        let result = try await session.evaluate(
+            """
+            import asyncio
+            from callback_access import read_text
+            from pathlib import Path
+            loop = asyncio.get_running_loop()
+            class CallbackPath(Path):
+                def read_text(self):
+                    assert asyncio.get_running_loop() is loop
+                    return super().read_text()
+            limit = asyncio.Semaphore(3)
+            async def read_one():
+                async with limit:
+                    try:
+                        return await read_text(CallbackPath(filename))
+                    except PermissionError:
+                        return "denied"
+            values = await asyncio.gather(*(read_one() for _ in range(128)))
+            assert values == [expected] * 128
+            """,
+            scope: "foreign callback",
+        )
         #expect(result.end == .finished)
-        let requests = await delegate.requests
-        #expect(requests.contains { $0.path == file && $0.scope as? String == "foreign callback" })
-        #expect(requests.filter { $0.path == file }.count == 128)
+
+        let reads = await delegate.requests.filter { $0.path == file }
+        #expect(reads.contains { $0.scope as? String == "foreign callback" })
+        #expect(reads.count == 128)
     }
 }
 
@@ -371,11 +377,14 @@ private func evaluateWithSerialCaller(
         // The second loop can signal interruption even when the caller's thread is blocked.
         let watchdog = group.next().scheduleTask(in: .seconds(10)) { pending.cancel() }
         defer { watchdog.cancel() }
-        return try await withTaskCancellationHandler {
-            try await pending.value
-        } onCancel: {
-            pending.cancel()
-        }
+        return try await withTaskCancellationHandler(
+            operation: {
+                try await pending.value
+            },
+            onCancel: {
+                pending.cancel()
+            },
+        )
     }
 }
 
@@ -393,16 +402,19 @@ func synchronousImportedFileAccessFinishesWithASerialCaller(allowed: Bool) async
         try await session.set(file.string, forKey: "filename")
         try await session.set(allowed, forKey: "allowed")
         let result = try await evaluateWithSerialCaller {
-            try await session.evaluate("""
-            from callback_access import read_text_sync
-            from pathlib import Path
-            try:
-                contents = await read_text_sync(Path(filename))
-            except PermissionError:
-                assert not allowed
-            else:
-                assert allowed and contents == 'contents'
-            """, scope: "serial caller")
+            try await session.evaluate(
+                """
+                from callback_access import read_text_sync
+                from pathlib import Path
+                try:
+                    contents = await read_text_sync(Path(filename))
+                except PermissionError:
+                    assert not allowed
+                else:
+                    assert allowed and contents == 'contents'
+                """,
+                scope: "serial caller",
+            )
         }
         #expect(result.end == .finished)
         let requests = await delegate.requests.filter { $0.path == file }
@@ -438,40 +450,40 @@ func synchronousImportedMethodsCanReenterAsyncSwiftExports() async throws {
     #expect(result.end == .finished)
 }
 
-@Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func interruptionReachesEveryAttachedThread(timeout: Bool) async throws {
+@Test(.timeLimit(.minutes(1)))
+func interruptionReachesEveryAttachedThread() async throws {
     let signal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(2))
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(modules: [CallbackAccess.self])
     defer { await session.close() }
     try await session.initialize()
-    let evaluation = Task {
-        defer { signal.continuation.finish() }
-        return try await session.evaluate("""
-        import asyncio
-        from callback_access import spin, started
-        class Runner:
-            def spin(self):
-                started()
-                while True:
-                    pass
-        await asyncio.gather(spin(Runner()), spin(Runner()))
-        """, scope: signal.continuation, timeout: timeout ? .seconds(2) : nil)
+    let interrupted = try await runUntilInterrupted(
+        whenReady: signal,
+        signals: 2,
+    ) {
+        try await session.evaluate(
+            """
+            import asyncio
+            from callback_access import spin, started
+
+            class Runner:
+                def spin(self):
+                    started()
+                    while True:
+                        pass
+
+            await asyncio.gather(spin(Runner()), spin(Runner()))
+            """,
+            scope: signal.continuation,
+        )
     }
-    var readiness = signal.stream.makeAsyncIterator()
-    #expect(await readiness.next() != nil)
-    #expect(await readiness.next() != nil)
-    if !timeout {
-        evaluation.cancel()
-    }
-    let interrupted = try await evaluation.value
-    #expect(interrupted.end == (timeout ? .timedOut : .stopped))
+    #expect(interrupted.end == .stopped)
     let next = try await session.evaluate("assert 'Runner' in globals()")
     #expect(next.end == .finished)
 }
 
-@Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func synchronousSwiftExportsUseTaskCancellation(timeout: Bool) async throws {
+@Test(.timeLimit(.minutes(1)))
+func synchronousSwiftExportsUseTaskCancellation() async throws {
     let signal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
 
     let runtime = try await Python::Runtime()
@@ -479,22 +491,13 @@ func synchronousSwiftExportsUseTaskCancellation(timeout: Bool) async throws {
     defer { await session.close() }
     try await session.initialize()
 
-    let evaluation = Task {
-        defer { signal.continuation.finish() }
-        return try await session.evaluate(
+    let result = try await runUntilInterrupted(whenReady: signal) {
+        try await session.evaluate(
             "from callback_access import spin_swift; spin_swift()",
             scope: signal.continuation,
-            timeout: timeout ? .seconds(2) : nil,
         )
     }
-    defer { evaluation.cancel() }
-
-    _ = try await #require(nextSignal(from: signal.stream))
-    if !timeout {
-        evaluation.cancel()
-    }
-    let result = try await evaluation.value
-    #expect(result.end == (timeout ? .timedOut : .stopped))
+    #expect(result.end == .stopped)
     #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")
 }
 
@@ -510,18 +513,21 @@ func nativeCallbackRejectsReferencesFromAnExpiredGeneration() async throws {
         scope: date,
     )
     try await session.reset()
-    let result = try await session.evaluate("""
-    from callback_access import saved_year
-    try:
-        await saved_year()
-    except ReferenceError:
-        pass
-    else:
-        raise AssertionError("An expired reference was accepted")
-    """, scope: date)
+    let result = try await session.evaluate(
+        """
+        from callback_access import saved_year
+        try:
+            await saved_year()
+        except ReferenceError:
+            pass
+        else:
+            raise AssertionError("An expired reference was accepted")
+        """,
+        scope: date,
+    )
     #expect(result.end == .finished)
     await session.close()
-    #expect(throws: Python::Session.Error.self) { try date.year }
+    #expect(throws: Python::Failure.self) { try date.year }
 }
 
 @Test
@@ -532,31 +538,39 @@ func nativeCallbackStreamsCloseEvenWhenItsContextIsRetained() async throws {
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(modules: [CallbackAccess.self])
         defer { await session.close() }
-        _ = try await session.evaluate("""
-        import sys
-        from callback_access import hold, spin
-        class Writer:
-            def spin(self):
-                print("native output")
-        await hold(sys.stdout.fileno())
-        await spin(Writer())
-        """, scope: capture, redirecting: [.stdout: output])
+        _ = try await session.evaluate(
+            """
+            import sys
+            from callback_access import hold, spin
+            class Writer:
+                def spin(self):
+                    print("native output")
+            await hold(sys.stdout.fileno())
+            await spin(Writer())
+            """,
+            scope: capture,
+            redirecting: [.stdout: output],
+        )
         let retained = try #require(capture.state.withLock { $0 })
-        #expect(retained.0.scope == nil)
+        #expect(retained.context.scope == nil)
 
-        let descriptor = FileDescriptor(rawValue: Int32(retained.1))
-        let outputInfo = try output.stat()
-        do {
-            // Parallel tests can reuse a closed descriptor number for a different file.
-            let current = try descriptor.stat()
-            #expect(current.deviceID != outputInfo.deviceID || current.inode != outputInfo.inode)
-        } catch let error as Errno {
-            #expect(error == .badFileDescriptor)
-        }
+        let descriptor = FileDescriptor(rawValue: Int32(retained.descriptor))
+        try expectDescriptorReleased(descriptor, for: output)
 
-        let bytes = try await FileSystem.shared.withFileHandle(forReadingAt: output) {
-            try await $0.readChunk(fromAbsoluteOffset: 0, length: .bytes(1024))
+        let bytes = try await FileSystem.shared.withFileHandle(forReadingAt: output) { handle in
+            try await handle.readChunk(fromAbsoluteOffset: 0, length: .bytes(1024))
         }
         #expect(Array(bytes.readableBytesView) == Array("native output\n".utf8))
+    }
+}
+
+private func expectDescriptorReleased(_ descriptor: FileDescriptor, for path: FilePath) throws {
+    let outputInfo = try path.stat()
+    do {
+        // Parallel tests can reuse a closed descriptor number for a different file.
+        let current = try descriptor.stat()
+        #expect(current.deviceID != outputInfo.deviceID || current.inode != outputInfo.inode)
+    } catch {
+        #expect(error == .badFileDescriptor)
     }
 }

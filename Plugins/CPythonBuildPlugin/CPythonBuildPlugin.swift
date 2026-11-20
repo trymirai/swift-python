@@ -24,35 +24,36 @@ extension CPythonBuildPlugin: BuildToolPlugin {
 
         // Swift Build and Xcode can plan host and destination variants for one target.
         // Give each variant its own generated sources inside the plugin work directory.
-        let outputDirectory = context.pluginWorkDirectoryURL
-            .appending(path: "$(PLATFORM_NAME)$(EFFECTIVE_PLATFORM_NAME)")
+        let outputDirectory = context.pluginWorkDirectoryURL.appending(
+            path: "$(PLATFORM_NAME)$(EFFECTIVE_PLATFORM_NAME)",
+        )
 
         let inputs = try InputFiles(packageDirectory: packageDirectory.path).collect()
-        return [.buildCommand(
+
+        let outputs = [
+            "Frozen.c",
+            "Resources.c",
+            "GetPath.c",
+            "FileIO.c",
+            "FileUtils.c",
+            "PosixModule.c",
+            "PosixSubprocess.c",
+            "Import.c",
+            "SocketModule.c",
+            "SSLModule.c",
+            "SelectModule.c",
+            "ThreadModule.c",
+        ]
+
+        let profile = outputDirectory.appending(path: "CPythonBuild-%m.profraw")
+        let command = Command.buildCommand(
             displayName: "Prepare embedded CPython sources",
             executable: tool,
             arguments: ["prepare", packageDirectory.path, outputDirectory.path],
-            environment: [
-                "LLVM_PROFILE_FILE": outputDirectory
-                    .appending(path: "CPythonBuild-%m.profraw")
-                    .path,
-            ],
+            environment: ["LLVM_PROFILE_FILE": profile.path],
             inputFiles: inputs.map { packageDirectory.appending(path: $0) },
-            outputFiles: [
-                "Frozen.c",
-                "Resources.c",
-                "GetPath.c",
-                "FileIO.c",
-                "FileUtils.c",
-                "PosixModule.c",
-                "PosixSubprocess.c",
-                "Import.c",
-                "SocketModule.c",
-                "SSLModule.c",
-                "SelectModule.c",
-                "ThreadModule.c",
-            ]
-            .map { outputDirectory.appending(path: $0) },
-        )]
+            outputFiles: outputs.map { outputDirectory.appending(path: $0) },
+        )
+        return [command]
     }
 }

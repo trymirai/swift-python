@@ -11,86 +11,102 @@ import Testing
 func historyKeepsSourcesAndActualFinalResults() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(history: .init(outputs: .unlimited))
-    let firstSource = "data = {'count': 42}\nprint('ready')\ndata"
     try await withSession(session) { session in
-        func checkSourceIdentity() async throws {
-            let first = try await session.evaluate(firstSource)
-            #expect(first.number == 1)
-            #expect(first.output.stdout == "ready\n{'count': 42}\n")
-            try await session.set(firstSource, forKey: "source")
-
-            let check = try await session.evaluate("""
-            assert In[1] == source
-            assert Out[1] is data
-            Out[1]['count'] += 1
-            assert data['count'] == 43
-            assert list(In) == [1]
-            assert not any(name.startswith('__swift_python_result__') for name in globals())
-            """, recordingHistory: false)
-            #expect(check.number == nil)
-        }
-
-        func checkFinalExpressionResults() async throws {
-            let expressions = try await session.evaluate("1\n2")
-            #expect(expressions.number == 2)
-            #expect(expressions.output.stdout == "1\n2\n")
-            _ = try await session.evaluate("print('printed')")
-            _ = try await session.evaluate("assigned = 99")
-            let awaited = try await session.evaluate("""
-            import asyncio
-            await asyncio.sleep(0, result=data)
-            """)
-            #expect(awaited.number == 5)
-            _ = try await session.evaluate("""
-            assert Out[2] == 2
-            assert 3 not in Out and 4 not in Out
-            assert Out[5] is data
-            assert list(In) == [1, 2, 3, 4, 5]
-            """, recordingHistory: false)
-            let globals = try await session.evaluate("globals()")
-            #expect(globals.number == 6)
-            #expect(!globals.output.stdout.contains("__swift_python_result__"))
-        }
-
-        func checkDisplayHooks() async throws {
-            let failure = try await #require(throws: Python::ExecutionError.self) {
-                try await session.evaluate("""
-                class BadDisplay:
-                    def __repr__(self):
-                        raise ValueError('display failed')
-                BadDisplay()
-                """)
-            }
-            #expect(failure.number == 7)
-            _ = try await session.evaluate("""
-            assert Out[6] is globals()
-            assert 7 not in Out
-            assert not any(name.startswith('__swift_python_result__') for name in globals())
-            """, recordingHistory: false)
-            _ = try await session.evaluate("""
-            import sys
-            rendered = []
-            def custom_displayhook(value):
-                if value is not None:
-                    rendered.append(value)
-            sys.displayhook = custom_displayhook
-            """, recordingHistory: false)
-            let custom = try await session.evaluate("data")
-            #expect(custom.number == 8)
-            #expect(custom.output.stdout.isEmpty)
-            _ = try await session.evaluate("""
-            assert Out[8] is data
-            assert rendered == [data]
-            assert sys.displayhook is custom_displayhook
-            """, recordingHistory: false)
-        }
-
-        // The phases share one history sequence; their execution numbers depend on this order.
-        try await checkSourceIdentity()
-        try await checkFinalExpressionResults()
-        try await checkDisplayHooks()
+        // Each phase continues the history numbering from the previous one.
+        try await checkSourceIdentity(in: session)
+        try await checkFinalExpressionResults(in: session)
+        try await checkDisplayHooks(in: session)
     }
 }
+
+private func checkSourceIdentity(in session: Python::Session) async throws {
+    let firstSource = "data = {'count': 42}\nprint('ready')\ndata"
+    let first = try await session.evaluate(firstSource)
+    #expect(first.number == 1)
+    #expect(first.output.stdout == "ready\n{'count': 42}\n")
+    try await session.set(firstSource, forKey: "source")
+
+    let check = try await session.evaluate(
+        """
+        assert In[1] == source
+        assert Out[1] is data
+        Out[1]['count'] += 1
+        assert data['count'] == 43
+        assert list(In) == [1]
+        assert not any(name.startswith('__swift_python_result__') for name in globals())
+        """,
+        recordingHistory: false,
+    )
+    #expect(check.number == nil)
+}
+
+private func checkFinalExpressionResults(in session: Python::Session) async throws {
+    let expressions = try await session.evaluate("1\n2")
+    #expect(expressions.number == 2)
+    #expect(expressions.output.stdout == "1\n2\n")
+    _ = try await session.evaluate("print('printed')")
+    _ = try await session.evaluate("assigned = 99")
+    let awaited = try await session.evaluate("""
+    import asyncio
+    await asyncio.sleep(0, result=data)
+    """)
+    #expect(awaited.number == 5)
+    _ = try await session.evaluate(
+        """
+        assert Out[2] == 2
+        assert 3 not in Out and 4 not in Out
+        assert Out[5] is data
+        assert list(In) == [1, 2, 3, 4, 5]
+        """,
+        recordingHistory: false,
+    )
+    let globals = try await session.evaluate("globals()")
+    #expect(globals.number == 6)
+    #expect(!globals.output.stdout.contains("__swift_python_result__"))
+}
+
+private func checkDisplayHooks(in session: Python::Session) async throws {
+    let failure = try await session.requireFailure(evaluating: """
+    class BadDisplay:
+        def __repr__(self):
+            raise ValueError('display failed')
+    BadDisplay()
+    """)
+    #expect(failure.number == 7)
+    _ = try await session.evaluate(
+        """
+        assert Out[6] is globals()
+        assert 7 not in Out
+        assert not any(name.startswith('__swift_python_result__') for name in globals())
+        """,
+        recordingHistory: false,
+    )
+
+    _ = try await session.evaluate(
+        """
+        import sys
+        rendered = []
+        def custom_displayhook(value):
+            if value is not None:
+                rendered.append(value)
+        sys.displayhook = custom_displayhook
+        """,
+        recordingHistory: false,
+    )
+    let custom = try await session.evaluate("data")
+    #expect(custom.number == 8)
+    #expect(custom.output.stdout.isEmpty)
+    _ = try await session.evaluate(
+        """
+        assert Out[8] is data
+        assert rendered == [data]
+        assert sys.displayhook is custom_displayhook
+        """,
+        recordingHistory: false,
+    )
+}
+
+// MARK: - Input and output retention
 
 @Test
 func historyInputRetentionOwnsAndReadsItsFiles() async throws {
@@ -102,22 +118,22 @@ func historyInputRetentionOwnsAndReadsItsFiles() async throws {
         let stdout = root.appending("stdout.txt")
         let stderr = root.appending("stderr.txt")
 
+        func redirects(source: FilePath) -> [Python::Session.Stream: FilePath] {
+            [.source: source, .stdout: stdout, .stderr: stderr]
+        }
+
         let runtime = try await Python::Runtime()
-        let session = try await runtime.session(history: .init(
-            inputs: .last(1),
-            outputs: .last(1),
-        ))
+        let history = Python::Session.History(inputs: .last(1), outputs: .last(1))
+        let session = try await runtime.session(history: history)
         try await withSession(session) { session in
-            _ = try await session.evaluate("first = 1\nfirst", redirecting: [
-                .source: first,
-                .stdout: stdout,
-                .stderr: stderr,
-            ])
-            let execution = try await session.evaluate("second = 2\nsecond", redirecting: [
-                .source: second,
-                .stdout: stdout,
-                .stderr: stderr,
-            ])
+            _ = try await session.evaluate(
+                "first = 1\nfirst",
+                redirecting: redirects(source: first),
+            )
+            let execution = try await session.evaluate(
+                "second = 2\nsecond",
+                redirecting: redirects(source: second),
+            )
             #expect(execution.output.stdout.isEmpty)
             #expect(try await FileSystem.shared.info(forFileAt: first) == nil)
             #expect(try await readText(at: second) == "second = 2\nsecond")
@@ -128,18 +144,21 @@ func historyInputRetentionOwnsAndReadsItsFiles() async throws {
                 toFileAt: second,
                 options: .newFile(replaceExisting: true),
             )
-            _ = try await session.evaluate("""
-            assert list(In) == [2]
-            assert len(In) == 1
-            assert In[2] == 'stored source'
-            assert list(Out) == [2] and Out[2] == 2
-            try:
-                In[1]
-            except KeyError:
-                pass
-            else:
-                raise AssertionError('expired source is still indexed')
-            """, recordingHistory: false)
+            _ = try await session.evaluate(
+                """
+                assert list(In) == [2]
+                assert len(In) == 1
+                assert In[2] == 'stored source'
+                assert list(Out) == [2] and Out[2] == 2
+                try:
+                    In[1]
+                except KeyError:
+                    pass
+                else:
+                    raise AssertionError('expired source is still indexed')
+                """,
+                recordingHistory: false,
+            )
         }
         #expect(try await readText(at: second) == "stored source")
         #expect(try await readText(at: stdout) == "1\n2\n")
@@ -160,12 +179,15 @@ func historyUsesMemoryWithoutSourceRedirection() async throws {
             for number in 1 ... 36 {
                 #expect(try await session.evaluate(String(number)).number == number)
             }
-            _ = try await session.evaluate("""
-            assert len(In) == 36
-            assert In[1] == '1' and In[36] == '36'
-            assert len(Out) == 36
-            assert Out[1] == 1 and Out[36] == 36
-            """, recordingHistory: false)
+            _ = try await session.evaluate(
+                """
+                assert len(In) == 36
+                assert In[1] == '1' and In[36] == '36'
+                assert len(Out) == 36
+                assert Out[1] == 1 and Out[36] == 36
+                """,
+                recordingHistory: false,
+            )
             #expect(try await ProjectFixture.directoryNames(at: root).isEmpty)
         }
     }
@@ -188,19 +210,26 @@ func historySourceRedirectRequiresANewFileAndAnExistingParent() async throws {
                 }
             }
             await #expect(throws: (any Error).self) {
-                try await session.evaluate("unexpected = True", redirecting: [
-                    .source: shared,
-                    .stdout: shared,
-                ])
+                try await session.evaluate(
+                    "unexpected = True",
+                    redirecting: [
+                        .source: shared,
+                        .stdout: shared,
+                    ],
+                )
             }
-            let check = try await session.evaluate("""
-            assert 'unexpected' not in globals()
-            assert not In and not Out
-            """, recordingHistory: false, redirecting: [.source: unrecorded])
+            let check = try await session.evaluate(
+                """
+                assert 'unexpected' not in globals()
+                assert not In and not Out
+                """,
+                recordingHistory: false,
+                redirecting: [.source: unrecorded],
+            )
             #expect(check.number == nil)
             #expect(try await readText(at: existing) == "keep")
-            #expect(try await FileSystem.shared
-                .info(forFileAt: missing.removingLastComponent()) == nil)
+            let parent = missing.removingLastComponent()
+            #expect(try await FileSystem.shared.info(forFileAt: parent) == nil)
             #expect(try await FileSystem.shared.info(forFileAt: shared) == nil)
             #expect(try await FileSystem.shared.info(forFileAt: unrecorded) == nil)
         }
@@ -212,28 +241,34 @@ func historyOutputEvictionReleasesPythonObjects() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(history: .init(inputs: .last(1), outputs: .last(1)))
     try await withSession(session) { session in
-        _ = try await session.evaluate("""
-        import gc, weakref
-        watched = []
-        class Item:
-            pass
-        def make_item():
-            item = Item()
-            watched.append(weakref.ref(item))
-            return item
-        """, recordingHistory: false)
+        _ = try await session.evaluate(
+            """
+            import gc, weakref
+            watched = []
+            class Item:
+                pass
+            def make_item():
+                item = Item()
+                watched.append(weakref.ref(item))
+                return item
+            """,
+            recordingHistory: false,
+        )
         _ = try await session.evaluate("make_item()")
         _ = try await session.evaluate("make_item()")
-        _ = try await session.evaluate("""
-        gc.collect()
-        assert list(In) == [2] and In[2] == 'make_item()'
-        assert list(Out) == [2]
-        assert watched[0]() is None
-        assert watched[1]() is Out[2]
-        Out.clear()
-        gc.collect()
-        assert watched[1]() is None
-        """, recordingHistory: false)
+        _ = try await session.evaluate(
+            """
+            gc.collect()
+            assert list(In) == [2] and In[2] == 'make_item()'
+            assert list(Out) == [2]
+            assert watched[0]() is None
+            assert watched[1]() is Out[2]
+            Out.clear()
+            gc.collect()
+            assert watched[1]() is None
+            """,
+            recordingHistory: false,
+        )
     }
 }
 
@@ -252,48 +287,58 @@ func historyStateRemainsAfterErrorsAndResets() async throws {
     try await withSession(session) { session in
         _ = try await session.evaluate("data = {'value': 1}\ndata")
         let failed = "Out.clear()\ndata['value'] = 9\nraise ValueError('failed')"
-        let error = try await #require(throws: Python::ExecutionError.self) {
-            try await session.evaluate(failed)
-        }
+        let error = try await session.requireFailure(evaluating: failed)
         #expect(error.number == 2)
         await #expect(throws: HistoryPublicationError.self) {
-            try await session.evaluate("{'unpublished': True}", committing: { _ in
-                throw HistoryPublicationError.rejected
-            })
+            try await session.evaluate(
+                "{'unpublished': True}",
+                committing: { _ in
+                    throw HistoryPublicationError.rejected
+                },
+            )
         }
-        _ = try await session.evaluate("""
-        assert list(In) == [1, 2, 3]
-        assert 'raise ValueError' in In[2]
-        assert list(Out) == [3] and Out[3] == {'unpublished': True}
-        assert data['value'] == 9
-        """, recordingHistory: false)
+        _ = try await session.evaluate(
+            """
+            assert list(In) == [1, 2, 3]
+            assert 'raise ValueError' in In[2]
+            assert list(Out) == [3] and Out[3] == {'unpublished': True}
+            assert data['value'] == 9
+            """,
+            recordingHistory: false,
+        )
 
         try await session.reset()
-        _ = try await session.evaluate("""
-        assert not Out
-        assert list(In) == [1, 2, 3]
-        assert 'data' not in globals()
-        """, recordingHistory: false)
+        _ = try await session.evaluate(
+            """
+            assert not Out
+            assert list(In) == [1, 2, 3]
+            assert 'data' not in globals()
+            """,
+            recordingHistory: false,
+        )
         #expect(try await session.evaluate("4").number == 4)
     }
 }
 
-@Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func historyRecordsInterruptedAttempts(timeout: Bool) async throws {
+@Test(.timeLimit(.minutes(1)))
+func historyRecordsInterruptedAttempts() async throws {
     let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     let suspended = AsyncStream<Void>.makeStream()
     defer {
         entered.continuation.finish()
         suspended.continuation.finish()
     }
-    let host = Python::Module("host", functions: [
-        .init("wait") { _ in
-            entered.continuation.yield(())
-            for await _ in suspended.stream {}
-            try Task.checkCancellation()
-            return .none
-        },
-    ])
+    let host = Python::Module(
+        "host",
+        functions: [
+            .init("wait") { _ in
+                entered.continuation.yield(())
+                for await _ in suspended.stream {}
+                try Task.checkCancellation()
+                return .none
+            },
+        ],
+    )
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(
         moduleDefinitions: [host],
@@ -303,27 +348,19 @@ func historyRecordsInterruptedAttempts(timeout: Bool) async throws {
         _ = try await session.evaluate("from host import wait\n{'saved': True}")
         let reservation = try session.reserve()
         #expect(reservation.number == 2)
-        let task = Task {
-            defer { entered.continuation.finish() }
-            return try await session.evaluate(
-                "Out.clear()\nawait wait()",
-                timeout: timeout ? .seconds(2) : nil,
-                reservation: reservation,
-            )
+        let result = try await runUntilInterrupted(whenReady: entered) {
+            try await session.evaluate("Out.clear()\nawait wait()", reservation: reservation)
         }
-        defer { task.cancel() }
-        if !timeout {
-            _ = try await #require(nextSignal(from: entered.stream))
-            task.cancel()
-        }
-        let result = try await task.value
         #expect(result.number == 2)
-        #expect(result.end == (timeout ? .timedOut : .stopped))
-        _ = try await session.evaluate("""
-        assert list(In) == [1, 2]
-        assert In[2].endswith('await wait()')
-        assert not Out
-        """, recordingHistory: false)
+        #expect(result.end == .stopped)
+        _ = try await session.evaluate(
+            """
+            assert list(In) == [1, 2]
+            assert In[2].endswith('await wait()')
+            assert not Out
+            """,
+            recordingHistory: false,
+        )
     }
 }
 
@@ -348,15 +385,19 @@ func historySessionsAreIsolated() async throws {
 func historyValidatesLimitsAndIsOffByDefault() async throws {
     let runtime = try await Python::Runtime()
     for count in [-1, 0] {
-        await #expect {
-            try await runtime.session(history: .init(inputs: .last(count)))
-        } throws: { error in
-            String(describing: error).contains("history entry limit must be positive")
-        }
-        await #expect {
-            try await runtime.session(history: .init(outputs: .last(count)))
-        } throws: { error in
-            String(describing: error).contains("history entry limit must be positive")
+        let invalid: [Python::Session.History] = [
+            .init(inputs: .last(count)),
+            .init(outputs: .last(count)),
+        ]
+        for limits in invalid {
+            await #expect(
+                performing: {
+                    try await runtime.session(history: limits)
+                },
+                throws: { error in
+                    String(describing: error).contains("history entry limit must be positive")
+                },
+            )
         }
     }
     try await withTemporaryDirectory { root in
@@ -383,7 +424,7 @@ func historyNumbersAnAttemptWhoseInitializationFails() async throws {
             history: .init(),
         )
         try await withSession(session) { session in
-            let error = try await #require(throws: Python::ExecutionError.self) {
+            let error = try await #require(throws: Python::Failure.self) {
                 try await session.evaluate("'not reached'", redirecting: [.source: source])
             }
             #expect(error.number == 1)
@@ -404,9 +445,11 @@ func historyBindsToTheSelectedModuleNamespace(project: Bool) async throws {
             return Out[number]
         """.write(toFileAt: root.appending("workload.py"))
         let runtime = try await Python::Runtime()
-        let startup: Python::Session.Startup = project
-            ? .project(directory: root.string, module: "workload")
-            : .module("workload")
+        let startup: Python::Session.Startup = if project {
+            .project(directory: root.string, module: "workload")
+        } else {
+            .module("workload")
+        }
         let session = try await runtime.session(
             startup,
             importPaths: [root.string],
@@ -414,13 +457,18 @@ func historyBindsToTheSelectedModuleNamespace(project: Bool) async throws {
         )
         try await withSession(session) { session in
             _ = try await session.evaluate("data = {'value': 1}\ndata")
-            _ = try await session.evaluate("""
-            assert read_input(1) == "data = {'value': 1}\\ndata"
-            assert read_output(1) is data
-            """, recordingHistory: false)
+            _ = try await session.evaluate(
+                """
+                assert read_input(1) == "data = {'value': 1}\\ndata"
+                assert read_output(1) is data
+                """,
+                recordingHistory: false,
+            )
         }
     }
 }
+
+// MARK: - History reservations
 
 @Test
 func historyReservationsPreserveNumbersAcrossGapsAndReset() async throws {
@@ -438,12 +486,15 @@ func historyReservationsPreserveNumbersAcrossGapsAndReset() async throws {
 
         let resumed = try await session.evaluate("{'resumed': True}", reservation: pending)
         #expect(resumed.number == pending.number)
-        _ = try await session.evaluate("""
-        assert list(In) == [1, 3]
-        assert In[1] == "{'first': True}"
-        assert In[3] == "{'resumed': True}"
-        assert list(Out) == [3] and Out[3] == {'resumed': True}
-        """, recordingHistory: false)
+        _ = try await session.evaluate(
+            """
+            assert list(In) == [1, 3]
+            assert In[1] == "{'first': True}"
+            assert In[3] == "{'resumed': True}"
+            assert list(Out) == [3] and Out[3] == {'resumed': True}
+            """,
+            recordingHistory: false,
+        )
         #expect(try await session.evaluate("4").number == 4)
     }
 }
@@ -488,7 +539,7 @@ func historyReservationsAreSingleUseAndSessionBound() async throws {
     #expect(try await first.evaluate("2").number == 2)
     #expect(try await second.evaluate("1").number == 1)
     await first.close()
-    #expect(throws: Python::Session.Error.closed) { try first.reserve() }
+    try expectPythonFailure(.closed) { _ = try first.reserve() }
 }
 
 @Test
@@ -506,7 +557,7 @@ func historyReservationsRemainSpentAfterPreparationAndExecutionFailures() async 
                 )
             }
             let execution = try session.reserve()
-            let error = try await #require(throws: Python::ExecutionError.self) {
+            let error = try await #require(throws: Python::Failure.self) {
                 try await session.evaluate("raise ValueError('failed')", reservation: execution)
             }
             #expect(error.number == 2)
@@ -545,13 +596,16 @@ func historyReservationDoesNotWaitForExecutionAndSurvivesQueuedCancellation() as
         entered.continuation.finish()
         suspended.continuation.finish()
     }
-    let host = Python::Module("host", functions: [
-        .init("wait") { _ in
-            entered.continuation.yield(())
-            for await _ in suspended.stream {}
-            return .none
-        },
-    ])
+    let host = Python::Module(
+        "host",
+        functions: [
+            .init("wait") { _ in
+                entered.continuation.yield(())
+                for await _ in suspended.stream {}
+                return .none
+            },
+        ],
+    )
     let runtime = try await Python::Runtime()
     let session = try await runtime.session(moduleDefinitions: [host], history: .init())
     try await withSession(session) { session in

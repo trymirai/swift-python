@@ -18,33 +18,30 @@ extension StandardLibraryBuilder {
             ("Modules/_threadmodule.c", "ThreadModule.c"),
             ("Lib/subprocess.py", "subprocess.py"),
         ]
-        let patchDirectory = workspace.packageDirectory.appending("Tools/CPythonPatches")
 
         // Stage patches before replacing outputs so a rejected patch leaves them intact.
-        try await workspace.fileSystem
-            .withTemporaryDirectory(prefix: workspace.outputDirectory) { _, directory in
-                try await copySources(sources, from: workspace.sourceDirectory, to: directory)
+        try await workspace.fileSystem.withTemporaryDirectory(
+            prefix: workspace.outputDirectory,
+        ) { _, directory in
+            try await copySources(sources, from: workspace.sourceDirectory, to: directory)
+            try await applyPatches(in: directory)
 
-                for patch in ["FileAccess.patch", "ThreadHandles.patch", "Network.patch"] {
-                    try await workspace.run(
-                        "/usr/bin/patch",
-                        [
-                            "-s",
-                            "-f",
-                            "-F",
-                            "0",
-                            "-p1",
-                            "-i",
-                            patchDirectory.appending(patch).string,
-                        ],
-                        in: directory,
-                        stage: "Apply CPython patch \(patch)",
-                    )
-                }
+            let patched = sources.map { (input: $0.output, output: $0.output) }
+            try await copySources(patched, from: directory, to: workspace.outputDirectory)
+        }
+    }
 
-                let patched = sources.map { (input: $0.output, output: $0.output) }
-                try await copySources(patched, from: directory, to: workspace.outputDirectory)
-            }
+    private func applyPatches(in directory: FilePath) async throws {
+        let patches = workspace.packageDirectory.appending("Tools/CPythonPatches")
+        for name in ["FileAccess.patch", "ThreadHandles.patch", "Network.patch"] {
+            let patch = patches.appending(name)
+            try await workspace.run(
+                "/usr/bin/patch",
+                ["-s", "-f", "-F", "0", "-p1", "-i", patch.string],
+                in: directory,
+                stage: "Apply CPython patch \(name)",
+            )
+        }
     }
 
     private func copySources(

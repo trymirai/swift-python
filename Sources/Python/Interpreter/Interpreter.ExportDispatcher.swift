@@ -18,7 +18,7 @@ extension Interpreter {
 
         private func body(for id: Module.Function.ID) throws -> Module.Function.Body {
             guard functions.indices.contains(id.rawValue) else {
-                throw Exception(name: "TypeError", message: "Unknown Swift callback.")
+                throw Failure(.typeError, message: "Unknown Swift callback.")
             }
             return functions[id.rawValue].body
         }
@@ -33,35 +33,35 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         _ request: borrowing Object,
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
-        let name = try request.item(at: 0).string()
+        let name = try request.tupleItem(at: 0).string()
         guard let command = Command(rawValue: name) else {
-            throw Exception(name: "ValueError", message: "Unknown Swift callback command.")
+            throw Failure(.valueError, message: "Unknown Swift callback command.")
         }
 
         let storage = attachment.storage
 
         func callID() throws -> Session.Control.CallID {
-            .init(rawValue: try request.item(at: 1).decode())
+            .init(rawValue: try request.tupleItem(at: 1).decode())
         }
 
         switch command {
         case .freeze:
-            let type = try request.item(at: 1)
+            let type = try request.tupleItem(at: 1)
             try Object.check(
                 unsafe CPython_FreezeType(type.pointer),
                 "Unable to freeze a Python class.",
             )
         case .registerType:
-            let key = try request.item(at: 1).string()
-            let type = try request.item(at: 2)
+            let key = try request.tupleItem(at: 1).string()
+            let type = try request.tupleItem(at: 2)
             try storage.requireClassRegistry().register(type, forKey: key, in: storage)
         case .registerWrapper:
             try storage.requireClassRegistry().registerWrapperFactory(
-                request.item(at: 1),
+                request.tupleItem(at: 1),
                 in: storage,
             )
         case .bind:
-            try storage.requireClassRegistry().bind(request.item(at: 1))
+            try storage.requireClassRegistry().bind(request.tupleItem(at: 1))
         case .call, .start:
             return try invokeExport(command, request: request, in: attachment)
         case .poll:
@@ -85,17 +85,36 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         request: borrowing Object,
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
-        let id = Module.Function.ID(rawValue: try request.item(at: 1).decode())
-        let arguments = try request.item(at: 2)
+        let id = Module.Function.ID(rawValue: try request.tupleItem(at: 1).decode())
+        let arguments = try request.tupleItem(at: 2)
+
+        let (scope, execution) = try activeExecution()
+        let invocation = Context.Invocation()
+        let previous = exchange(&scope.invocation, with: invocation)
+        defer { scope.invocation = previous }
+
         switch (command, try body(for: id)) {
         case let (.call, .synchronous(invoke)):
+            defer { invocation.finish() }
             var encoder = Encoder(in: attachment)
             try CurrentContext.withAttached { try invoke(arguments, &encoder) }
             return unsafe try Object(owned: encoder.take(), in: attachment)
         case let (.start, .asynchronous(prepare)):
-            return try start(prepare(arguments), in: attachment)
+            do {
+                let operation = try prepare(arguments)
+                return try start(
+                    operation,
+                    during: invocation,
+                    scope: scope,
+                    execution: execution,
+                    in: attachment,
+                )
+            } catch {
+                invocation.finish()
+                throw error
+            }
         default:
-            throw Runtime.Failure("Invalid Swift callback mode.")
+            throw Failure("Invalid Swift callback mode.")
         }
     }
 
@@ -124,9 +143,11 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         let list = unsafe try Object.take(PyList_New(methods.count), in: attachment)
         for (index, method) in methods.enumerated() {
             let function = try Object.makeFunction(method, in: attachment)
-            try Object.check(
-                unsafe PyList_SetItem(list.pointer, index, function.release()),
-                "Unable to deliver an imported Python method.",
+            unsafe try Object.setListItem(
+                function,
+                at: index,
+                in: list.pointer,
+                failure: "Unable to deliver an imported Python method.",
             )
         }
         return list
@@ -134,7 +155,7 @@ extension Interpreter.ExportDispatcher: Object.Callable {
 
     private func activeExecution() throws -> (scope: PThread.Scope, control: Session.Control) {
         guard let scope = PThread.Scope.current, let execution = scope.execution else {
-            throw Runtime.Failure("Swift callbacks require an active Python execution.")
+            throw Failure("Swift callbacks require an active Python execution.")
         }
         return (scope, execution)
     }
@@ -142,18 +163,25 @@ extension Interpreter.ExportDispatcher: Object.Callable {
     @_lifetime(borrow attachment)
     private func start(
         _ operation: @escaping Module.Function.AsyncOperation,
+        during invocation: Context.Invocation,
+        scope: PThread.Scope,
+        execution: Session.Control,
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
         let storage = attachment.storage
-        let (scope, execution) = try activeExecution()
         let call = try Session.Control.ExportCall(
-            operation,
+            {
+                defer { invocation.finish() }
+                return try await operation()
+            },
             context: Context(storage: storage),
             executor: scope.executorForCallbacks(),
         )
-        let id = storage.allocateCallID()
+        invocation.bind(call)
 
+        let id = storage.allocateCallID()
         try execution.submit(.export(call), id: id)
+
         do {
             return try Object(
                 encoding: [Int(call.pipe.readDescriptor().rawValue), id.rawValue],

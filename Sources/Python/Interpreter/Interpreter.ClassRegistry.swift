@@ -20,16 +20,16 @@ extension Interpreter {
     final class ClassRegistry {
         private let classBindings: [String: (module: String, name: String)]
 
-        private var isInstalled: Bool = false
-
         private var typesByKey: [String: Reference] = [:]
         private var keysByTypeAddress: [UInt: String] = [:]
         private var wrapperFactory: Reference?
+        private var isInstalled: Bool = false
 
         init(modules: [Module]) {
-            classBindings = Dictionary(uniqueKeysWithValues: modules.flatMap { module in
+            let bindings = modules.flatMap { module in
                 module.classes.map { ($0.key, (module: module.name, name: $0.name)) }
-            })
+            }
+            classBindings = Dictionary(uniqueKeysWithValues: bindings)
         }
 
         func binding(for classKey: String) -> (module: String, name: String)? {
@@ -47,7 +47,9 @@ extension Interpreter {
         ) throws {
             let address = unsafe UInt(bitPattern: type.pointer)
             guard
-                !isInstalled, typesByKey[key] == nil, keysByTypeAddress[address] == nil,
+                !isInstalled,
+                typesByKey[key] == nil,
+                keysByTypeAddress[address] == nil,
                 classBindings[key] != nil
             else {
                 throw Module.Catalog.failure("Class registration is closed or invalid.")
@@ -86,17 +88,20 @@ extension Interpreter {
             try identity.claim(instance, in: storage)
 
             let context = Context(storage: storage)
-            let wrapper: Object
-            if let weak = identity.wrapper, let existing = try weak.resolve(in: context) {
-                wrapper = consume existing
+            let wrapper: Object = if
+                let weak = identity.wrapper,
+                let existing = try weak.resolve(in: context)
+            {
+                consume existing
             } else {
-                wrapper = try constructWrapper(
+                try constructWrapper(
                     for: instance,
                     classKey: classKey,
                     identity: identity,
                     in: context,
                 )
             }
+
             return unsafe Object(owned: wrapper.release(), in: owner)
         }
 
@@ -105,14 +110,17 @@ extension Interpreter {
             let storage = try Interpreter.Storage.requireCurrent()
             let instance = unsafe try peer(of: wrapper, in: storage)
             let context = Context(storage: storage)
+
             guard
                 let weak = instance._pIdentity.wrapper,
                 let bound = try weak.resolve(in: context),
                 unsafe bound.pointer == wrapper
             else {
-                throw Module.Catalog
-                    .failure("The Swift payload belongs to a different Python object.")
+                throw Module.Catalog.failure(
+                    "The Swift payload belongs to a different Python object.",
+                )
             }
+
             return instance
         }
 
@@ -123,7 +131,7 @@ extension Interpreter {
             try instance._pIdentity.bind(WeakReference(object, in: context))
         }
 
-        static func unregistered() -> Exception {
+        static func unregistered() -> Failure {
             Module.Catalog.failure("The Swift class's module is not installed in this session.")
         }
 
@@ -145,7 +153,7 @@ extension Interpreter {
             let key = try Object(encoding: classKey, in: context)
             let capsule = try makeCapsule(for: instance, in: context)
 
-            return try function.call(key, capsule)
+            return try function(key, capsule)
         }
 
         @_lifetime(borrow context)
@@ -154,9 +162,12 @@ extension Interpreter {
             in context: borrowing Context,
         ) throws -> Object {
             let retained = unsafe Unmanaged.passRetained(instance as AnyObject).toOpaque()
-            let capsule = unsafe CPython_NewPeer(retained, { pointer in
-                unsafe Unmanaged<AnyObject>.fromOpaque(pointer).release()
-            })
+            let capsule = unsafe CPython_NewPeer(
+                retained,
+                { pointer in
+                    unsafe Unmanaged<AnyObject>.fromOpaque(pointer).release()
+                },
+            )
 
             let pointer = unsafe try Object.require(capsule, "Unable to retain a Swift instance.")
             return unsafe Object(owned: pointer, in: context)
@@ -188,6 +199,7 @@ extension Interpreter {
             else {
                 throw Module.Catalog.failure("The Swift object payload has a different class.")
             }
+
             try instance._pIdentity.claim(instance, in: storage)
             return instance
         }

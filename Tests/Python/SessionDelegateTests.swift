@@ -48,35 +48,38 @@ func sessionDelegateChecksNativeFileOpens() async throws {
         defer { await session.close() }
 
         try await session.set(directory.string, forKey: "directory")
-        _ = try await session.evaluate("""
-        import errno, io, os, sys
-        from pathlib import Path
+        _ = try await session.evaluate(
+            """
+            import errno, io, os, sys
+            from pathlib import Path
 
-        base = os.path.realpath(directory)
-        readable = Path(base, '\(readableName)')
-        protected = Path(base, '\(protectedName)')
+            base = os.path.realpath(directory)
+            readable = Path(base, '\(readableName)')
+            protected = Path(base, '\(protectedName)')
 
-        assert readable.read_text() == 'readable'
-        with open(readable, opener=lambda path, flags: os.open(path, flags)) as f:
-            assert isinstance(f, io.TextIOWrapper) and f.read() == 'readable'
+            assert readable.read_text() == 'readable'
+            with open(readable, opener=lambda path, flags: os.open(path, flags)) as f:
+                assert isinstance(f, io.TextIOWrapper) and f.read() == 'readable'
 
-        directory_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            fd = os.open(b'\(readableName)', os.O_RDWR | os.O_APPEND, dir_fd=directory_fd)
-            with io.FileIO(fd, 'rb') as f:
-                assert f.read() == b'readable'
-        finally:
-            os.close(directory_fd)
+            directory_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fd = os.open(b'\(readableName)', os.O_RDWR | os.O_APPEND, dir_fd=directory_fd)
+                with io.FileIO(fd, 'rb') as f:
+                    assert f.read() == b'readable'
+            finally:
+                os.close(directory_fd)
 
-        sys.audit('open', str(protected), 'w', os.O_WRONLY | os.O_TRUNC)
-        try:
-            open(protected, 'w')
-        except PermissionError as error:
-            assert error.errno == errno.EACCES and error.filename == str(protected)
-        else:
-            raise AssertionError('expected delegate to veto truncation')
-        assert protected.read_text() == 'keep'
-        """, scope: "file access")
+            sys.audit('open', str(protected), 'w', os.O_WRONLY | os.O_TRUNC)
+            try:
+                open(protected, 'w')
+            except PermissionError as error:
+                assert error.errno == errno.EACCES and error.filename == str(protected)
+            else:
+                raise AssertionError('expected delegate to veto truncation')
+            assert protected.read_text() == 'keep'
+            """,
+            scope: "file access",
+        )
 
         let base: String = try await session.get("base")
         let requests = await delegate.requests
@@ -131,58 +134,33 @@ func hostStreamsBypassPathOpenDelegate() async throws {
         let requests = await delegate.requests
         #expect(requests.count == 1)
         #expect(requests.first?.path == log)
-        #expect(requests.first?.operation.openOptions?.contains(.append) == true)
+        #expect(requests.first?.operation.openParameters?.options.contains(.append) == true)
     }
 }
 
 @Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func asyncContextCallsCaptureStreamsWithDelegate(_ fail: Bool) async throws {
-    let source = #"""
-    import asyncio
-    import sys
-
-    def remember_streams():
-        global original_streams
-        original_streams = (sys.stdin, sys.stdout, sys.stderr)
-
-    def check_streams():
-        assert (sys.stdin, sys.stdout, sys.stderr) == original_streams
-
-    async def noisy(fail):
-        print("native stdout", flush=True)
-        sys.stderr.buffer.write(b"native stderr\n")
-        sys.stderr.buffer.flush()
-        assert sys.stdin.read() == ""
-
-        await asyncio.sleep(0)
-        print("after await", flush=True)
-        if fail:
-            raise ValueError("native failure")
-        return 42
-    """#
+func sessionCallsRestoreStreamsAfterPythonReturnsOrThrows(_ fail: Bool) async throws {
     let session = try await Python::Runtime().session(
-        .source(source),
+        .source(noisyCallSource),
         delegate: RecordingFileAccessDelegate(),
     )
     defer { await session.close() }
 
     func callStreamFunction(_ name: String) async throws {
         try await session.enqueue { context in
-            try context.object(name).call().decode(as: Void.self)
+            try context.object(name)().decode(as: Void.self)
         }
     }
 
     func callNoisy() async throws -> Int {
-        try await session.enqueue { context in
-            let function = try await context.get("noisy", as: Python::Reference.self)
-            return try await context.call(function, arguments: [fail])
-        }
+        try await callPythonFunction("noisy", in: session, arguments: [fail], as: Int.self)
     }
 
     try await callStreamFunction("remember_streams")
     if fail {
-        let exception = try await #require(throws: Python::Exception.self) { try await callNoisy() }
-        #expect(exception.name == "ValueError")
+        let exception = try await expectPythonFailure(.exception(.valueError)) {
+            _ = try await callNoisy()
+        }
         #expect(exception.message == "native failure")
     } else {
         #expect(try await callNoisy() == 42)
@@ -199,6 +177,30 @@ func asyncContextCallsCaptureStreamsWithDelegate(_ fail: Bool) async throws {
     #expect(execution.output.stderr == "repl stderr\n")
 }
 
+private let noisyCallSource = #"""
+import asyncio
+import sys
+
+def remember_streams():
+    global original_streams
+    original_streams = (sys.stdin, sys.stdout, sys.stderr)
+
+def check_streams():
+    assert (sys.stdin, sys.stdout, sys.stderr) == original_streams
+
+async def noisy(fail):
+    print("native stdout", flush=True)
+    sys.stderr.buffer.write(b"native stderr\n")
+    sys.stderr.buffer.flush()
+    assert sys.stdin.read() == ""
+
+    await asyncio.sleep(0)
+    print("after await", flush=True)
+    if fail:
+        raise ValueError("native failure")
+    return 42
+"""#
+
 @Test(.timeLimit(.minutes(1)))
 func standaloneScriptUsesOneDelegateForSourceAndPythonFileAccess() async throws {
     try await withTemporaryDirectory { directory in
@@ -214,24 +216,23 @@ func standaloneScriptUsesOneDelegateForSourceAndPythonFileAccess() async throws 
 
         let delegate = RecordingFileAccessDelegate()
         let runtime = try await Python::Runtime()
-        let error = try await #require(throws: Python::ExecutionError.self) {
+        let error = try await #require(throws: Python::Failure.self) {
             try await runtime.run(
                 script: script.string,
                 arguments: [protected.string],
                 delegate: delegate,
             )
         }
-        #expect(error.traceback.contains("PermissionError"))
+        #expect(error.traceback?.contains("PermissionError") == true)
         #expect(try await readText(at: protected) == "keep")
 
         let requests = await delegate.requests
-        #expect(requests.map(\.path.lastComponent) == [
-            script.lastComponent,
-            protected.lastComponent,
-        ])
+        let names = requests.map(\.path.lastComponent)
+        #expect(names == [script.lastComponent, protected.lastComponent])
         #expect(requests.first?.operation == .open(mode: .readOnly, options: []))
-        #expect(requests.last?.operation.openMode == .writeOnly)
-        #expect(requests.last?.operation.openOptions?.contains(.truncate) == true)
+        let write = requests.last?.operation.openParameters
+        #expect(write?.mode == .writeOnly)
+        #expect(write?.options.contains(.truncate) == true)
     }
 }
 
@@ -243,19 +244,14 @@ private func checkFileAccessRequests(
     let protected = root.appending(RecordingFileAccessDelegate.protectedName)
 
     #expect(requests.map(\.path) == [readable, readable, readable, protected, protected])
-    #expect(requests.compactMap(\.operation.openMode) == [
-        .readOnly,
-        .readOnly,
-        .readWrite,
-        .writeOnly,
-        .readOnly,
-    ])
+    let modes = requests.compactMap { $0.operation.openParameters?.mode }
+    #expect(modes == [.readOnly, .readOnly, .readWrite, .writeOnly, .readOnly])
 
     let append = try #require(requests.dropFirst(2).first)
-    #expect(append.operation.openOptions?.contains(.append) == true)
+    #expect(append.operation.openParameters?.options.contains(.append) == true)
 
     let truncate = try #require(requests.dropFirst(3).first)
-    #expect(truncate.operation.openOptions?.contains([.create, .truncate]) == true)
+    #expect(truncate.operation.openParameters?.options.contains([.create, .truncate]) == true)
 }
 
 // MARK: - SuspendedFileAccessDelegate
@@ -286,15 +282,8 @@ private actor SuspendedFileAccessDelegate: Python::Session.Delegate {
     }
 }
 
-// MARK: - FileOpenInterruption
-
-private enum FileOpenInterruption: CaseIterable {
-    case cancelParent
-    case timeout
-}
-
-@Test(.timeLimit(.minutes(1)), arguments: FileOpenInterruption.allCases)
-private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterruption) async throws {
+@Test(.timeLimit(.minutes(1)))
+func fileOpenInterruptionJoinsDelegate() async throws {
     try await withTemporaryDirectory { directory in
         let path = directory.appending("delegate-cancelled.txt")
         let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -312,26 +301,14 @@ private func fileOpenInterruptionJoinsDelegate(_ interruption: FileOpenInterrupt
         with open(path, 'w') as f:
             f.write('unexpected')
         """
-        let timeout: Duration? = interruption == .timeout ? .seconds(2) : nil
-        let evaluation = Task {
-            defer { entered.continuation.finish() }
-            // The cancellation case must reach the evaluation through its parent task.
-            return try await withThrowingTaskGroup(of: Python::Execution.self) { group in
-                group.addTask {
-                    try await session.evaluate(source, timeout: timeout)
-                }
+        let execution = try await runUntilInterrupted(whenReady: entered) {
+            // Cancelling the parent must also interrupt its child evaluation.
+            try await withThrowingTaskGroup(of: Python::Execution.self) { group in
+                group.addTask { try await session.evaluate(source) }
                 return try await #require(group.next())
             }
         }
-        defer { evaluation.cancel() }
-
-        if interruption == .cancelParent {
-            _ = try await #require(nextSignal(from: entered.stream))
-            evaluation.cancel()
-        }
-
-        let execution = try await evaluation.value
-        #expect(execution.end == (interruption == .timeout ? .timedOut : .stopped))
+        #expect(execution.end == .stopped)
         #expect(execution.output.stdout == "before open\n")
         #expect(execution.output.stderr.isEmpty)
         #expect(await delegate.cancelled)
@@ -374,17 +351,11 @@ func closingASessionPreservesItsFileAccessPolicy(hasDelegate: Bool) async throws
 }
 
 private extension Python::Session.FileAccessRequest.Operation {
-    var openMode: FileDescriptor.AccessMode? {
-        guard case let .open(mode, _) = self else {
+    var openParameters: (mode: FileDescriptor.AccessMode, options: FileDescriptor.OpenOptions)? {
+        guard case let .open(mode, options) = self else {
             return nil
         }
-        return mode
-    }
 
-    var openOptions: FileDescriptor.OpenOptions? {
-        guard case let .open(_, options) = self else {
-            return nil
-        }
-        return options
+        return (mode, options)
     }
 }

@@ -43,10 +43,14 @@ enum CurrentContext {
     }
 
     static func callback() throws -> Session.Control.ExportCall {
-        guard let current else {
-            throw Session.Error.closed
+        guard let callback = try activeExport() else {
+            throw Failure.closed
         }
-        try current.checkActive()
+        return callback
+    }
+
+    static func activeExport() throws -> Session.Control.ExportCall? {
+        try current?.checkActive()
         return current
     }
 }

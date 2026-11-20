@@ -33,18 +33,19 @@ extension Object {
         }
 
         borrowing func get<T: Decodable & ~Copyable>(as type: T.Type = T.self) throws -> T {
-            let value = try object()
+            let value = unsafe try Object(owned: newReference(), in: self)
             let decoder = unsafe Decoder(value.pointer, depth: depth, in: value)
             return try decoder.decode(type)
         }
 
-        @_lifetime(copy self)
-        borrowing func object() throws -> Object {
+        /// The caller owns the reference returned by PyObject_GetItem.
+        @unsafe
+        borrowing func newReference() throws -> UnsafeMutablePointer<PyObject> {
             let key = try checkedKey()
             guard let value = unsafe PyObject_GetItem(container, key.pointer) else {
                 throw missing()
             }
-            return unsafe try Object.take(value, inheriting: self)
+            return unsafe value
         }
 
         borrowing func set<T: Encodable & ~Copyable>(_ value: borrowing T) throws {
@@ -82,8 +83,8 @@ extension Object {
         private borrowing func missing() -> any Swift::Error {
             if case let .name(name) = key, CPython_IsKeyError() != 0 {
                 PyErr_Clear()
-                return Exception(
-                    name: "NameError",
+                return Failure(
+                    .nameError,
                     message: "Python name '\(name)' is not defined.",
                 )
             }

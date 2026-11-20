@@ -24,6 +24,7 @@ extension Interpreter {
             let namespace = try Context.currentNamespace(in: attachment)
             storage.namespace = unsafe try storage.references.retain(namespace.pointer)
         }
+
         return output
     }
 
@@ -44,7 +45,6 @@ extension Interpreter {
                 filename: filename,
                 redirecting: redirects,
                 streamsOutput: execution.hasOutputHandler,
-                number: number,
                 execution: execution,
             )
         }
@@ -70,17 +70,16 @@ extension Interpreter {
         filename: String?,
         redirecting redirects: [Session.Stream: Runtime.Path],
         streamsOutput: Bool = false,
-        number: Int? = nil,
         execution: Session.Control,
     ) throws -> Output {
         try pThread.withAttached(execution: execution) { attachment in
             let module = try Self.executionModule(in: attachment)
-            let function = try module.attribute(function)
+            let function = try module(methodNamed: function)
 
             let source = try Object(encoding: source, in: attachment)
             let filename = try Object(encoding: filename, in: attachment)
-            let control = try Object.makeFunction(
-                Session.Control.Callback(execution: execution, streamsOutput: streamsOutput),
+            let control = try execution.makeCallback(
+                streamsOutput: streamsOutput,
                 in: attachment,
             )
 
@@ -90,7 +89,7 @@ extension Interpreter {
                     using: execution,
                 )
 
-                return try result.decode(as: Reply.self).outputOrThrow(number: number)
+                return try result.decode(as: Reply.self).outputOrThrow()
             }
         }
     }
@@ -101,10 +100,10 @@ extension Interpreter {
         _ body: (borrowing Object) throws -> Result,
     ) throws -> Result {
         let descriptors = try Session.Stream.Descriptors.open(redirects)
-        let scope = PThread.Scope.current!
-        let previousStreams = scope.streams
-        scope.streams = descriptors
         let streams = try Object(encoding: descriptors.numbers, in: attachment)
+
+        let scope = PThread.Scope.current!
+        let previousStreams = exchange(&scope.streams, with: descriptors)
         Session.Stream.Descriptors.bind(descriptors)
         defer {
             scope.streams = previousStreams
@@ -181,21 +180,42 @@ private extension Interpreter {
 private extension Interpreter {
     struct Reply: Decodable {
         let output: Output
-        let traceback: String
+        let exception: ExceptionDetail?
 
         init(from decoder: borrowing Decoder) throws {
             output = Output(
                 stdout: try decoder.decode(String.self, at: 0),
                 stderr: try decoder.decode(String.self, at: 1),
             )
-            traceback = try decoder.decode(String.self, at: 2)
+            exception = try decoder.decode(ExceptionDetail?.self, at: 2)
         }
 
-        func outputOrThrow(number: Int?) throws -> Output {
-            guard traceback.isEmpty else {
-                throw ExecutionError(traceback: traceback, output: output, number: number)
+        func outputOrThrow() throws -> Output {
+            if let exception {
+                throw Failure(
+                    kind: .exception(exception.name),
+                    message: exception.message,
+                    traceback: exception.traceback,
+                    output: output,
+                )
             }
             return output
+        }
+    }
+}
+
+// MARK: - Interpreter.ExceptionDetail
+
+private extension Interpreter {
+    struct ExceptionDetail: Decodable {
+        let name: ExceptionName
+        let message: String
+        let traceback: String
+
+        init(from decoder: borrowing Decoder) throws {
+            name = .init(rawValue: try decoder.decode(String.self, at: 0))
+            message = try decoder.decode(String.self, at: 1)
+            traceback = try decoder.decode(String.self, at: 2)
         }
     }
 }

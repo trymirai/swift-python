@@ -12,9 +12,7 @@ extension Environment {
         private static let moduleName = "_swift_python_runtime.packaging"
 
         private nonisolated let executor: Interpreter.Executor
-
-        // A shared preparation holds its reservation from manifest read through publication.
-        nonisolated let preparations: Session.Operations = .init()
+        private nonisolated let preparations: Session.Operations = .init()
 
         private var pThread: PThread?
         private var configuration: Configuration?
@@ -42,16 +40,7 @@ extension Environment {
 
             let pThread = try PThread()
             let configuration = try pThread.withAttached { attachment in
-                try Object.installImporter(in: attachment)
-                let resolved = try options.resolved(in: attachment)
-
-                let module = try Object.import(module: Self.moduleName, in: attachment)
-                let configure = try module.attribute("configure")
-                let options = try Object(encoding: resolved, in: attachment)
-                return try Self.withEncodedSources(packages, in: attachment) { sources, reader in
-                    try configure.call(options, sources, reader)
-                        .decode(as: Environment.Configuration.self)
-                }
+                try Self.configure(packages, options: options, in: attachment)
             }
 
             self.pThread = consume pThread
@@ -59,13 +48,30 @@ extension Environment {
             return configuration
         }
 
+        private static func configure(
+            _ packages: [Runtime.PackageSource.Resolved],
+            options: Options,
+            in attachment: borrowing PThread.Attachment,
+        ) throws -> Configuration {
+            try Object.installImporter(in: attachment)
+            let resolved = try options.resolved(in: attachment)
+
+            let module = try Object.import(module: moduleName, in: attachment)
+            let configure = try module(methodNamed: "configure")
+            let options = try Object(encoding: resolved, in: attachment)
+
+            return try withEncodedSources(packages, in: attachment) { sources, reader in
+                try configure(options, sources, reader).decode(as: Configuration.self)
+            }
+        }
+
         func configuration(
             for packages: [Runtime.PackageSource.Resolved],
         ) throws -> Environment.Configuration {
             try withModule { module, attachment in
-                let describe = try module.attribute("describe_sources")
+                let describe = try module(methodNamed: "describe_sources")
                 return try Self.withEncodedSources(packages, in: attachment) { sources, reader in
-                    try describe.call(sources, reader).decode(as: Environment.Configuration.self)
+                    try describe(sources, reader).decode(as: Environment.Configuration.self)
                 }
             }
         }
@@ -87,8 +93,7 @@ extension Environment {
             at project: Runtime.Path,
         ) throws -> Runtime.PackageSource.Resolved? {
             let path = try withModule { module, _ in
-                try module.attribute("project_package_source")
-                    .call(project.string)
+                try module(methodNamed: "project_package_source")(project.string)
                     .decode(as: String?.self)
             }
             return try path.map { .directory(try Runtime.Path($0)) }
@@ -96,10 +101,20 @@ extension Environment {
 
         nonisolated func projectRequirements(
             at project: Runtime.Path,
+            target: [String: String] = [:],
             execution: Session.Control,
         ) async throws -> [String] {
-            let inputs = try await Request.readingProject(at: project)
+            let inputs = try await Request.readingProject(at: project, target: target)
             return try await request(inputs, execution: execution)
+        }
+
+        // A shared preparation holds its reservation from manifest read through publication.
+        nonisolated func withSharedPreparation<Result>(
+            _ prepare: (Session.Control) async throws -> Result,
+        ) async throws -> Result {
+            try await preparations.withReservation(.queued) {
+                try await Environment.withPackageOperation(prepare)
+            }
         }
 
         // The caller keeps interruption active until the operation is ready to publish.
@@ -110,8 +125,9 @@ extension Environment {
             try execution.checkInterruption()
 
             return try withModule { module, attachment in
-                let function = try module.attribute(request.function)
+                let function = try module(methodNamed: request.function)
                 let argument = try Object(encoding: request, in: attachment)
+
                 let result = unsafe try function.callInterruptibly(
                     [argument.pointer],
                     using: execution,
@@ -122,8 +138,8 @@ extension Environment {
 
         func encodeManifest(_ manifest: some Encodable & Sendable) throws -> String {
             try withModule { module, attachment in
-                let encode = try module.attribute("encode_manifest")
-                return try encode.call(Object(encoding: manifest, in: attachment)).string()
+                let encode = try module(methodNamed: "encode_manifest")
+                return try encode(Object(encoding: manifest, in: attachment)).string()
             }
         }
 
@@ -132,9 +148,9 @@ extension Environment {
             as type: Result.Type,
         ) throws -> Result {
             try withModule { module, attachment in
-                let decode = try module.attribute("decode_manifest")
-                return try decode.call(Object(bytes: bytes.span, in: attachment))
-                    .decode(as: type)
+                let decode = try module(methodNamed: "decode_manifest")
+                let data = try Object(bytes: bytes.span, in: attachment)
+                return try decode(data).decode(as: type)
             }
         }
 
@@ -148,7 +164,7 @@ extension Environment {
                     return try body(module, attachment)
                 }
             case .none:
-                throw Session.Error.closed
+                throw Failure.closed
             }
         }
     }

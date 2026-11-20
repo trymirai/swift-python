@@ -4,4 +4,6 @@
 // macOS-only integration check against the current system root store.
 int CPython_CheckSystemTrust(void);
 
+int CPython_FailOnOpenSSLCleanup(void);
+
 #endif /* SWIFT_PYTHON_LIBPYTHONTESTSUPPORT_H */

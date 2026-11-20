@@ -16,11 +16,12 @@ extension Environment {
             var updated = self
             updated.local = local
 
-            if let resolution {
-                updated.fingerprint = resolution.fingerprint
-                updated.packages = resolution.distributions.mapValues(\.record)
+            guard let resolution else {
+                return updated
             }
 
+            updated.fingerprint = resolution.fingerprint
+            updated.packages = resolution.distributions.mapValues(\.record)
             return updated
         }
 
@@ -92,7 +93,7 @@ extension Environment.Publication: Decodable {
             name == nil || active != nil,
             manifest.packages.isEmpty == (active == nil)
         else {
-            throw Exception(name: "ValueError", message: "Invalid active package directory.")
+            throw Failure(.valueError, message: "Invalid active package directory.")
         }
 
         self.init(active: active, manifest: manifest)

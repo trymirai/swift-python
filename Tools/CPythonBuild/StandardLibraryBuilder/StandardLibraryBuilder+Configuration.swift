@@ -18,11 +18,10 @@ extension StandardLibraryBuilder {
 
             let text = try await workspace.read(textFrom: configuration.appending(header))
             let defines = integerDefines(in: text)
-            result.append((
-                profile.moduleName,
-                Self.moduleSource(for: profile, version: version, defines: defines),
-            ))
+            let body = Self.moduleSource(for: profile, version: version, defines: defines)
+            result.append((profile.moduleName, body))
         }
+
         return result
     }
 
@@ -57,29 +56,24 @@ extension StandardLibraryBuilder {
 
             family = parts[0]
             let architecture = parts[parts.count - 1]
-            let abi: String
-            switch family {
+            let target: (platform: String, abi: String) = switch family {
             case "linux":
-                platform = "linux"
-                abi = "linux-" + parts[1]
+                ("linux", "linux-" + parts[1])
             case "macos":
-                platform = "darwin"
-                abi = "darwin"
+                ("darwin", "darwin")
             case "ios":
-                platform = "ios"
-                abi = "iphoneos"
+                ("ios", "iphoneos")
             case "simulator":
-                platform = "ios"
-                abi = "iphonesimulator"
+                ("ios", "iphonesimulator")
             case "catalyst":
-                platform = "ios"
-                abi = "macabi"
+                ("ios", "macabi")
             default:
                 throw BuildError("Unsupported configuration profile: \(profile)")
             }
+            platform = target.platform
 
             let cpu = family == "linux" && architecture == "arm64" ? "aarch64" : architecture
-            moduleName = "_sysconfigdata__\(platform)_\(cpu)-\(abi)"
+            moduleName = "_sysconfigdata__\(platform)_\(cpu)-\(target.abi)"
         }
     }
 
@@ -105,9 +99,9 @@ extension StandardLibraryBuilder {
 
         """
 
-        return runtime + values.sorted { $0.key < $1.key }
-            .map { "    " + $0.key.quotedSourceLiteral + ": " + $0.value + "," }
-            .joined(separator: "\n") + "\n}\n"
+        let sorted = values.sorted { left, right in left.key < right.key }
+        let entries = sorted.map { key, value in "    \(key.quotedSourceLiteral): \(value)," }
+        return runtime + entries.joined(separator: "\n") + "\n}\n"
     }
 
     private static func moduleValues(
@@ -115,7 +109,11 @@ extension StandardLibraryBuilder {
         version: String,
         defines: [String: String],
     ) -> [String: String] {
-        var values = defines
+        let sharedLinker = if profile.family == "linux" {
+            "clang -shared"
+        } else {
+            "clang -bundle -undefined dynamic_lookup"
+        }
         let strings = [
             "VERSION": version,
             "LDVERSION": version,
@@ -127,9 +125,7 @@ extension StandardLibraryBuilder {
             "RANLIB": "ranlib",
             "CFLAGS": "",
             "LDFLAGS": "",
-            "LDSHARED": profile.family == "linux"
-                ? "clang -shared"
-                : "clang -bundle -undefined dynamic_lookup",
+            "LDSHARED": sharedLinker,
 
             "LIBRARY": "libcpython.a",
             "LDLIBRARY": "libcpython.a",
@@ -148,6 +144,7 @@ extension StandardLibraryBuilder {
             "PYTHONFRAMEWORK": "",
         ]
 
+        var values = defines
         for (key, value) in strings {
             values[key] = value.quotedSourceLiteral
         }

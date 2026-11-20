@@ -18,9 +18,8 @@ extension Session.Control {
         private let context: Context?
         private let executor: any TaskExecutor
 
-        private let state: Mutex<State>
-
         let pipe: Pipe
+        private let state: Mutex<State>
 
         init(
             _ operation: @escaping @Sendable () async throws -> Reply,
@@ -36,17 +35,20 @@ extension Session.Control {
         }
 
         func run() async {
-            await withTaskCancellationHandler {
-                await withDiscardingTaskGroup { group in
-                    group.addTask(executorPreference: executor) { await self.invoke() }
+            await withTaskCancellationHandler(
+                operation: {
+                    await withDiscardingTaskGroup { group in
+                        group.addTask(executorPreference: executor) { await self.invoke() }
 
-                    await waitForCompletion()
-                    cancel()
-                    group.cancelAll()
-                }
-            } onCancel: {
-                self.cancel()
-            }
+                        await waitForCompletion()
+                        cancel()
+                        group.cancelAll()
+                    }
+                },
+                onCancel: {
+                    self.cancel()
+                },
+            )
         }
 
         private func waitForCompletion() async {
@@ -80,14 +82,14 @@ extension Session.Control {
         ) throws -> Result {
             try checkActive()
             guard let context else {
-                throw Session.Error.closed
+                throw Failure.closed
             }
             return try context.withAccess(body)
         }
 
         func checkActive() throws {
             guard state.withLock({ $0.phase.isPending }) else {
-                throw Session.Error.closed
+                throw Failure.closed
             }
         }
 
@@ -96,20 +98,20 @@ extension Session.Control {
         }
 
         private func finish(_ outcome: Outcome) {
-            guard let pendingMethods = state.withLock({ $0.finish(outcome) }) else {
-                return
-            }
-            signalCompletion()
-            pendingMethods.forEach { $0.cancel() }
-        }
+            let pendingMethods: [any ImportedCallRequest]
+            do {
+                guard let completion = state.withLock({ $0.finish(outcome) }) else {
+                    return
+                }
 
-        private func signalCompletion() {
-            let (continuation, streams) = state.withLock {
-                (exchange(&$0.completion, with: nil), exchange(&$0.streams, with: nil))
+                // Keep the stream descriptors valid through the wakeup.
+                pipe.signal()
+                completion.waiter?.resume()
+                withExtendedLifetime(completion.streams) {}
+                pendingMethods = completion.methods
             }
-            pipe.signal()
-            continuation?.resume()
-            withExtendedLifetime(streams) {}
+
+            pendingMethods.forEach { $0.cancel() }
         }
 
         func submit(_ method: any ImportedCallRequest) throws {
@@ -202,12 +204,20 @@ extension Session.Control.Call {
             return outcome
         }
 
-        mutating func finish(_ outcome: Outcome) -> [any ImportedCallRequest]? {
+        mutating func finish(_ outcome: Outcome) -> (
+            methods: [any ImportedCallRequest],
+            waiter: CheckedContinuation<Void, Never>?,
+            streams: Session.Stream.Descriptors?,
+        )? {
             guard phase.isPending else {
                 return nil
             }
             phase = .ready(outcome)
-            return exchange(&methods, with: [])
+            return (
+                exchange(&methods, with: []),
+                exchange(&completion, with: nil),
+                exchange(&streams, with: nil),
+            )
         }
     }
 }
@@ -263,7 +273,7 @@ extension Session.Control {
             throw Errno(rawValue: status)
         }
         guard let outcome = call.take() else {
-            throw Runtime.Failure("The file access decision has not completed.")
+            throw Failure("The file access decision has not completed.")
         }
         return try outcome.get()
     }

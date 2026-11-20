@@ -51,7 +51,16 @@ CPython_CurrentSubprocesses(void)
 bool
 CPython_AllowsSubprocesses(void)
 {
-    return current != NULL;
+    return current != NULL && CPython_HasOperationAccess();
+}
+
+static inline bool
+subprocesses_are_stopping(CPython_Subprocesses *scope)
+{
+    pthread_mutex_lock(&scope->lock);
+    bool stopping = scope->stopping;
+    pthread_mutex_unlock(&scope->lock);
+    return stopping;
 }
 
 static void
@@ -78,15 +87,12 @@ CPython_StopSubprocesses(CPython_Subprocesses *scope)
 CPython_Subprocess *
 CPython_PrepareSubprocess(int input, int output, int error)
 {
-    if (current == NULL) {
+    if (!CPython_AllowsSubprocesses()) {
         CPython_UnsupportedNativeOperation();
         return NULL;
     }
 
-    pthread_mutex_lock(&current->lock);
-    bool stopping = current->stopping;
-    pthread_mutex_unlock(&current->lock);
-    if (stopping) {
+    if (subprocesses_are_stopping(current)) {
         CPython_RaiseKeyboardInterrupt();
         return NULL;
     }

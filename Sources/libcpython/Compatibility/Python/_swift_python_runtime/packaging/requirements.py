@@ -6,10 +6,10 @@ import tomllib
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from .configuration import MARKER_ENVIRONMENT, PYTHON_VERSION, supports_python
+from .configuration import MARKER_ENVIRONMENT, PYTHON_VERSION, marker_environment, supports_python
 
 
-def _requirements(values: list[str]) -> list[Requirement]:
+def parse_requirements(values: list[str], markers=MARKER_ENVIRONMENT) -> list[Requirement]:
     result = []
 
     for value in values:
@@ -19,14 +19,17 @@ def _requirements(values: list[str]) -> list[Requirement]:
                 "Direct URLs and source builds are not supported; use named wheel requirements"
             )
 
-        if requirement.marker is None or requirement.marker.evaluate(MARKER_ENVIRONMENT):
-            result.append(requirement)
+        marker = requirement.marker
+        if marker is not None and not marker.evaluate(markers):
+            continue
+
+        result.append(requirement)
 
     return result
 
 
-def _requirement_strings(values: list[str]) -> list[str]:
-    return [str(requirement) for requirement in _requirements(values)]
+def _requirement_strings(values: list[str], markers=MARKER_ENVIRONMENT) -> list[str]:
+    return [str(requirement) for requirement in parse_requirements(values, markers)]
 
 
 def _requirements_txt(text: str) -> list[str]:
@@ -49,10 +52,12 @@ def _requirements_txt(text: str) -> list[str]:
             raise ValueError(
                 "requirements.txt supports requirement declarations, not pip command options"
             )
+
         lines.append(line)
 
     if pending:
         raise ValueError("Unfinished continuation in requirements.txt")
+
     return lines
 
 
@@ -77,7 +82,7 @@ def project(request: dict) -> list[str]:
     else:
         requirements = metadata.get("dependencies", [])
 
-    return _requirement_strings(requirements)
+    return _requirement_strings(requirements, marker_environment(request))
 
 
 def _script_metadata(source: str) -> dict | None:
@@ -122,7 +127,7 @@ def script(request: dict) -> list[str]:
 def normalize(request: dict) -> list[dict]:
     return [
         {"name": canonicalize_name(value.name), "declaration": str(value)}
-        for value in _requirements(request["requirements"])
+        for value in parse_requirements(request["requirements"])
     ]
 
 

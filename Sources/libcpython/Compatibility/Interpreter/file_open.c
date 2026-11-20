@@ -1,4 +1,4 @@
-#include "../file_open.h"
+#include "../interpreter.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -84,10 +84,11 @@ CPython_SetStreamDescriptors(int input, int output, int error)
     streams[2] = error;
 }
 
-static bool
-is_stream(int fd)
+static inline bool
+is_operation_stream(int fd)
 {
-    return fd >= 0 && (fd == streams[0] || fd == streams[1] || fd == streams[2]);
+    return fd >= 0 && CPython_HasOperationAccess() &&
+           (fd == streams[0] || fd == streams[1] || fd == streams[2]);
 }
 
 static Descriptor *
@@ -109,7 +110,8 @@ CPython_RequireFileDescriptor(int fd, bool borrowing_stream)
     if (files == NULL) {
         return 0;
     }
-    if (borrowing_stream && is_stream(fd)) {
+
+    if (borrowing_stream && is_operation_stream(fd)) {
         return 0;
     }
     return require_descriptor(fd) == NULL ? -1 : 0;

@@ -138,15 +138,19 @@ func contextExportsListsClassesWithoutPythonMetadata() async throws {
     assert property_names(Empty) == ()
 
     metadata_name = '__swift_exported_properties__'
+
+    def check_inspection(target):
+        assert metadata_name not in dir(target)
+        assert metadata_name not in dict(inspect.getmembers(target))
+        assert metadata_name not in dict(inspect.getmembers_static(target))
+        with redirect_stdout(StringIO()) as output:
+            help(target)
+        assert metadata_name not in output.getvalue()
+
     for cls in exported_classes:
         assert not hasattr(cls, metadata_name)
         assert metadata_name not in vars(cls)
-        assert metadata_name not in dir(cls)
-        assert metadata_name not in dict(inspect.getmembers(cls))
-        assert metadata_name not in dict(inspect.getmembers_static(cls))
-        with redirect_stdout(StringIO()) as output:
-            help(cls)
-        assert metadata_name not in output.getvalue()
+        check_inspection(cls)
 
     value = Child()
     assert property_names(type(value)) == child_names and value.readCount() == 0
@@ -158,12 +162,7 @@ func contextExportsListsClassesWithoutPythonMetadata() async throws {
     assert Child.readonly.fset is None
 
     assert not hasattr(value, metadata_name)
-    assert metadata_name not in dir(value)
-    assert metadata_name not in dict(inspect.getmembers(value))
-    assert metadata_name not in dict(inspect.getmembers_static(value))
-    with redirect_stdout(StringIO()) as output:
-        help(value)
-    assert metadata_name not in output.getvalue()
+    check_inspection(value)
     """)
 }
 
@@ -196,30 +195,35 @@ func contextExportsAndClassReferencesStayWithinTheirGeneration() async throws {
     }
 
     let exports: Python::Context.Exports = try await first.enqueue { $0.exports }
-    let classes = try await first.enqueue { _ in
-        try exports.classes()
+    let classes = try await first.enqueue { context in
+        try context.exports.classes()
     }
     #expect(classes.count == 4)
     try await first.enqueue { context in
         try context.set(classes, forKey: "saved_classes")
-        try context.set(exports.classes(), forKey: "current_classes")
+        #expect(throws: Python::Failure.self) { try exports.classes() }
+        try context.set(context.exports.classes(), forKey: "current_classes")
     }
     _ = try await first.evaluate("assert set(saved_classes) == set(current_classes)")
 
-    await #expect(throws: Python::Exception.self) {
-        try await second.enqueue { _ in try exports.classes() }
-    }
-    await #expect(throws: Python::Exception.self) {
-        try await second.set(classes, forKey: "foreign_classes")
+    func expectRejection(
+        in session: Python::Session,
+        key: String,
+        sourceLocation: SourceLocation = #_sourceLocation,
+    ) async {
+        await #expect(throws: Python::Failure.self, sourceLocation: sourceLocation) {
+            try await session.enqueue { _ in try exports.classes() }
+        }
+        await #expect(throws: Python::Failure.self, sourceLocation: sourceLocation) {
+            try await session.set(classes, forKey: key)
+        }
     }
 
+    await expectRejection(in: second, key: "foreign_classes")
+
     try await first.reset()
-    await #expect(throws: Python::Exception.self) {
-        try await first.enqueue { _ in try exports.classes() }
-    }
-    await #expect(throws: Python::Exception.self) {
-        try await first.set(classes, forKey: "old_classes")
-    }
+    await expectRejection(in: first, key: "old_classes")
+
     try await bindExportedClasses(in: first)
     _ = try await first.evaluate("""
     from context_exports_child import Child

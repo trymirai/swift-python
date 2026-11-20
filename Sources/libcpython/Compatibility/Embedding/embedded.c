@@ -1,5 +1,6 @@
 #include "Python.h"
 #include "embedded_data.h"
+#include "interpreter.h"
 #include "internal/pycore_unicodeobject.h"
 
 #include <stdbool.h>
@@ -175,12 +176,31 @@ list_resource_children(PyObject *Py_UNUSED(self), PyObject *argument)
     return result;
 }
 
+static PyObject *
+has_operation_access(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(args))
+{
+    // Host streams also require an attached Swift scope.
+    return PyBool_FromLong(CPython_CurrentScope() != NULL);
+}
+
+static PyObject *
+owns_context(PyObject *Py_UNUSED(self), PyObject *context)
+{
+    int owns = CPython_ContextBelongsToOperation(context);
+    return owns < 0 ? NULL : PyBool_FromLong(owns);
+}
+
 static PyMethodDef embedded_methods[] = {
+    {"drive_event_loop", _PyCFunction_CAST(CPython_DriveEventLoop), METH_FASTCALL, NULL},
+    {"has_operation_access", has_operation_access, METH_NOARGS, NULL},
+    {"owns_context", owns_context, METH_O, NULL},
+
     {"read", read_resource, METH_O, "Read one embedded resource."},
     {"module", lookup_module, METH_O, "Find an embedded Python module."},
     {"children", list_resource_children, METH_O, "List immediate resource children."},
     {"is_directory", is_resource_directory, METH_O, NULL},
     {"is_file", is_resource_file, METH_O, NULL},
+
     {NULL, NULL, 0, NULL},
 };
 

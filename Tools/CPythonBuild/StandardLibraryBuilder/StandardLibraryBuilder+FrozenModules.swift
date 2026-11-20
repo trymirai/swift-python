@@ -7,44 +7,40 @@ import SystemPackage
 
 extension StandardLibraryBuilder {
     func writeFrozenModules(_ library: Library, using freezer: FilePath) async throws {
-        let output = workspace.outputDirectory
         try await writeGeneratedSource("Frozen.c") { writer in
-            let upstream = try await workspace.read(
-                textFrom: workspace.sourceDirectory.appending("Python/frozen.c"),
-            )
+            let bootstrapHeaders = try await writeBootstrapModules(to: &writer)
 
-            let include = "#include \"frozen_modules/"
-            let frozenHeaders = Set(upstream.split(separator: "\n").compactMap { line in
-                line.hasPrefix(include) ? String(line.dropFirst(include.count).dropLast()) : nil
-            })
-
-            let frozenSource = upstream.replacing(
-                include,
-                with: "#include \"Bootstrap/Python/frozen_modules/",
-            )
-
-            try await writer.write(contentsOf: frozenSource.utf8)
-            try await writer.write(contentsOf: "\n#include \"embedded_data.h\"\n\n".utf8)
-
-            try await workspace
-                .fileSystem
-                .withTemporaryDirectory(prefix: output) { _, directory in
-                    let header = directory.appending("Module.h")
-                    for module in library.modules
-                        where !frozenHeaders.contains(module.name + ".h")
-                    {
-                        let source = try await freezeSource(
-                            for: module,
-                            using: freezer,
-                            into: header,
-                        )
-                        try await writer.write(contentsOf: source.utf8)
-                        try await writer.write(contentsOf: "\n".utf8)
-                    }
+            try await workspace.fileSystem.withTemporaryDirectory(
+                prefix: workspace.outputDirectory,
+            ) { _, directory in
+                let header = directory.appending("Module.h")
+                for module in library.modules where !bootstrapHeaders.contains(module.name + ".h") {
+                    let source = try await freezeSource(for: module, using: freezer, into: header)
+                    try await writer.write(contentsOf: source.utf8)
+                    try await writer.write(contentsOf: "\n".utf8)
                 }
+            }
 
             try await writeModuleCatalogs(library.modules, to: &writer)
         }
+    }
+
+    private func writeBootstrapModules(
+        to writer: inout BufferedWriter<WriteFileHandle>,
+    ) async throws -> Set<String> {
+        let path = workspace.sourceDirectory.appending("Python/frozen.c")
+        let upstream = try await workspace.read(textFrom: path)
+        let include = "#include \"frozen_modules/"
+        let headers = upstream.split(separator: "\n").compactMap { line in
+            line.hasPrefix(include) ? String(line.dropFirst(include.count).dropLast()) : nil
+        }
+        let source = upstream.replacing(
+            include,
+            with: "#include \"Bootstrap/Python/frozen_modules/",
+        )
+        try await writer.write(contentsOf: source.utf8)
+        try await writer.write(contentsOf: "\n#include \"embedded_data.h\"\n\n".utf8)
+        return Set(headers)
     }
 
     private func freezeSource(
@@ -76,8 +72,10 @@ extension StandardLibraryBuilder {
         try await writer.write(contentsOf: declaration.utf8)
 
         for module in modules {
+            let name = module.name.quotedSourceLiteral
             let symbol = module.symbol
-            let entry = "    {\(module.name.quotedSourceLiteral), \(symbol), sizeof(\(symbol)), \(module.isPackage ? 1 : 0)},\n"
+            let isPackage = module.isPackage ? 1 : 0
+            let entry = "    {\(name), \(symbol), sizeof(\(symbol)), \(isPackage)},\n"
             try await writer.write(contentsOf: entry.utf8)
         }
 
@@ -90,7 +88,9 @@ extension StandardLibraryBuilder {
         """.utf8)
 
         for module in modules {
-            let entry = "    {\(module.name.quotedSourceLiteral), \(module.path.quotedSourceLiteral), \(module.isPackage ? 1 : 0)},\n"
+            let name = module.name.quotedSourceLiteral
+            let path = module.path.quotedSourceLiteral
+            let entry = "    {\(name), \(path), \(module.isPackage ? 1 : 0)},\n"
             try await writer.write(contentsOf: entry.utf8)
         }
 

@@ -11,14 +11,24 @@ extension Reference {
     // Python pointers are stored as integers under the mutex. They are dereferenced
     // and released only while this interpreter's thread state is attached.
     final class Store: Sendable {
-        private let state: Mutex<State> = .init(State())
+        private let state: Mutex<State>
         private let schedule: @Sendable () -> Void
 
         let view: Interpreter.View
+        var session: Session? {
+            state.withLock { $0.session }
+        }
 
-        init(view: Interpreter.View, schedule: @escaping @Sendable () -> Void) {
+        init(view: Interpreter.View, session: Session?, schedule: @escaping @Sendable () -> Void) {
             self.view = view
+            state = .init(State(session: session))
             self.schedule = schedule
+        }
+
+        func requireSameGeneration(as other: Reference.Store?) throws {
+            guard self === other else {
+                throw Reference.wrongInterpreter()
+            }
         }
 
         @unsafe
@@ -28,8 +38,8 @@ extension Reference {
 
             let bits = UInt(bitPattern: pointer)
             guard let token = state.withLock({ $0.insert(bits) }) else {
-                throw Exception(
-                    name: "ReferenceError",
+                throw Failure(
+                    .referenceError,
                     message: "The Python interpreter is closed.",
                 )
             }
@@ -50,8 +60,8 @@ extension Reference {
                 let bits = state.withLock({ $0.pointer(for: token) }),
                 let pointer = unsafe UnsafeMutablePointer<PyObject>(bitPattern: bits)
             else {
-                throw Exception(
-                    name: "ReferenceError",
+                throw Failure(
+                    .referenceError,
                     message: "The Python reference belongs to an expired session generation.",
                 )
             }
@@ -60,6 +70,7 @@ extension Reference {
 
         func releasePendingReferences() {
             let pendingReleases = state.withLock { $0.takePendingReleases() }
+
             // A final DECREF can run Python code, so release outside the mutex.
             unsafe Object.decrementReferences(pendingReleases)
         }
@@ -75,6 +86,7 @@ extension Reference {
 
 private extension Reference.Store {
     struct State {
+        weak var session: Session?
         var isActive: Bool = true
 
         var nextToken: UInt64 = 0

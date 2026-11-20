@@ -21,6 +21,7 @@ extension CPythonBuildPlugin {
             let directories = [
                 "Sources/libcpython/Generated/Configuration",
                 "Sources/libcpython/Compatibility/Python",
+                "Tools/CPythonPatches",
 
                 "Submodules/cpython/Include",
                 "Submodules/cpython/Objects",
@@ -33,22 +34,17 @@ extension CPythonBuildPlugin {
                 "Submodules/python-packages",
             ]
 
-            // SwiftPM tracks the manifest and tool. The plugin lists their source inputs.
-            var inputs = [String]()
-            for path in directories {
-                try visit(path, into: &inputs)
-            }
-
-            inputs.append(contentsOf: [
-                "Tools/CPythonPatches/FileAccess.patch",
-                "Tools/CPythonPatches/ThreadHandles.patch",
+            var inputs = [
                 "Submodules/cpython/Tools/freeze/flag.py",
                 "Submodules/cpython/configure",
                 "Submodules/cpython/Makefile.pre.in",
                 "Submodules/cpython/config.guess",
                 "Submodules/cpython/config.sub",
-            ])
+            ]
 
+            for path in directories {
+                try visit(path, into: &inputs)
+            }
             return inputs.sorted()
         }
 
@@ -62,17 +58,20 @@ extension CPythonBuildPlugin {
                 closedir(directory)
             }
 
-            while true {
+            func nextName() throws -> String? {
+                // readdir returns nil at both end of directory and on error.
                 errno = 0
-                guard let entry = readdir(directory) else {
-                    if errno != 0 {
-                        throw MissingInputError(path: path)
-                    }
-                    break
+                if let entry = readdir(directory) {
+                    return Self.entryName(entry)
                 }
+                guard errno == 0 else {
+                    throw MissingInputError(path: path)
+                }
+                return nil
+            }
 
-                let name = Self.entryName(entry)
-                if Self.excludedNames.contains(name) {
+            while let name = try nextName() {
+                guard !Self.excludedNames.contains(name) else {
                     continue
                 }
 

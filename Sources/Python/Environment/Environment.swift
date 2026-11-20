@@ -25,33 +25,39 @@ final class Environment {
     private(set) var sessionPackages: [Runtime.PackageSource.Resolved]
     private var sessionConfiguration: Configuration?
 
+    private(set) var manifest: Manifest?
     private var storage: Storage?
     private var temporary: FilePath?
-    private(set) var manifest: Manifest?
 
     var needsPreparation: Bool {
-        directory != nil || projectDirectory != nil || !requirements.isEmpty
-            || !sessionPackages.isEmpty || !packaging.packages.isEmpty
+        if directory != nil || projectDirectory != nil {
+            return true
+        }
+        return !requirements.isEmpty || !sessionPackages.isEmpty || !packaging.packages.isEmpty
     }
 
-    var packageSources: [Runtime.PackageSource.Resolved] {
-        sessionPackages.isEmpty ? packaging.packages : sessionPackages + packaging.packages
+    var packageDirectories: [Runtime.Path] {
+        sessionConfiguration?.packageDirectories ?? []
     }
 
     var paths: Runtime.Paths.Environment? {
-        storage?.paths
-            ?? (directory?.file ?? temporary).map { Runtime.Paths.Environment(directory: $0) }
+        if let storage {
+            return storage.paths
+        }
+        return (directory?.file ?? temporary).map { Runtime.Paths.Environment(directory: $0) }
     }
 
     var sitePackagesDirectory: FilePath? {
         guard manifest?.packages.isEmpty == false else {
             return nil
         }
+
         if let storage {
             return storage.active.map { storage.paths.packagesDirectory(for: $0) }
         }
-        return temporary
-            .map { Runtime.Paths.Environment(directory: $0).temporaryPackagesDirectory }
+        return temporary.map { directory in
+            Runtime.Paths.Environment(directory: directory).temporaryPackagesDirectory
+        }
     }
 
     init(
@@ -89,6 +95,7 @@ final class Environment {
             self.manifest = manifest
             self.storage = storage
         }
+
         return (service, configuration)
     }
 
@@ -96,6 +103,7 @@ final class Environment {
         guard needsPreparation || manifest != nil else {
             return [:]
         }
+
         let (_, configuration) = try await open()
 
         let localVersions = manifest?.packages.mapValues(\.version) ?? [:]
@@ -107,6 +115,7 @@ final class Environment {
             self.storage = nil
             try? storage.lease.close()
         }
+
         if let temporary {
             self.temporary = nil
             await Self.discard(temporary)
@@ -122,7 +131,8 @@ final class Environment {
         }
 
         if
-            sessionPackages.isEmpty, let projectDirectory,
+            sessionPackages.isEmpty,
+            let projectDirectory,
             let source = try await service.projectPackageSource(at: projectDirectory)
         {
             sessionPackages = [source]
@@ -131,7 +141,7 @@ final class Environment {
         let configuration = if sessionPackages.isEmpty {
             application
         } else {
-            try await service.configuration(for: packageSources)
+            try await service.configuration(for: sessionPackages + packaging.packages)
         }
         sessionConfiguration = configuration
         return configuration
@@ -174,17 +184,12 @@ extension Environment {
         execution: Session.Control,
     ) async throws {
         let previousSlot = storage.active
-        let nextSlot: Slot? = if resolution == nil {
-            previousSlot
-        } else if next.packages.isEmpty {
-            nil
-        } else {
-            previousSlot?.other ?? .a
-        }
+        let nextSlot = storage.slot(for: next, replacingFiles: resolution != nil)
+        let publication = Publication(active: nextSlot, manifest: next)
 
         let hasSlot = nextSlot != nil || previousSlot != nil
         let hasLocalRequirements = !next.local.isEmpty || manifest?.local.isEmpty == false
-        // A removal still has to publish if it clears the last slot or local requirement.
+        // Persist an empty manifest when removing the last local requirement.
         guard hasSlot || hasLocalRequirements else {
             try saveManifestInMemory(next, execution: execution)
             return
@@ -196,25 +201,24 @@ extension Environment {
         } else {
             nil
         }
+
         let stagedManifest = paths.stagedManifestFile
         defer { try? Self.unlinkIfPresent(stagedManifest) }
 
-        func stageAndPublish() async throws {
+        try await Self.discardOnFailure(stagedPackages) {
             if let stagedPackages, let resolution {
                 try await FileSystem.shared.removeItem(at: stagedPackages)
                 try await Self.stageFiles(resolution, into: stagedPackages, execution: execution)
             }
 
             try await Self.publishManifest(
-                Publication(active: nextSlot, manifest: next),
+                publication,
                 stagingAt: stagedManifest,
                 to: paths.manifestFile,
                 using: service,
                 execution: execution,
             )
         }
-
-        try await Self.discardOnFailure(stagedPackages, stageAndPublish)
 
         self.manifest = next
         self.storage?.active = nextSlot
@@ -255,11 +259,8 @@ extension Environment {
             try execution.finishCheckingInterruption()
         }
 
-        let previous = temporary
         manifest = next
-        temporary = staged
-
-        if let previous {
+        if let previous = exchange(&temporary, with: staged) {
             await Self.discard(previous)
         }
     }
@@ -307,8 +308,8 @@ extension Environment {
         }
     }
 
-    private static func invalid(_ message: String) -> Exception {
-        Exception(name: "ValueError", message: message)
+    private static func invalid(_ message: String) -> Failure {
+        Failure(.valueError, message: message)
     }
 }
 
@@ -320,6 +321,13 @@ private extension Environment {
         let lease: FileDescriptor
 
         var active: Slot?
+
+        func slot(for manifest: Manifest, replacingFiles: Bool) -> Slot? {
+            guard replacingFiles else {
+                return active
+            }
+            return manifest.packages.isEmpty ? nil : (active?.other ?? .a)
+        }
     }
 }
 
@@ -335,6 +343,7 @@ extension Environment {
 
         let paths = Runtime.Paths.Environment(directory: root)
         var opened = Storage(paths: paths, lease: try acquireLease(at: paths.lockFile, for: root))
+
         do {
             let claimed = try isClaimed(opened.lease)
             let publication = try await readPublication(
@@ -349,6 +358,7 @@ extension Environment {
                 // Claim the root only after confirming the reserved paths are available.
                 _ = try opened.lease.writeAll(toAbsoluteOffset: 0, [leaseMarker])
             }
+
             return (opened, publication?.manifest)
         } catch {
             try? opened.lease.close()
@@ -399,15 +409,15 @@ extension Environment {
         using service: Service,
         expectedABI: [String],
     ) async throws -> Publication? {
-        guard
-            let publication = try await readManifest(
-                at: paths.manifestFile,
-                using: service,
-                as: Publication.self,
-            )
-        else {
+        let publication = try await readManifest(
+            at: paths.manifestFile,
+            using: service,
+            as: Publication.self,
+        )
+        guard let publication else {
             return nil
         }
+
         try await validatePublication(publication, in: paths, expectedABI: expectedABI)
         return publication
     }
@@ -417,17 +427,14 @@ extension Environment {
         using service: Service,
         as type: Value.Type,
     ) async throws -> Value? {
-        guard
-            let info = try await FileSystem.shared.info(
-                forFileAt: path,
-                infoAboutSymbolicLink: true,
-            )
-        else {
+        let info = try await FileSystem.shared.info(forFileAt: path, infoAboutSymbolicLink: true)
+        guard let info else {
             return nil
         }
         guard info.type == .regular else {
             throw invalid("Expected a regular package environment manifest: \(path)")
         }
+
         let bytes = try await [UInt8](contentsOf: path, maximumSizeAllowed: .unlimited)
         return try await service.decodeManifest(bytes, as: type)
     }
@@ -444,6 +451,7 @@ extension Environment {
         guard let active = publication.active else {
             return
         }
+
         let packages = paths.packagesDirectory(for: active)
         let info = try await FileSystem.shared.info(
             forFileAt: packages,
@@ -529,8 +537,8 @@ private extension Environment {
             let code = errno
             try? descriptor.close()
             if code == EWOULDBLOCK || code == EAGAIN {
-                throw Exception(
-                    name: "RuntimeError",
+                throw Failure(
+                    .runtimeError,
                     message: "The package environment is already in use: \(root)",
                 )
             }
@@ -547,6 +555,7 @@ extension Environment {
         let paths = Runtime.Paths(cacheDirectory: root)
         try await clearCacheArtifacts(in: paths.wheelsDirectory, removesPartialInstalls: false)
         try await clearCacheArtifacts(in: paths.environmentsDirectory, removesPartialInstalls: true)
+        try await clearCacheArtifacts(in: root.appending("bundles"), removesPartialInstalls: false)
     }
 
     private static func clearCacheArtifacts(
@@ -563,7 +572,7 @@ extension Environment {
             for try await entry in handle.listContents() where entry.type == .directory {
                 let artifact = entry.name.string
                 let partial = removesPartialInstalls && isPartialInstallation(artifact)
-                if isCacheDigest(artifact) || partial {
+                if isLowercaseHex(artifact, length: 64) || partial {
                     try await files.removeItem(at: entry.path)
                 }
             }
@@ -572,14 +581,13 @@ extension Environment {
 
     private static func isPartialInstallation(_ name: String) -> Bool {
         let prefix = Runtime.Paths.installationPrefix
-        let suffix = name.dropFirst(prefix.count)
-        return name.hasPrefix(prefix) && suffix.utf8.count == 32
-            && suffix.utf8.allSatisfy { (48 ... 57).contains($0) || (97 ... 102).contains($0) }
+        return name.hasPrefix(prefix) && isLowercaseHex(name.dropFirst(prefix.count), length: 32)
     }
 
-    private static func isCacheDigest(_ name: String) -> Bool {
-        name.utf8.count == 64 && name.utf8
-            .allSatisfy { (48 ... 57).contains($0) || (97 ... 102).contains($0) }
+    private static func isLowercaseHex(_ name: some StringProtocol, length: Int) -> Bool {
+        name.utf8.count == length && name.utf8.allSatisfy { byte in
+            (0x30 ... 0x39).contains(byte) || (0x61 ... 0x66).contains(byte)
+        }
     }
 
     static func stageFiles(
@@ -591,12 +599,14 @@ extension Environment {
         try await files.createDirectory(at: directory, withIntermediateDirectories: true)
 
         var created = Set([directory])
+
         func stageMember(_ relative: FilePath, from origin: FilePath) async throws {
             try execution.checkInterruption()
 
             let source = origin.pushing(relative)
             let target = directory.pushing(relative)
             let parent = target.removingLastComponent()
+
             if created.insert(parent).inserted {
                 try await files.createDirectory(at: parent, withIntermediateDirectories: true)
             }

@@ -50,8 +50,9 @@ private struct CodingPacket: ~Copyable, Sendable, Python::Encodable, Python::Dec
 func typedRecordsAndOptionalsRoundTripThroughTheNamespace() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
-    let point = CodingPoint(x: 42, labels: ["hello", "Привет\0🐍"])
+    defer { await session.close() }
 
+    let point = CodingPoint(x: 42, labels: ["hello", "Привет\0🐍"])
     try await session.set(point, forKey: "point")
     try await session.set(Int?.none, forKey: "nothing")
     _ = try await session.evaluate("""
@@ -61,19 +62,19 @@ func typedRecordsAndOptionalsRoundTripThroughTheNamespace() async throws {
 
     #expect(try await session.get("point", as: CodingPoint.self) == point)
     #expect(try await session.get("nothing", as: Int?.self) == nil)
+
     try await session.enqueue { context in
         let settings = try context.object("point")
         try settings.set(43, forKey: "x")
-        let value: Int = try settings.get("x")
+        let value: Int = try settings.value(forKey: "x").decode()
         #expect(value == 43)
 
         let array = try context.encode([1, 2])
         try array.set(42, at: 1)
-        let element = try array.object(1)
+        let element = try array.value(at: 1)
         try array.remove(1)
         #expect(try element.decode(as: Int.self) == 42)
     }
-    await session.close()
 }
 
 @Test
@@ -98,12 +99,14 @@ func integersRoundTripAtTheirWidthAndRejectOverflow() async throws {
     #expect(try await session.get("maximum", as: UInt64.self) == .max)
     #expect(try await session.get("wide_maximum", as: UInt128.self) == .max)
 
-    try await expectPythonException("OverflowError") {
+    try await expectPythonFailure(.exception(.overflowError)) {
         _ = try await session.get("maximum", as: Int8.self)
     }
 
-    try await expectPythonException("TypeError") {
-        _ = try await session.get("wide_subclass", as: UInt128.self)
+    let wide = try await session.get("wide_subclass", as: UInt128.self)
+    #expect(wide == (UInt128(1) << 127) + 42)
+    try await expectPythonFailure(.exception(.overflowError)) {
+        _ = try await session.get("wide_subclass", as: UInt64.self)
     }
 }
 
@@ -111,6 +114,8 @@ func integersRoundTripAtTheirWidthAndRejectOverflow() async throws {
 func moveOnlyValuesCanCrossTheSessionQueue() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
+    defer { await session.close() }
+
     try await session.set(CodingPoint(x: 42, labels: []), forKey: "point")
 
     let packet = try await session.enqueue { context in
@@ -130,13 +135,14 @@ func moveOnlyValuesCanCrossTheSessionQueue() async throws {
     } else {
         Issue.record("Expected a packet when decoding a non-nil optional.")
     }
-    await session.close()
 }
 
 @Test
 func attributesSupportNULAndModuleNamesRejectIt() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
+    defer { await session.close() }
+
     _ = try await session.evaluate(#"""
     class Named:
         pass
@@ -148,15 +154,14 @@ func attributesSupportNULAndModuleNamesRejectIt() async throws {
 
     try await session.enqueue { context in
         let named = try context.object("named")
-        #expect(try named.attribute("value\0tail").decode(as: Int.self) == 42)
-        try named.setAttribute("value\0tail", to: 43)
-        #expect(try named.attribute("value\0tail").decode(as: Int.self) == 43)
+        #expect(try named.value(forAttribute: "value\0tail").decode(as: Int.self) == 42)
+        try named.set(43, forAttribute: "value\0tail")
+        #expect(try named.value(forAttribute: "value\0tail").decode(as: Int.self) == 43)
 
-        try expectPythonException("ValueError") {
+        try expectPythonFailure(.exception(.valueError)) {
             _ = try context.import(module: "sys\0tail")
         }
     }
-    await session.close()
 }
 
 @Test
@@ -167,10 +172,10 @@ func typedNamesFollowTheSessionLifecycle() async throws {
     try await session.set(2, forKey: "until_reset")
 
     func expectMissing(_ name: String) async throws {
-        let error = try await #require(throws: Python::Exception.self) {
+        let error = try await #require(throws: Python::Failure.self) {
             try await session.get(name, as: Int.self)
         }
-        #expect(error.name == "NameError", "Expected \(name) to be absent.")
+        #expect(error.kind == .exception(.nameError), "Expected \(name) to be absent.")
     }
 
     try await session.remove("removed")
@@ -180,9 +185,33 @@ func typedNamesFollowTheSessionLifecycle() async throws {
     try await expectMissing("until_reset")
 
     await session.close()
-    await #expect(throws: Python::Session.Error.self) {
+    await #expect(throws: Python::Failure.self) {
         try await session.set(3, forKey: "closed")
     }
+}
+
+@Test
+func aSnapshotAndALiveReferenceSurviveDifferentLifetimes() async throws {
+    let session = try await Python::Runtime().session()
+    defer { await session.close() }
+
+    try await session.set([1], forKey: "items")
+    let snapshot: [Int] = try await session.get("items")
+    let reference: Python::Reference = try await session.get("items")
+    _ = try await session.evaluate("items.append(2)")
+
+    let live = try await session.enqueue { py in
+        try py.object(reference).decode(as: [Int].self)
+    }
+    #expect(snapshot == [1])
+    #expect(live == [1, 2])
+
+    try await session.reset()
+    await #expect(throws: (any Swift::Error).self) {
+        try await session.set(reference, forKey: "expired")
+    }
+    try await session.set(snapshot, forKey: "restored")
+    #expect(try await session.get("restored", as: [Int].self) == [1])
 }
 
 @Test
@@ -234,34 +263,35 @@ func pythonReferencesAreInterpreterBound() async throws {
 func asynchronousContextOperationsUseSeparateQueueTurns() async throws {
     let runtime = try await Python::Runtime()
     let starts = Mutex(0)
-    let initialize = Python::Module.Function("initialize", synchronous: { _ in
-        starts.withLock { $0 += 1 }
-        return .none
-    })
+    let initialize = Python::Module.Function(
+        "initialize",
+        synchronous: { _ in
+            starts.withLock { $0 += 1 }
+            return .none
+        },
+    )
     let session = try await runtime.session(
         .source("import startup_probe; startup_probe.initialize()"),
         moduleDefinitions: [.init("startup_probe", functions: [initialize])],
     )
 
-    let value: Int = try await session.enqueue { context in
-        await Task.yield()
-        try await context.set(42, forKey: "answer")
-        let value: Int = try await context.get("answer")
-        try await context.remove("answer")
-        return value
-    }
+    await Task.yield()
+    try await session.set(42, forKey: "answer")
+    let value: Int = try await session.get("answer")
+    try await session.remove("answer")
     #expect(value == 42)
 
+    let previous = try await session.enqueue { py in
+        try py.import(module: "builtins").value(forAttribute: "len").retain(in: py)
+    }
     let (started, signal) = AsyncStream<Void>.makeStream()
     let (resume, gate) = AsyncStream<Void>.makeStream()
     let pending = Task {
         defer { signal.finish() }
-        try await session.enqueue { context in
-            try await context.set(1, forKey: "old")
-            signal.finish()
-            for await _ in resume {}
-            try await context.set(2, forKey: "old")
-        }
+        try await session.set(1, forKey: "old")
+        signal.finish()
+        for await _ in resume {}
+        try await session.set(2, forKey: "old")
     }
     defer {
         gate.finish()
@@ -272,12 +302,13 @@ func asynchronousContextOperationsUseSeparateQueueTurns() async throws {
     let old: Int = try await session.get("old")
     #expect(old == 1)
     try await session.reset()
-    gate.finish()
-    try await expectPythonException("ReferenceError") {
-        _ = try await pending.value
+    try await expectPythonFailure(.exception(.referenceError)) {
+        _ = try await session.call(previous, arguments: ["abc"], as: Int.self)
     }
     #expect(starts.withLock { $0 } == 1)
-    try await session.set(3, forKey: "fresh")
+    gate.finish()
+    try await pending.value
+    #expect(try await session.get("old", as: Int.self) == 2)
     #expect(starts.withLock { $0 } == 2)
     await session.close()
 }
@@ -288,11 +319,11 @@ func dictionaryKeyCollisionsThrow() async throws {
     let session = try await runtime.session(.source(#"data = {'\u00e9': None, 'e\u0301': 2}"#))
     defer { await session.close() }
 
-    try await expectPythonException("ValueError") {
+    try await expectPythonFailure(.exception(.valueError)) {
         _ = try await session.get("data", as: [String: Int?].self)
     }
 
-    try await expectPythonException("ValueError") {
+    try await expectPythonFailure(.exception(.valueError)) {
         _ = try await session.get("data", as: Python::Value.self)
     }
 }
@@ -304,7 +335,7 @@ private struct RecoveringEncoding: Python::Encodable {
 
     func encode(to encoder: inout Python::Encoder) throws {
         try tuple.encode(to: &encoder)
-        try expectPythonException("TypeError") {
+        try expectPythonFailure(.exception(.typeError)) {
             try encoder.encode(12, at: 0)
         }
         try encoder.encode(42)
@@ -345,35 +376,52 @@ func typedExportedFunctions() async throws {
 
 private func makeTypedModule() -> Python::Module {
     let defaults = Mutex(0)
-    let next = Python::Module.Function("next", parameters: [
-        .init("value", as: Int.self, hasDefaultValue: true),
-    ], call: { arguments, _, encoder in
-        try arguments.withArgument(Int.self, parameter: 0, default: {
-            defaults.withLock { value in
-                value += 1
-                return value
+    let next = Python::Module.Function(
+        "next",
+        parameters: [
+            .init("value", as: Int.self, hasDefaultValue: true),
+        ],
+        call: { arguments, _, encoder in
+            try arguments.withArgument(
+                Int.self,
+                parameter: 0,
+                default: {
+                    defaults.withLock { value in
+                        value += 1
+                        return value
+                    }
+                },
+                { value in try encoder.encode(value) },
+            )
+        },
+    )
+
+    let point = Python::Module.Function(
+        "point",
+        parameters: [
+            .init("value", as: CodingPoint.self),
+        ],
+        start: { arguments, _ in
+            let value = try arguments.get(0, as: CodingPoint.self)
+            return Python::Module.Function.makeOperation {
+                await Task.yield()
+                return CodingPoint(x: value.x + 1, labels: value.labels)
             }
-        }) { value in try encoder.encode(value) }
-    })
+        },
+    )
 
-    let point = Python::Module.Function("point", parameters: [
-        .init("value", as: CodingPoint.self),
-    ], start: { arguments, _ in
-        let value = try arguments.get(0, as: CodingPoint.self)
-        return Python::Module.Function.makeOperation {
-            await Task.yield()
-            return CodingPoint(x: value.x + 1, labels: value.labels)
-        }
-    })
-
-    let injected = Python::Module.Function("injected", parameters: [
-        .init("context", as: Python::Context.self),
-        .init("value", as: Int.self),
-    ], call: { arguments, context, encoder in
-        let value = try arguments.get(0, as: Int.self)
-        try context.set(value, forKey: "injected_value")
-        try encoder.encodeNil()
-    })
+    let injected = Python::Module.Function(
+        "injected",
+        parameters: [
+            .init("context", as: Python::Context.self),
+            .init("value", as: Int.self),
+        ],
+        call: { arguments, context, encoder in
+            let value = try arguments.get(0, as: Int.self)
+            try context.set(value, forKey: "injected_value")
+            try encoder.encodeNil()
+        },
+    )
 
     return Python::Module("typed", functions: [next, point, injected])
 }

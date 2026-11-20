@@ -15,7 +15,7 @@ private enum ScriptCancellation {
     @PythonFunction
     static func wait(_ context: Python::Context) async throws {
         guard let entered = context.scope as? AsyncStream<Void>.Continuation else {
-            throw Python::Exception(name: "ValueError", message: "Missing script test signal.")
+            throw Python::Failure(.valueError, message: "Missing script test signal.")
         }
         let suspended = AsyncStream<Void>.makeStream()
         defer { suspended.continuation.finish() }
@@ -171,8 +171,6 @@ func deniedScriptSourceLeavesTheEnvironmentUntouched() async throws {
 @Test(arguments: [false, true])
 func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments(asynchronous: Bool) async throws {
     try await ProjectFixture.withFixture { fixture in
-        let cache = fixture.root.appending("cache")
-        let scratch = cache.appending("tmp")
         let header = "# /// script\n# dependencies = [\"sampledep==1.0\"]\n# ///\n"
         let prelude = asynchronous ? "import asyncio\nawait asyncio.sleep(0)\n" : ""
 
@@ -180,71 +178,82 @@ func scriptsReuseWheelFilesAndReleaseTemporaryEnvironments(asynchronous: Bool) a
             try await fixture.write(header + prelude + source, to: name)
         }
 
-        func expectScratchIsEmpty() async throws {
-            #expect(try await ProjectFixture.directoryNames(at: scratch).isEmpty)
-        }
-
-        func checkWheelReuse() async throws {
-            let script = try await writeScript("""
+        let reuse = try await writeScript(
+            """
             from pathlib import Path
             import sampledep, sys
             assert Path(sampledep.__file__).samefile(sys.argv[1])
             assert not Path(sampledep.__file__).parents[1].joinpath("environment.json").exists()
             print("completed")
-            """, named: "reuse.py")
-
-            try await fixture.withProject { session in
-                _ = try await session.evaluate("package_file = sampledep.__file__")
-                let path: String = try await session.get("package_file")
-
-                for wheel in ["sampledep", "sampleleaf"] {
-                    try await FileSystem.shared.removeItem(
-                        at: fixture.root.appending("\(wheel)-1.0-py3-none-any.whl"),
-                    )
-                }
-
-                try await fixture.withProject(
-                    environmentDirectory: fixture.root.appending("second-environment").string,
-                    delegate: FileAccessDelegate {
-                        $0.path == FilePath(path) && $0.operation == .metadata
-                    },
-                ) { second in
-                    try await second.set(path, forKey: "first_package")
-                    _ = try await second.evaluate("""
-                    from pathlib import Path
-                    assert Path(sampledep.__file__).samefile(first_package)
-                    """)
-                }
-
-                let execution = try await fixture.runtime.run(script: script, arguments: [path])
-                #expect(execution.output.stdout == "completed\n")
-                try await expectScratchIsEmpty()
-                #expect(try await ProjectFixture.directoryNames(at: cache.appending("wheels"))
-                    .count == 2)
-                #expect(try await FileSystem.shared
-                    .info(forFileAt: cache.appending("installed")) == nil)
-            }
-        }
-
-        try await checkWheelReuse()
+            """,
+            named: "reuse.py",
+        )
+        try await checkWheelReuse(in: fixture, script: reuse)
 
         let failed = try await writeScript(
             "raise ValueError('test failure')",
             named: "failure.py",
         )
-        let error = try await #require(throws: Python::ExecutionError.self) {
+        let error = try await #require(throws: Python::Failure.self) {
             try await fixture.runtime.run(script: failed)
         }
-        #expect(error.output.stderr == error.traceback)
-        try await expectScratchIsEmpty()
+        #expect(error.output?.stderr == error.traceback)
+        try await expectScratchIsEmpty(in: fixture)
 
         let waiting = asynchronous ? "await asyncio.sleep(3600)" : "while True:\n    pass"
         let slow = try await writeScript("print('before timeout')\n" + waiting, named: "slow.py")
-        let interrupted = try await fixture.runtime.run(script: slow, timeout: .seconds(2))
-        #expect(interrupted.end == .timedOut)
+        let interrupted = try await withHostDeadline(.seconds(2)) {
+            try await fixture.runtime.run(script: slow)
+        }
+        #expect(interrupted.end == .stopped)
         #expect(interrupted.output.stdout == "before timeout\n")
-        try await expectScratchIsEmpty()
+        try await expectScratchIsEmpty(in: fixture)
     }
+}
+
+private func checkWheelReuse(in fixture: ProjectFixture, script: String) async throws {
+    try await fixture.withProject { session in
+        _ = try await session.evaluate("package_file = sampledep.__file__")
+        let path: String = try await session.get("package_file")
+
+        for wheel in ["sampledep", "sampleleaf"] {
+            try await FileSystem.shared.removeItem(
+                at: fixture.root.appending("\(wheel)-1.0-py3-none-any.whl"),
+            )
+        }
+
+        try await fixture.withProject(
+            environmentDirectory: fixture.root.appending("second-environment").string,
+            delegate: FileAccessDelegate { request in
+                request.path == FilePath(path) && request.operation == .metadata
+            },
+        ) { second in
+            try await second.set(path, forKey: "first_package")
+            _ = try await second.evaluate("""
+            from pathlib import Path
+            assert Path(sampledep.__file__).samefile(first_package)
+            """)
+        }
+
+        let execution = try await fixture.runtime.run(script: script, arguments: [path])
+        #expect(execution.output.stdout == "completed\n")
+        try await expectScratchIsEmpty(in: fixture)
+
+        let cache = fixture.cacheDirectory
+        #expect(try await ProjectFixture.directoryNames(at: cache.appending("wheels")).count == 2)
+        #expect(try await FileSystem.shared.info(forFileAt: cache.appending("installed")) == nil)
+    }
+}
+
+private func expectScratchIsEmpty(
+    in fixture: ProjectFixture,
+    sourceLocation: SourceLocation = #_sourceLocation,
+) async throws {
+    let scratch = fixture.cacheDirectory.appending("tmp")
+    #expect(
+        try await ProjectFixture.directoryNames(at: scratch).isEmpty,
+        sourceLocation: sourceLocation,
+    )
 }
 
 @Test(arguments: [0, 7])
@@ -265,14 +274,14 @@ func scriptAwaitPreservesExitStatus(_ status: Int) async throws {
             #expect(execution.output.stdout == "before exit\n")
             #expect(execution.output.stderr.isEmpty)
         } else {
-            let error = try await #require(throws: Python::ExecutionError.self) {
+            let error = try await #require(throws: Python::Failure.self) {
                 try await runtime.run(script: script.string)
             }
-            #expect(error.output.stdout == "before exit\n")
-            #expect(error.output.stderr == error.traceback)
-            #expect(error.traceback.contains(script.string))
-            #expect(error.traceback.contains("raise SystemExit(\(status))"))
-            #expect(error.traceback.contains("SystemExit: \(status)"))
+            #expect(error.output?.stdout == "before exit\n")
+            #expect(error.output?.stderr == error.traceback)
+            #expect(error.traceback?.contains(script.string) == true)
+            #expect(error.traceback?.contains("raise SystemExit(\(status))") == true)
+            #expect(error.traceback?.contains("SystemExit: \(status)") == true)
         }
     }
 }
@@ -289,21 +298,16 @@ func scriptAwaitHonorsTaskCancellation() async throws {
         """.write(toFileAt: script)
 
         let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        defer { entered.continuation.finish() }
         let runtime = try await Python::Runtime()
-        let execution = Task {
-            defer { entered.continuation.finish() }
-            return try await runtime.run(
+
+        let result = try await runUntilInterrupted(whenReady: entered) {
+            try await runtime.run(
                 script: script.string,
                 scope: entered.continuation,
                 modules: [ScriptCancellation.self],
             )
         }
-        defer { execution.cancel() }
 
-        _ = try await #require(nextSignal(from: entered.stream))
-        execution.cancel()
-        let result = try await execution.value
         #expect(result.end == .stopped)
         #expect(result.output.stdout == "ready\n")
     }
@@ -321,7 +325,7 @@ func invalidScriptMetadataIsRejected(_ metadata: String) async throws {
         let script = root.appending("invalid.py")
         try await (metadata + "print('unexpected execution')\n").write(toFileAt: script)
 
-        await #expect(throws: Python::Exception.self) {
+        await #expect(throws: Python::Failure.self) {
             try await runtime.run(script: script.string)
         }
     }

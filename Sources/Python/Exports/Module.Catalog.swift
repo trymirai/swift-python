@@ -19,16 +19,16 @@ extension Module {
             }
 
             let catalog = Self()
-
             var selectedModules = [ObjectIdentifier: any ModuleHost.Type]()
             for type in moduleTypes {
                 selectedModules[ObjectIdentifier(type)] = type
             }
 
             let classes = try catalog.makeClassDefinitions()
-            let classesByModule = Dictionary(grouping: classes.values) {
-                ObjectIdentifier($0.module)
+            let classesByModule = Dictionary(grouping: classes.values) { definition in
+                ObjectIdentifier(definition.module)
             }
+
             Self.includeSuperclassModules(
                 in: &selectedModules,
                 classes: classes,
@@ -43,8 +43,8 @@ extension Module {
             )
         }
 
-        static func failure(_ message: String) -> Exception {
-            Exception(name: "TypeError", message: message)
+        static func failure(_ message: String) -> Failure {
+            Failure(.typeError, message: message)
         }
 
         private init() {
@@ -58,16 +58,14 @@ extension Module {
         }
 
         private static func discoverProviders() -> [any _ExportProvider.Type] {
-            var providers = [any _ExportProvider.Type]()
+            typealias Provider = any _ExportProvider.Type
+            var providers = [Provider]()
             withUnsafeMutablePointer(to: &providers) { collector in
                 let context = UnsafeMutableRawPointer(collector)
                 unsafe CPython_DiscoverExports(context) { collector, type in
-                    let provider = unsafe type
-                        .assumingMemoryBound(to: (any _ExportProvider.Type).self)
-                        .pointee
-                    unsafe collector.assumingMemoryBound(to: [any _ExportProvider.Type].self)
-                        .pointee
-                        .append(provider)
+                    let provider = unsafe type.assumingMemoryBound(to: Provider.self).pointee
+                    let list = unsafe collector.assumingMemoryBound(to: [Provider].self)
+                    unsafe list.pointee.append(provider)
                 }
             }
 
@@ -88,26 +86,28 @@ private extension Module.Catalog {
             }
         }
 
-        // Walk through unexported Swift bases to find the Python superclass.
-        func exportedSuperclass(of type: AnyClass) -> (any _PClass.Type)? {
-            var superclass: AnyClass? = _getSuperclass(type)
-            while let candidate = superclass {
-                if let base = classes[ObjectIdentifier(candidate)] {
-                    return base.type
-                }
-                superclass = _getSuperclass(candidate)
-            }
-            return nil
-        }
-
         for (key, definition) in classes {
-            if let superclass = exportedSuperclass(of: definition.type) {
+            if let superclass = Self.exportedSuperclass(of: definition.type, in: classes) {
                 classes[key]?.superclass = superclass
             }
         }
 
         try attachMembers(to: &classes)
         return classes
+    }
+
+    private static func exportedSuperclass(
+        of type: AnyClass,
+        in classes: [ObjectIdentifier: Module.Class],
+    ) -> (any _PClass.Type)? {
+        var superclass: AnyClass? = _getSuperclass(type)
+        while let candidate = superclass {
+            if let base = classes[ObjectIdentifier(candidate)] {
+                return base.type
+            }
+            superclass = _getSuperclass(candidate)
+        }
+        return nil
     }
 
     private static func includeSuperclassModules(
@@ -125,11 +125,14 @@ private extension Module.Catalog {
                 else {
                     continue
                 }
+
                 let parentModule = ObjectIdentifier(parent.module)
-                if selectedModules[parentModule] == nil {
-                    selectedModules[parentModule] = parent.module
-                    pending.append(parentModule)
+                guard selectedModules[parentModule] == nil else {
+                    continue
                 }
+
+                selectedModules[parentModule] = parent.module
+                pending.append(parentModule)
             }
         }
     }
@@ -176,7 +179,10 @@ private extension Module.Catalog {
     ) throws -> [Module] {
         var result = definitions
         var names = Set(definitions.map(\.name))
-        let sortedModules = selected.sorted { $0._pModuleName < $1._pModuleName }
+        let sortedModules = selected.sorted { left, right in
+            left._pModuleName < right._pModuleName
+        }
+
         for type in sortedModules {
             let name = type._pModuleName
             guard names.insert(name).inserted else {
@@ -184,12 +190,13 @@ private extension Module.Catalog {
             }
 
             let key = ObjectIdentifier(type)
-            result.append(try Self.makeModule(
+            let module = try makeModule(
                 type,
                 name: name,
                 functions: functionsByModule[key, default: []],
                 classes: classesByModule[key, default: []],
-            ))
+            )
+            result.append(module)
         }
         return result
     }
@@ -227,13 +234,13 @@ private extension Module.Catalog {
         functions: [Module.Function],
         classes: [Module.Class],
     ) throws -> Module {
-        let functions = functions.sorted { $0.name < $1.name }
+        let functions = functions.sorted { left, right in left.name < right.name }
         var names = Set<String>()
+
         for function in functions {
             try validateContext(in: function, at: 0)
             guard names.insert(function.name).inserted else {
-                throw Self
-                    .failure("Python export '\(name).\(function.name)' was declared twice.")
+                throw failure("Python export '\(name).\(function.name)' was declared twice.")
             }
         }
 
@@ -244,13 +251,14 @@ private extension Module.Catalog {
             functions: functions,
         )
 
-        module.classes = classes.sorted { $0.key < $1.key }
+        module.classes = classes.sorted { left, right in left.key < right.key }
         for index in module.classes.indices {
             guard names.insert(module.classes[index].name).inserted else {
                 throw Self.failure("A class and another export have the same Python name.")
             }
             try module.classes[index].validateMembers()
         }
+
         return module
     }
 }
@@ -288,12 +296,13 @@ extension Module.Catalog: _ExportSink {
         name: String,
         documentation: String?,
     ) {
-        exports.append(.classDefinition(Module.Class(
+        let definition = Module.Class(
             type: type,
             module: module,
             name: name,
             documentation: documentation,
-        )))
+        )
+        exports.append(.classDefinition(definition))
     }
 
     mutating func addMethod<Instance: _PClass>(
@@ -350,15 +359,14 @@ extension Module.Catalog: _ExportSink {
             )
         }
 
-        exports.append(.property(
-            ObjectIdentifier(type),
-            .init(
-                name: name,
-                documentation: documentation,
-                getter: makeGetter(),
-                setter: makeSetter(),
-            ),
-        ))
+        let key = ObjectIdentifier(type)
+        let property = Module.Class.Property(
+            name: name,
+            documentation: documentation,
+            getter: makeGetter(),
+            setter: makeSetter(),
+        )
+        exports.append(.property(key, property))
     }
 
     mutating func addStoredProperty<

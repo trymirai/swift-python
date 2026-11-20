@@ -15,19 +15,19 @@ extension Interpreter {
 
         let key: UInt
         let references: Reference.Store
-
         let fileAccess: Interpreter.FileAccess?
-        weak var session: Session?
-
         private var isClosed: Bool = false
 
         var namespace: Reference?
+        var arrayType: Reference?
+
         var classRegistry: Interpreter.ClassRegistry?
         var defaultArgumentMarker: UInt = 0
-
         private var nextCallID: Int = 0
 
-        var arrayType: Reference?
+        private weak var currentOperation: Session.Control?
+        // Borrowed from the active operation context under this interpreter's GIL.
+        private var operationMarker: UnsafeMutablePointer<PyObject>?
 
         private var borrowedBuffers: [BufferBorrow] = []
         private var nextBorrowID: UInt64 = 0
@@ -36,19 +36,16 @@ extension Interpreter {
         private var pendingBufferReleases: [UInt] = []
         private var pendingObjectReleases: [UInt] = []
 
-        var execution: Session.Control? {
-            PThread.Scope.current?.execution
-        }
-
         init(
             key: UInt,
             view: Interpreter.View,
+            session: Session?,
             fileAccess: Interpreter.FileAccess?,
             schedule: @escaping @Sendable () -> Void,
         ) {
             self.key = key
+            self.references = Reference.Store(view: view, session: session, schedule: schedule)
             self.fileAccess = fileAccess
-            self.references = Reference.Store(view: view, schedule: schedule)
 
             let pointer = unsafe UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque())
             Self.registry.withLock { $0[key] = pointer }
@@ -61,7 +58,8 @@ extension Interpreter {
 
         static func lookup(_ key: UInt) -> Interpreter.Storage? {
             guard
-                key != 0, let bits = registry.withLock({ $0[key] }),
+                key != 0,
+                let bits = registry.withLock({ $0[key] }),
                 let pointer = unsafe UnsafeRawPointer(bitPattern: bits)
             else {
                 return nil
@@ -70,34 +68,67 @@ extension Interpreter {
         }
 
         static func requireCurrent() throws -> Interpreter.Storage {
-            guard let state = current(), !state.isClosed else {
-                throw Session.Error.closed
+            guard let scope = PThread.Scope.current else {
+                throw Failure.closed
+            }
+            let storage = scope.storage
+            guard CPython_InterpreterKey(nil) == storage.key, !storage.isClosed else {
+                throw Failure.closed
             }
 
-            try state.checkTaskAttachment()
-            try state.checkReentry()
-            return state
-        }
-
-        private func checkTaskAttachment() throws {
             // Task.immediate can start on the attached thread before suspending.
-            guard
-                let scope = PThread.Scope.current, scope.storage === self,
-                scope.matchesTask
-            else {
-                throw Exception(
-                    name: "RuntimeError",
-                    message: "Python is attached to another Swift task.",
-                )
+            guard scope.matchesTask else {
+                throw Failure(.runtimeError, message: "Python is attached to another Swift task.")
             }
+            try storage.checkReentry()
+            return storage
         }
 
         private func checkReentry() throws {
             guard borrowedBuffers.isEmpty else {
-                throw Exception(
-                    name: "RuntimeError",
+                throw Failure(
+                    .runtimeError,
                     message: "Python reentry is unavailable while a buffer is borrowed.",
                 )
+            }
+        }
+
+        var execution: Session.Control? {
+            PThread.Scope.current?.execution
+        }
+
+        func withOperationContext<Result: ~Copyable>(
+            _ execution: Session.Control,
+            forCallback: Bool,
+            _ body: () throws -> Result,
+        ) throws -> Result {
+            if forCallback, currentOperation !== execution {
+                throw Failure.closed
+            }
+
+            var context = unsafe CPython_OperationContext()
+            return try withUnsafeMutablePointer(to: &context) { pointer in
+                try Object.check(
+                    unsafe CPython_EnterOperationContext(
+                        pointer,
+                        forCallback ? operationMarker : nil,
+                    ),
+                    "Unable to enter the Python operation context.",
+                )
+                defer { unsafe CPython_LeaveOperationContext(pointer) }
+
+                guard !forCallback else {
+                    return try body()
+                }
+
+                currentOperation = execution
+                unsafe operationMarker = pointer.pointee.marker
+                defer {
+                    unsafe operationMarker = nil
+                    currentOperation = nil
+                }
+
+                return try body()
             }
         }
 
@@ -125,7 +156,7 @@ extension Interpreter {
         func retainConstructedWrapper(_ wrapper: borrowing Object) throws {
             let reference = unsafe try references.retain(wrapper.pointer)
             guard let scope = PThread.Scope.current else {
-                throw Session.Error.closed
+                throw Failure.closed
             }
             scope.constructedWrappers.append(reference)
         }
@@ -193,30 +224,22 @@ extension Interpreter.Storage {
             throw Reference.wrongInterpreter()
         }
 
-        let address = unsafe UInt(bitPattern: buffer.pointee.buf)
-        let byteCount = unsafe UInt(buffer.pointee.len)
-        let overlapsWritableBorrow = borrowedBuffers.contains { borrow in
-            (isMutable || borrow.isMutable) && borrow.overlaps(
-                address: address,
-                byteCount: byteCount,
-            )
-        }
-        if overlapsWritableBorrow {
-            throw Exception(
-                name: "BufferError",
+        let borrow = BufferBorrow(
+            id: nextBorrowID,
+            address: unsafe UInt(bitPattern: buffer.pointee.buf),
+            byteCount: unsafe UInt(buffer.pointee.len),
+            isMutable: isMutable,
+        )
+        guard !borrowedBuffers.contains(where: borrow.conflicts(with:)) else {
+            throw Failure(
+                .bufferError,
                 message: "Overlapping writable Python buffer arguments are not allowed.",
             )
         }
 
-        let id = nextBorrowID
         nextBorrowID &+= 1
-        borrowedBuffers.append(BufferBorrow(
-            id: id,
-            address: address,
-            byteCount: byteCount,
-            isMutable: isMutable,
-        ))
-        return id
+        borrowedBuffers.append(borrow)
+        return borrow.id
     }
 
     func endBufferBorrow(_ id: UInt64) {
@@ -251,16 +274,16 @@ private extension Interpreter.Storage {
         let byteCount: UInt
         let isMutable: Bool
 
-        func overlaps(address other: UInt, byteCount otherByteCount: UInt) -> Bool {
-            guard byteCount != 0, otherByteCount != 0 else {
+        func conflicts(with other: BufferBorrow) -> Bool {
+            guard isMutable || other.isMutable, byteCount != 0, other.byteCount != 0 else {
                 return false
             }
 
             // Subtract addresses to avoid overflowing the end of a range.
-            if address >= other {
-                return address - other < otherByteCount
+            if address >= other.address {
+                return address - other.address < other.byteCount
             }
-            return other - address < byteCount
+            return other.address - address < byteCount
         }
     }
 }

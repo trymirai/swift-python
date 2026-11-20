@@ -7,7 +7,7 @@ public import SystemPackage
 // MARK: - Path
 
 /// A reference to a `pathlib.Path` in the current Python session.
-/// Use its Swift members inside `Session.enqueue` or a Swift export.
+/// Access its synchronous properties and methods inside `Session.enqueue` or a Swift export.
 @PythonImportedClass(module: "pathlib", name: "Path")
 public struct Path {
     @PythonProperty(isReadOnly: true)
@@ -23,14 +23,16 @@ public struct Path {
     public var parts: [String]
 
     /// Creates a path in the supplied context.
-    public init(_ path: String, in context: Context) throws {
-        self = try context.construct(Self.self, arguments: [path])
-    }
+    @PythonInit
+    public init(_ path: String, in context: Context) throws
+
+    @PythonInit
+    public init(_ path: String, in session: Session) async throws
 
     /// Creates a path from a Unicode Swift system path.
     public init(_ path: FilePath, in context: Context) throws {
         guard let string = String(validating: path) else {
-            throw Exception(name: "ValueError", message: "Expected a UTF-8 file path.")
+            throw Failure(.valueError, message: "Expected a UTF-8 file path.")
         }
 
         try self.init(string, in: context)
@@ -81,7 +83,7 @@ public extension FilePath {
     init(_ path: Python::Path) throws {
         let value = try path.string()
         guard !value.utf8.contains(0) else {
-            throw Exception(name: "ValueError", message: "A file path cannot contain NUL.")
+            throw Failure(.valueError, message: "A file path cannot contain NUL.")
         }
         self.init(value)
     }

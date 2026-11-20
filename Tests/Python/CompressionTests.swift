@@ -62,14 +62,12 @@ func compressionStateRemainsAfterFailure() async throws {
     xz_header = xz.compress(b'original')
     """)
 
-    _ = try await #require(throws: Python::ExecutionError.self) {
-        try await session.evaluate("""
-        bz_tail = bz.flush()
-        xz_tail = xz.flush()
-        gc.collect()
-        raise ValueError('compression state remains')
-        """)
-    }
+    try await session.requireFailure(evaluating: """
+    bz_tail = bz.flush()
+    xz_tail = xz.flush()
+    gc.collect()
+    raise ValueError('compression state remains')
+    """)
 
     let result = try await session.evaluate("""
     assert bz2.decompress(bz_header + bz_tail) == b'original'

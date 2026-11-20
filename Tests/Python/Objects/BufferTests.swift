@@ -51,44 +51,47 @@ private enum BufferModule {
 
 @Test
 func exportedBufferArgumentsBorrowPythonStorage() async throws {
-    try await evaluateInFreshSession(#"""
-    import buffers, array
+    try await evaluateInFreshSession(
+        #"""
+        import buffers, array
 
-    values = bytearray([1, 2, 3])
-    assert buffers.sum(values) == 6
-    buffers.scale(values, {'amount': 3})
-    assert values == bytearray([3, 6, 9])
-    assert buffers.sum(b'abc') == 294
-    assert buffers.sum(memoryview(values)) == 18
-    assert buffers.sum(b'') == 0
-    assert buffers.floating(array.array('d', [1.25, 2.5])) == 3.75
-    assert buffers.text('Привет\x00🐍') == len('Привет\x00🐍'.encode())
+        values = bytearray([1, 2, 3])
+        assert buffers.sum(values) == 6
+        buffers.scale(values, {'amount': 3})
+        assert values == bytearray([3, 6, 9])
+        assert buffers.sum(b'abc') == 294
+        assert buffers.sum(memoryview(values)) == 18
+        assert buffers.sum(b'') == 0
+        assert buffers.floating(array.array('d', [1.25, 2.5])) == 3.75
+        assert buffers.text('Привет\x00🐍') == len('Привет\x00🐍'.encode())
 
-    rejected = [
-        ("bytes as a string", TypeError, lambda: buffers.text(b'bad')),
-        ("list as a buffer", BufferError, lambda: buffers.sum([1, 2])),
-        ("strided view", BufferError, lambda: buffers.sum(memoryview(values)[::2])),
-        ("wrong element type", BufferError, lambda: buffers.floating(array.array('f', [1]))),
-        ("unaligned view", BufferError,
-         lambda: buffers.floating(memoryview(bytearray(17))[1:].cast('d'))),
-        ("read-only exporter", BufferError, lambda: buffers.scale(b'abc', {'amount': 2})),
-        ("overlapping borrows", BufferError, lambda: buffers.overlap(values, memoryview(values))),
-    ]
-    for description, expected_error, action in rejected:
-        try:
-            action()
-        except expected_error:
-            pass
-        else:
-            raise AssertionError(f"Expected {expected_error.__name__} for {description}")
+        rejected = [
+            ("bytes as a string", TypeError, lambda: buffers.text(b'bad')),
+            ("list as a buffer", BufferError, lambda: buffers.sum([1, 2])),
+            ("strided view", BufferError, lambda: buffers.sum(memoryview(values)[::2])),
+            ("wrong element type", BufferError, lambda: buffers.floating(array.array('f', [1]))),
+            ("unaligned view", BufferError,
+             lambda: buffers.floating(memoryview(bytearray(17))[1:].cast('d'))),
+            ("read-only exporter", BufferError, lambda: buffers.scale(b'abc', {'amount': 2})),
+            ("overlapping borrows", BufferError, lambda: buffers.overlap(values, memoryview(values))),
+        ]
+        for description, expected_error, action in rejected:
+            try:
+                action()
+            except expected_error:
+                pass
+            else:
+                raise AssertionError(f"Expected {expected_error.__name__} for {description}")
 
-    buffers.scale(values, {'amount': 2})
-    assert values == bytearray([6, 12, 18])
-    """#, modules: [BufferModule.self])
+        buffers.scale(values, {'amount': 2})
+        assert values == bytearray([6, 12, 18])
+        """#,
+        modules: [BufferModule.self],
+    )
 }
 
 @Test
-func explicitBufferLeaseMutatesAndReadsPythonStorage() async throws {
+func scopedSpansMutateAndReadPythonStorage() async throws {
     let runtime = try await Python::Runtime()
     let session = try await runtime.session()
     defer { await session.close() }
@@ -99,20 +102,18 @@ func explicitBufferLeaseMutatesAndReadsPythonStorage() async throws {
     """)
     try await session.enqueue { context in
         let invalid = try context.object("invalid_buffer")
-        try expectPythonException("BufferError") {
-            let lease = try invalid.buffer(as: UInt8.self)
-            _ = lease.count
+        try expectPythonFailure(.exception(.bufferError)) {
+            _ = try invalid.withSpan(as: UInt8.self) { $0.count }
         }
 
         let object = try context.object("values")
-        let lease = try object.mutableBuffer(as: UInt8.self)
-        try lease.withMutableSpan { span in
+        try object.withMutableSpan(as: UInt8.self) { span in
             span[1] = 42
-            try expectPythonException("RuntimeError") {
+            try expectPythonFailure(.exception(.runtimeError)) {
                 try context.set(span.count, forKey: "unsafe_reentry")
             }
         }
-        let sum = try lease.withSpan(BufferModule.sum)
+        let sum = try object.withSpan(as: UInt8.self, BufferModule.sum)
         #expect(sum == 66)
     }
     _ = try await session.evaluate("assert values == bytearray([6, 42, 18])")

@@ -16,7 +16,7 @@ extension Session.Control {
 
         init() throws {
             guard let handle = unsafe CPython_NewSubprocesses() else {
-                throw Runtime.Failure("Unable to allocate the Python subprocess scope.")
+                throw Failure("Unable to allocate the Python subprocess scope.")
             }
             unsafe self.handle = handle
         }

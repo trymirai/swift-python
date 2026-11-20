@@ -46,9 +46,11 @@ func moduleInitializationAwaitsSourceAndKeepsGlobals(project: Bool, nested: Bool
         """.write(toFileAt: source)
 
         let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
-        let startup: Python::Session.Startup = project
-            ? .project(directory: root.string, module: name)
-            : .module(name)
+        let startup: Python::Session.Startup = if project {
+            .project(directory: root.string, module: name)
+        } else {
+            .module(name)
+        }
         let session = try await runtime.session(
             startup,
             importPaths: [root.string],
@@ -87,27 +89,28 @@ func moduleInitializationReportsFailuresAndCanRetry(dependency: Bool) async thro
     try await withTemporaryDirectory { root in
         let source = root.appending("workload.py")
         if dependency {
-            try await "import asyncio\nawait asyncio.sleep(0)\n"
-                .write(toFileAt: root.appending("ordinary_dependency.py"))
+            let dependencySource = root.appending("ordinary_dependency.py")
+            try await asyncModulePrelude.write(toFileAt: dependencySource)
             try await "import ordinary_dependency\n".write(toFileAt: source)
         } else {
-            try await "import asyncio\nawait asyncio.sleep(0)\nraise ValueError('initialization failed')\n"
-                .write(toFileAt: source)
+            let failingModule = asyncModulePrelude + "raise ValueError('initialization failed')\n"
+            try await failingModule.write(toFileAt: source)
         }
 
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(.module("workload"), importPaths: [root.string])
         try await withSession(session) { session in
-            let error = try await #require(throws: Python::ExecutionError.self) {
+            let error = try await #require(throws: Python::Failure.self) {
                 try await session.initialize()
             }
-            let diagnostic = dependency
-                ? "SyntaxError: 'await' outside function"
-                : "ValueError: initialization failed"
-            #expect(error.traceback.contains(diagnostic))
+            let diagnostic = if dependency {
+                "SyntaxError: 'await' outside function"
+            } else {
+                "ValueError: initialization failed"
+            }
+            #expect(error.traceback?.contains(diagnostic) == true)
 
-            try await "import asyncio\nawait asyncio.sleep(0)\nvalue = 42\n"
-                .write(toFileAt: source, options: .newFile(replaceExisting: true))
+            try await replaceWithReadyModule(at: source)
             #expect(try await session.get("value", as: Int.self) == 42)
             let check = try await session.evaluate("""
             import workload
@@ -118,8 +121,8 @@ func moduleInitializationReportsFailuresAndCanRetry(dependency: Bool) async thro
     }
 }
 
-@Test(.timeLimit(.minutes(1)), arguments: [false, true])
-func moduleInitializationHonorsCancellationAndTimeout(timeout: Bool) async throws {
+@Test(.timeLimit(.minutes(1)))
+func moduleInitializationHonorsCancellation() async throws {
     try await withTemporaryDirectory { root in
         let source = root.appending("workload.py")
         try await "from host import wait\nawait wait()\nvalue = 1\n".write(toFileAt: source)
@@ -131,14 +134,17 @@ func moduleInitializationHonorsCancellationAndTimeout(timeout: Bool) async throw
             suspended.continuation.finish()
         }
 
-        let host = Python::Module("host", functions: [
-            .init("wait") { _ in
-                entered.continuation.yield(())
-                for await _ in suspended.stream {}
-                try Task.checkCancellation()
-                return .none
-            },
-        ])
+        let host = Python::Module(
+            "host",
+            functions: [
+                .init("wait") { _ in
+                    entered.continuation.yield(())
+                    for await _ in suspended.stream {}
+                    try Task.checkCancellation()
+                    return .none
+                },
+            ],
+        )
         let runtime = try await Python::Runtime()
         let session = try await runtime.session(
             .module("workload"),
@@ -146,22 +152,20 @@ func moduleInitializationHonorsCancellationAndTimeout(timeout: Bool) async throw
             moduleDefinitions: [host],
         )
         try await withSession(session) { session in
-            let evaluation = Task {
-                defer { entered.continuation.finish() }
-                return try await session.evaluate("value", timeout: timeout ? .seconds(2) : nil)
+            let result = try await runUntilInterrupted(whenReady: entered) {
+                try await session.evaluate("value")
             }
-            defer { evaluation.cancel() }
+            #expect(result.end == .stopped)
 
-            if !timeout {
-                _ = try await #require(nextSignal(from: entered.stream))
-                evaluation.cancel()
-            }
-            let result = try await evaluation.value
-            #expect(result.end == (timeout ? .timedOut : .stopped))
-
-            try await "import asyncio\nawait asyncio.sleep(0)\nvalue = 42\n"
-                .write(toFileAt: source, options: .newFile(replaceExisting: true))
+            try await replaceWithReadyModule(at: source)
             #expect(try await session.evaluate("value").output.stdout == "42\n")
         }
     }
+}
+
+private let asyncModulePrelude: String = "import asyncio\nawait asyncio.sleep(0)\n"
+
+private func replaceWithReadyModule(at path: FilePath) async throws {
+    let module = asyncModulePrelude + "value = 42\n"
+    try await module.write(toFileAt: path, options: .newFile(replaceExisting: true))
 }

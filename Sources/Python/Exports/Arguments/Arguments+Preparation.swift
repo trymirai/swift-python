@@ -67,18 +67,4 @@ public extension Arguments {
             return Arguments.PreparedValue<Object>.failed(error)
         }
     }
-
-    @_lifetime(borrow self)
-    @_documentation(visibility: internal)
-    borrowing func prepare(
-        _ type: BorrowedObject.Type,
-        parameter: Int,
-    ) throws -> some _PArgument<BorrowedObject> & ~Copyable & ~Escapable {
-        do {
-            let value = try borrowedArgument(at: parameter)
-            return Arguments.PreparedValue.ready(value)
-        } catch {
-            return Arguments.PreparedValue<BorrowedObject>.failed(error)
-        }
-    }
 }

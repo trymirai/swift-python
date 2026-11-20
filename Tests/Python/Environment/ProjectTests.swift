@@ -17,8 +17,8 @@ func projectStartupSelectsOnlyProjectModules() async throws {
             withIntermediateDirectories: true,
         )
         try await "pass".write(toFileAt: project.appending("a.py"))
-        try await "raise AssertionError('loaded outside the project')"
-            .write(toFileAt: root.appending("outside.py"))
+        let outside = root.appending("outside.py")
+        try await "raise AssertionError('loaded outside the project')".write(toFileAt: outside)
 
         let runtime = try await Python::Runtime(cacheDirectory: root.appending("cache").string)
 
@@ -40,10 +40,10 @@ func projectStartupSelectsOnlyProjectModules() async throws {
             containing diagnostic: String,
         ) async throws {
             try await withStartup(module, importPaths: importPaths) { session in
-                let error = try await #require(throws: Python::ExecutionError.self) {
+                let error = try await #require(throws: Python::Failure.self) {
                     try await session.initialize()
                 }
-                #expect(error.traceback.contains(diagnostic))
+                #expect(error.traceback?.contains(diagnostic) == true)
             }
         }
 
@@ -52,16 +52,7 @@ func projectStartupSelectsOnlyProjectModules() async throws {
             containing: "ModuleNotFoundError: No startup package",
         )
 
-        for name in ["zeta", "0-invalid", "alpha"] {
-            let package = project.appending(name)
-            try await files.createDirectory(at: package, withIntermediateDirectories: false)
-            try await "pass".write(toFileAt: package.appending("__init__.py"))
-        }
-        try await "pass".write(toFileAt: project.appending("zeta/entry.py"))
-        let sources = project.appending("src")
-        try await files.createDirectory(at: sources, withIntermediateDirectories: false)
-        try await "pass".write(toFileAt: sources.appending("reporting.py"))
-
+        let sources = try await writeStartupCandidates(in: project)
         let selections: [(module: String?, name: String)] = [
             (nil, "alpha"),
             ("zeta", "zeta"),
@@ -86,21 +77,38 @@ func projectStartupSelectsOnlyProjectModules() async throws {
     }
 }
 
+private func writeStartupCandidates(in project: FilePath) async throws -> FilePath {
+    let files = FileSystem.shared
+    for name in ["zeta", "0-invalid", "alpha"] {
+        let package = project.appending(name)
+        try await files.createDirectory(at: package, withIntermediateDirectories: false)
+        try await "pass".write(toFileAt: package.appending("__init__.py"))
+    }
+    try await "pass".write(toFileAt: project.appending("zeta/entry.py"))
+    let sources = project.appending("src")
+    try await files.createDirectory(at: sources, withIntermediateDirectories: false)
+    try await "pass".write(toFileAt: sources.appending("reporting.py"))
+    return sources
+}
+
 @Test
 func projectPreparesPackagesBeforeStartupAndKeepsModuleGlobals() async throws {
     try await ProjectFixture.withFixture { fixture in
-        try await fixture.write("""
-        import sampleextra
-        from .helpers import plus
+        try await fixture.write(
+            """
+            import sampleextra
+            from .helpers import plus
 
-        base = 23
-        counter = 1
+            base = 23
+            counter = 1
 
-        def answer():
-            return plus(base, counter) + sampleextra.VALUE
+            def answer():
+                return plus(base, counter) + sampleextra.VALUE
 
-        print("project")
-        """, to: "project/assistant/__init__.py")
+            print("project")
+            """,
+            to: "project/assistant/__init__.py",
+        )
 
         try await fixture.withProject { session in
             #expect(await session.startupOutput == nil)
@@ -163,7 +171,7 @@ func sessionInitializesSiteForPackageDirectories() async throws {
 func projectEnvironmentRequiresAnExclusiveLease() async throws {
     try await ProjectFixture.withFixture { fixture in
         try await fixture.withProject { _ in
-            let error = try await #require(throws: Python::Exception.self) {
+            let error = try await #require(throws: Python::Failure.self) {
                 try await fixture.runtime.session(environmentDirectory: fixture.environment)
             }
             #expect(error.message.contains("already in use"))
@@ -191,7 +199,7 @@ func environmentClaimsItsSlotsBeforeReapingStaging() async throws {
         try await "user data".write(toFileAt: marker)
 
         for _ in 0 ..< 2 {
-            await #expect(throws: Python::Exception.self) {
+            await #expect(throws: Python::Failure.self) {
                 try await runtime.session(environmentDirectory: environment.string)
             }
             #expect(try await readText(at: marker) == "user data")
@@ -218,19 +226,8 @@ func packageChangesRequireResetAndPublishOneSlot() async throws {
             let files = FileSystem.shared
             let packages = session.packages
 
-            func unpackedWheels() async throws -> Set<FilePath.Component> {
-                var unpacked = Set<FilePath.Component>()
-                for digest in try await ProjectFixture.directoryNames(at: cache.wheelsDirectory) {
-                    let directory = cache.wheelPackagesDirectory(digest: digest.string)
-                    if try await files.info(forFileAt: directory)?.type == .directory {
-                        unpacked.insert(digest)
-                    }
-                }
-                return unpacked
-            }
-
             let installed = try await packages.installed()
-            let unpacked = try await unpackedWheels()
+            let unpacked = try await ProjectFixture.unpackedWheels(in: cache)
             #expect(installed == ["sampledep": "1.0", "sampleleaf": "1.0", "sharedbase": "1.0"])
             #expect(try await session.evaluate("counter = 41; answer()").output.stdout == "42\n")
             let previous = try await fixture.readManifest()
@@ -238,7 +235,8 @@ func packageChangesRequireResetAndPublishOneSlot() async throws {
             #expect(try await packages.install(requirements: ["sampleextra"]) == .requiresReset)
             try await fixture.addDependencyUpdate()
             #expect(try await packages.update() == .requiresReset)
-            #expect(try await unpackedWheels() == unpacked)
+
+            #expect(try await ProjectFixture.unpackedWheels(in: cache) == unpacked)
             #expect(try await packages.installed() == installed)
             #expect(try await fixture.readManifest() == previous)
             #expect(try await files.info(forFileAt: alternateSlot) == nil)
@@ -251,18 +249,16 @@ func packageChangesRequireResetAndPublishOneSlot() async throws {
             #expect(try await session.evaluate("answer()").output.stdout == "42\n")
             #expect(try await packages.uninstall(["sampleextra"]) == .requiresReset)
 
-            await #expect(throws: Python::Exception.self) {
+            await #expect(throws: Python::Failure.self) {
                 try await packages.install(requirements: ["sharedbase>=2"])
             }
 
             try await session.reset()
             #expect(try await packages.uninstall(["sampleextra"]) == .applied)
             #expect(try await packages.installed()["sampleextra"] == nil)
-            #expect(try await ProjectFixture.directoryNames(at: root) == [
-                "environment.json",
-                "environment.lock",
-                "site-packages-b",
-            ])
+
+            let entries = try await ProjectFixture.directoryNames(at: root)
+            #expect(entries == ["environment.json", "environment.lock", "site-packages-b"])
         }
     }
 }
@@ -306,18 +302,21 @@ func savedProjectEnvironmentReopensOffline() async throws {
             "# Project requirements\nsampledep>=1\n",
             to: "project/requirements.txt",
         )
-        try await fixture.write("""
-        [project]
-        name = "test-assistant"
-        version = "1.0"
-        dependencies = ["sampledep>=99"]
-        """, to: "project/pyproject.toml")
-        let cache = fixture.root.appending("cache")
+        try await fixture.write(
+            """
+            [project]
+            name = "test-assistant"
+            version = "1.0"
+            dependencies = ["sampledep>=99"]
+            """,
+            to: "project/pyproject.toml",
+        )
+        let cache = fixture.cacheDirectory
         let userFile = cache.appending("wheels/keep.txt")
         try await "keep".write(toFileAt: userFile)
         try await Python::Runtime.clearPackageCache(at: cache.string)
-        #expect(try await ProjectFixture
-            .directoryNames(at: cache.appending("wheels")) == ["keep.txt"])
+        let remainingWheels = try await ProjectFixture.directoryNames(at: cache.appending("wheels"))
+        #expect(remainingWheels == ["keep.txt"])
         #expect(try await FileSystem.shared.info(forFileAt: cache.appending("installed")) == nil)
         try await fixture.takeIndexOffline()
 
@@ -356,7 +355,7 @@ func reusedEnvironmentChecksCollisionsWithChangedBasePackages() async throws {
         try await fixture.write("VALUE = 0\n", to: "global/sampledep/__init__.py")
 
         let runtime = try await fixture.rebuildRuntime()
-        let error = try await #require(throws: Python::Exception.self) {
+        let error = try await #require(throws: Python::Failure.self) {
             try await runtime.session(
                 fixture.projectStartup,
                 environmentDirectory: fixture.environment,
@@ -371,18 +370,18 @@ func movingARequirementToLocalInstallPreservesItAcrossReopen() async throws {
     try await ProjectFixture.withFixture { fixture in
         let root = fixture.environmentRoot
         try await fixture.withProject { session in
-            try await fixture.write("""
-            [project]
-            name = "test-assistant"
-            version = "1.0"
-            dependencies = []
-            """, to: "project/pyproject.toml")
+            try await fixture.write(
+                """
+                [project]
+                name = "test-assistant"
+                version = "1.0"
+                dependencies = []
+                """,
+                to: "project/pyproject.toml",
+            )
             #expect(try await session.packages.install(requirements: ["sampledep>=1"]) == .applied)
-            #expect(try await ProjectFixture.directoryNames(at: root) == [
-                "environment.json",
-                "environment.lock",
-                "site-packages-a",
-            ])
+            let entries = try await ProjectFixture.directoryNames(at: root)
+            #expect(entries == ["environment.json", "environment.lock", "site-packages-a"])
         }
         try await fixture.takeIndexOffline()
         try await fixture.withProject { session in
@@ -408,11 +407,11 @@ func invalidSavedManifestKeepsCurrentSlot() async throws {
         invalidWheel.insert(contentsOf: "../", at: digest.upperBound)
         for invalid in ["{", invalidWheel] {
             try await invalid.write(toFileAt: manifest, options: replace)
-            await #expect(throws: Python::Exception.self) {
+            await #expect(throws: Python::Failure.self) {
                 try await fixture.withProject { _ in }
             }
-            #expect(try await files.info(forFileAt: root.appending("site-packages-a"))?
-                .type == .directory)
+            let packages = try await files.info(forFileAt: root.appending("site-packages-a"))
+            #expect(packages?.type == .directory)
             #expect(try await files.info(forFileAt: manifest)?.type == .regular)
         }
 
@@ -455,8 +454,9 @@ func firstSessionPackageSourceWins(version: String) async throws {
         let other = try await fixture.runtime.session()
         try await withSession(other) { session in
             #expect(try await session.packages.installed() == ["sharedbase": "1.0"])
-            let output = try await session
-                .evaluate("import sharedbase, sharedbase_old; print(sharedbase.VALUE)")
+            let output = try await session.evaluate(
+                "import sharedbase, sharedbase_old; print(sharedbase.VALUE)",
+            )
             #expect(output.output.stdout == "17\n")
         }
     }
@@ -477,8 +477,9 @@ func projectDiscoversPreparedPackages() async throws {
             try await withSession(session) { session in
                 let installed = try await session.packages.installed()
                 #expect(installed["sharedbase"] == version)
-                let output = try await session
-                    .evaluate("import sharedbase; print(sharedbase.VALUE)")
+                let output = try await session.evaluate(
+                    "import sharedbase; print(sharedbase.VALUE)",
+                )
                 #expect(output.output.stdout == "\(value)\n")
             }
         }
@@ -507,7 +508,7 @@ func conflictingRequirementsDoNotFallBackToRuntimePackages() async throws {
             value: 27,
         )
         try await fixture.write("sharedbase<2\n", to: "project/requirements.txt")
-        let error = try await #require(throws: Python::Exception.self) {
+        let error = try await #require(throws: Python::Failure.self) {
             try await fixture.runtime.session(
                 fixture.projectStartup,
                 environmentDirectory: fixture.environment,
@@ -546,7 +547,7 @@ func conversationInstallationOverridesAndRevealsTheProjectSource() async throws 
         }
 
         try await fixture.write("sharedbase<3\n", to: "project/requirements.txt")
-        let conflict = try await #require(throws: Python::Exception.self) {
+        let conflict = try await #require(throws: Python::Failure.self) {
             try await fixture.runtime.session(
                 fixture.projectStartup,
                 environmentDirectory: fixture.environment,
@@ -584,32 +585,10 @@ func projectBundleLoadsFromEmbeddedBytesAndDisk(asynchronous: Bool) async throws
     try await ProjectFixture.withFixture { fixture in
         try await fixture.addDependencyUpdate()
         if asynchronous {
-            let source = FilePath(fixture.project).appending("assistant/__init__.py")
-            let bytes = try await [UInt8](
-                contentsOf: source,
-                maximumSizeAllowed: .unlimited,
-            )
-            let prefix = "import asyncio\nawait asyncio.sleep(0)\n"
-            let text = prefix + String(decoding: bytes, as: UTF8.self)
-            try await text.write(toFileAt: source, options: .newFile(replaceExisting: true))
-        }
-        let archive = fixture.root.appending("packages.zip")
-
-        func buildArchive() async throws {
-            try await fixture.runtime.bundle(
-                project: fixture.project,
-                module: ProjectFixture.projectModule,
-                to: archive.string,
-            )
+            try await fixture.enableAsyncProjectStartup()
         }
 
-        try await buildArchive()
-        let initial = try await FileSystem.shared.info(forFileAt: archive)
-
-        try await buildArchive()
-        let repeated = try await FileSystem.shared.info(forFileAt: archive)
-        #expect(initial?.lastDataModificationTime == repeated?.lastDataModificationTime)
-
+        let archive = try await buildProjectArchive(in: fixture)
         let bytes = try await [UInt8](contentsOf: archive, maximumSizeAllowed: .unlimited)
         let resources = fixture.root.appending("resources")
         try await FileSystem.shared.createDirectory(
@@ -619,10 +598,12 @@ func projectBundleLoadsFromEmbeddedBytesAndDisk(asynchronous: Bool) async throws
 
         let cache = fixture.root.appending("bundle-cache")
         let packageIndex = try await fixture.fileURL(for: "missing-index")
-        let application = Python::Runtime.PackageSource
-            .directory(fixture.root.appending("global").string)
+        let application = Python::Runtime.PackageSource.directory(
+            fixture.root.appending("global").string,
+        )
         let delegate = FileAccessDelegate { $0.path.starts(with: resources) }
         let sources: [Python::Runtime.PackageSource] = [.embedded(bytes), .archive(archive.string)]
+
         for source in sources {
             let runtime = try await Python::Runtime(
                 packages: [application, source],
@@ -638,9 +619,64 @@ func projectBundleLoadsFromEmbeddedBytesAndDisk(asynchronous: Bool) async throws
                 try await checkBundledProject(in: session)
             }
 
-            #expect(try await FileSystem.shared.info(forFileAt: cache) == nil)
+            let published = try await ProjectFixture.directoryNames(at: cache.appending("bundles"))
+            #expect(published.count == 1)
         }
     }
+}
+
+@Test
+func offlineBundleUsesDestinationMarkersForRootsAndDependencies() async throws {
+    try await ProjectFixture.withFixture { fixture in
+        try await fixture.addConditionalDependency()
+        let requirements = FilePath(fixture.project).appending("requirements.txt")
+        try await "conditional; sys_platform == 'ios'".write(toFileAt: requirements)
+
+        for (platform, system) in [("ios", "iOS"), ("linux", "Linux")] {
+            let archive = fixture.root.appending(platform + ".zip")
+            try await fixture.runtime.bundle(
+                project: fixture.project,
+                targetEnvironment: [
+                    "os_name": "posix",
+                    "sys_platform": platform,
+                    "platform_system": system,
+                    "platform_machine": "arm64",
+                    "platform_release": "1",
+                    "platform_version": "1",
+                ],
+                to: archive.string,
+            )
+            let session = try await fixture.runtime.session(packages: [.archive(archive.string)])
+            try await withSession(session) { session in
+                _ = try await session.evaluate("""
+                from importlib.util import find_spec
+                included = find_spec("conditional") is not None and find_spec("sampleleaf") is not None
+                """)
+                #expect(try await session.get("included", as: Bool.self) == (platform == "ios"))
+            }
+        }
+    }
+}
+
+private func buildProjectArchive(in fixture: ProjectFixture) async throws -> FilePath {
+    let archive = fixture.root.appending("packages.zip")
+
+    func buildArchive() async throws {
+        try await fixture.runtime.bundle(
+            project: fixture.project,
+            module: ProjectFixture.projectModule,
+            to: archive.string,
+        )
+    }
+
+    try await buildArchive()
+    let initial = try await FileSystem.shared.info(forFileAt: archive)
+
+    try await buildArchive()
+    let repeated = try await FileSystem.shared.info(forFileAt: archive)
+    #expect(initial?.lastDataModificationTime == repeated?.lastDataModificationTime)
+
+    return archive
 }
 
 private func checkBundledProject(in session: Python::Session) async throws {
@@ -652,6 +688,8 @@ private func checkBundledProject(in session: Python::Session) async throws {
     assert version("sampledep") == "2.0"
     assert "sampledep" in packages_distributions()
     assert any(str(path).endswith("__init__.py") for path in distribution_files("sampledep"))
+    from pathlib import Path
+    assert Path(__file__).with_name("message.txt").read_text() == "embedded resource"
     assert "def answer" in inspect.getsource(answer)
     assert "helpers" in {name for _, name, _ in pkgutil.iter_modules(__path__)}
     tempfile.tempdir = resources_directory
