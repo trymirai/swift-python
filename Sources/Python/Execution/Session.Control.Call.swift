@@ -16,6 +16,7 @@ extension Session.Control {
 
         private let operation: @Sendable () async throws -> Reply
         private let context: Context?
+        private let executor: any TaskExecutor
 
         private let state: Mutex<State>
 
@@ -24,18 +25,20 @@ extension Session.Control {
         init(
             _ operation: @escaping @Sendable () async throws -> Reply,
             context: Context? = nil,
+            executor: any TaskExecutor = globalConcurrentExecutor,
         ) throws {
             self.pipe = try Pipe()
 
             self.operation = operation
             self.context = context
+            self.executor = executor
             self.state = .init(State(streams: context?.streams))
         }
 
         func run() async {
             await withTaskCancellationHandler {
                 await withDiscardingTaskGroup { group in
-                    group.addTask { await self.invoke() }
+                    group.addTask(executorPreference: executor) { await self.invoke() }
 
                     await waitForCompletion()
                     cancel()

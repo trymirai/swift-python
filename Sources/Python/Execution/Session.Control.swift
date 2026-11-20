@@ -106,11 +106,15 @@ extension Session.Control {
             )
         }
 
-        guard let deadline else {
-            return try await perform(on: session)
-        }
-        return try await withDeadline(deadline) {
-            try await perform(on: session)
+        // Keep callback dispatch, delegate calls and deadlines runnable while a Swift
+        // callback occupies its worker. Interpreter work stays on the session's executor.
+        return try await withTaskExecutorPreference(globalConcurrentExecutor, isolation: session) {
+            guard let deadline else {
+                return try await perform(on: session)
+            }
+            return try await withDeadline(deadline) {
+                try await perform(on: session)
+            }
         }
     }
 

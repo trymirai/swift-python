@@ -3,6 +3,8 @@
 //
 
 import _NIOFileSystem
+private import NIOCore
+private import NIOPosix
 import Python
 import Synchronization
 import SystemPackage
@@ -50,7 +52,13 @@ private enum CallbackAccess {
     @PythonFunction("read_text")
     static func readText(_ path: AccessPath) async throws -> String {
         await Task.yield()
-        return try path.readText()
+        return try await path.readText()
+    }
+
+    @PythonFunction("read_text_sync")
+    static func readTextSynchronously(_ path: AccessPath) async throws -> String {
+        await Task.yield()
+        return try path.readTextSynchronously()
     }
 
     @PythonFunction
@@ -160,7 +168,10 @@ private final class AccessCounter: Sendable {
 @PythonImportedClass(module: "pathlib", name: "Path")
 private struct AccessPath {
     @PythonFunction("read_text")
-    func readText() throws -> String
+    func readText() async throws -> String
+
+    @PythonFunction("read_text")
+    func readTextSynchronously() throws -> String
 }
 
 // MARK: - AccessRunner
@@ -311,11 +322,16 @@ func nativeCallbackAccessUsesTheFileDelegate(allowed: Bool) async throws {
         import asyncio
         from callback_access import read_text
         from pathlib import Path
+        loop = asyncio.get_running_loop()
+        class CallbackPath(Path):
+            def read_text(self):
+                assert asyncio.get_running_loop() is loop
+                return super().read_text()
         limit = asyncio.Semaphore(3)
         async def read_one():
             async with limit:
                 try:
-                    return await read_text(Path(filename))
+                    return await read_text(CallbackPath(filename))
                 except PermissionError:
                     return "denied"
         values = await asyncio.gather(*(read_one() for _ in range(128)))
@@ -326,6 +342,100 @@ func nativeCallbackAccessUsesTheFileDelegate(allowed: Bool) async throws {
         #expect(requests.contains { $0.path == file && $0.scope as? String == "foreign callback" })
         #expect(requests.filter { $0.path == file }.count == 128)
     }
+}
+
+// MARK: - SerialCallerExecutor
+
+private final class SerialCallerExecutor: TaskExecutor {
+    private let loop: any EventLoop
+
+    init(_ loop: any EventLoop) {
+        self.loop = loop
+    }
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let job = UnownedJob(job)
+        let executor = unsafe asUnownedTaskExecutor()
+        loop.execute {
+            unsafe job.runSynchronously(on: executor)
+        }
+    }
+}
+
+private func evaluateWithSerialCaller(
+    _ operation: @escaping @Sendable () async throws -> Python::Execution,
+) async throws -> Python::Execution {
+    try await MultiThreadedEventLoopGroup.withEventLoopGroup(numberOfThreads: 2) { group in
+        let caller = SerialCallerExecutor(group.next())
+        let pending = Task(executorPreference: caller, operation: operation)
+        // The second loop can signal interruption even when the caller's thread is blocked.
+        let watchdog = group.next().scheduleTask(in: .seconds(10)) { pending.cancel() }
+        defer { watchdog.cancel() }
+        return try await withTaskCancellationHandler {
+            try await pending.value
+        } onCancel: {
+            pending.cancel()
+        }
+    }
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: [true, false])
+func synchronousImportedFileAccessFinishesWithASerialCaller(allowed: Bool) async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appending("serial.txt")
+        try await "contents".write(toFileAt: file)
+        let delegate = CallbackAccessDelegate(allowed: allowed)
+        let session = try await Python::Runtime().session(
+            modules: [CallbackAccess.self],
+            delegate: delegate,
+        )
+        defer { await session.close() }
+        try await session.set(file.string, forKey: "filename")
+        try await session.set(allowed, forKey: "allowed")
+        let result = try await evaluateWithSerialCaller {
+            try await session.evaluate("""
+            from callback_access import read_text_sync
+            from pathlib import Path
+            try:
+                contents = await read_text_sync(Path(filename))
+            except PermissionError:
+                assert not allowed
+            else:
+                assert allowed and contents == 'contents'
+            """, scope: "serial caller")
+        }
+        #expect(result.end == .finished)
+        let requests = await delegate.requests.filter { $0.path == file }
+        #expect(requests.count == 1)
+        #expect(requests.first?.scope as? String == "serial caller")
+        #expect(try await session.evaluate("6 * 7").output.stdout == "42\n")
+    }
+}
+
+@Test(.timeLimit(.minutes(1)))
+func synchronousImportedMethodsCanReenterAsyncSwiftExports() async throws {
+    let session = try await Python::Runtime().session(modules: [CallbackAccess.self])
+    defer { await session.close() }
+    try await session.initialize()
+    let result = try await evaluateWithSerialCaller {
+        try await session.evaluate("""
+        import asyncio
+        from callback_access import spin
+
+        returned = []
+        class Runner:
+            def __init__(self, depth):
+                self.depth = depth
+            def spin(self):
+                if self.depth:
+                    asyncio.run(spin(Runner(self.depth - 1)))
+                returned.append(self.depth)
+
+        await spin(Runner(3))
+        assert returned == [0, 1, 2, 3]
+        """)
+    }
+    #expect(result.end == .finished)
 }
 
 @Test(.timeLimit(.minutes(1)), arguments: [false, true])

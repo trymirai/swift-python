@@ -91,6 +91,7 @@ let package = Package(
             dependencies: [
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "_NIOFileSystem", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
 
                 .byName(name: "libcpython"),
@@ -104,6 +105,8 @@ let package = Package(
             dependencies: [
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "_NIOFileSystem", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
 
                 .byName(name: "Python"),
                 .byName(name: "libpythontestsupport"),

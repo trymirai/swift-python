@@ -65,11 +65,11 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         case .call, .start:
             return try invokeExport(command, request: request, in: attachment)
         case .poll:
-            let callback = try execution(in: storage).export(callID())
+            let callback = try activeExecution().control.export(callID())
             return try poll(callback, in: attachment)
         case .take:
             let id = try callID()
-            let result = try execution(in: storage).takeExport(id)
+            let result = try activeExecution().control.takeExport(id)
             return try Object(encoding: result, in: attachment)
         case .cancel:
             let id = try callID()
@@ -132,11 +132,11 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         return list
     }
 
-    private func execution(in storage: Interpreter.Storage) throws -> Session.Control {
-        guard let execution = storage.execution else {
+    private func activeExecution() throws -> (scope: PThread.Scope, control: Session.Control) {
+        guard let scope = PThread.Scope.current, let execution = scope.execution else {
             throw Runtime.Failure("Swift callbacks require an active Python execution.")
         }
-        return execution
+        return (scope, execution)
     }
 
     @_lifetime(borrow attachment)
@@ -145,10 +145,11 @@ extension Interpreter.ExportDispatcher: Object.Callable {
         in attachment: borrowing PThread.Attachment,
     ) throws -> Object {
         let storage = attachment.storage
-        let execution = try execution(in: storage)
+        let (scope, execution) = try activeExecution()
         let call = try Session.Control.ExportCall(
             operation,
             context: Context(storage: storage),
+            executor: scope.executorForCallbacks(),
         )
         let id = storage.allocateCallID()
 

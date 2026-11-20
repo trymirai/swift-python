@@ -14,6 +14,8 @@ extension PThread {
         @unsafe
         private let task: UnsafeCurrentTask?
 
+        private var callbackExecutor: Interpreter.CallbackExecutor?
+
         var constructedWrappers: [Reference] = []
 
         var streams: Session.Stream.Descriptors?
@@ -40,6 +42,17 @@ extension PThread {
 
         var matchesTask: Bool {
             unsafe withUnsafeCurrentTask { unsafe $0 == task }
+        }
+
+        // A synchronous call back into Python gets its own attachment. Swift callbacks
+        // started there can run while the outer attachment's workers wait for them.
+        func executorForCallbacks() throws -> Interpreter.CallbackExecutor {
+            if let callbackExecutor {
+                return callbackExecutor
+            }
+            let executor = try Interpreter.CallbackExecutor()
+            callbackExecutor = executor
+            return executor
         }
 
         // Register only while attached: the GIL keeps the thread-state pointers alive.

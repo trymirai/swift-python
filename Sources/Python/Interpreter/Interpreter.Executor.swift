@@ -17,10 +17,10 @@ extension Interpreter {
         }
 
         private let queue: Mutex<Queue> = .init(Queue())
-        private let event: Event
+        private let event: PThread.Event
 
         init() throws {
-            self.event = try Event()
+            self.event = try PThread.Event()
             let context = unsafe Unmanaged.passRetained(self).toOpaque()
             let status = unsafe CPython_StartThread({ context in
                 unsafe Interpreter.Executor.enter(context)
@@ -87,43 +87,6 @@ extension Interpreter {
                 }
                 jobs.removeAll(keepingCapacity: true)
             }
-        }
-    }
-}
-
-// MARK: - Interpreter.Executor.Event
-
-private extension Interpreter.Executor {
-    // The C API synchronizes event state. The thread check reads thread-local storage.
-    @safe
-    struct Event: ~Copyable, @unchecked Sendable {
-        private let pointer: OpaquePointer
-
-        init() throws {
-            guard let pointer = unsafe CPython_ThreadEvent_New() else {
-                throw Runtime.Failure("Unable to allocate a Python thread event.")
-            }
-            unsafe self.pointer = pointer
-        }
-
-        deinit {
-            unsafe CPython_ThreadEvent_Free(pointer)
-        }
-
-        var isCurrent: Bool {
-            unsafe CPython_ThreadEvent_IsCurrent(pointer)
-        }
-
-        borrowing func bind() {
-            unsafe CPython_ThreadEvent_Bind(pointer)
-        }
-
-        borrowing func signal() {
-            unsafe CPython_ThreadEvent_Signal(pointer)
-        }
-
-        borrowing func wait() {
-            unsafe CPython_ThreadEvent_Wait(pointer)
         }
     }
 }
